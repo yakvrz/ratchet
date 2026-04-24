@@ -1,0 +1,13 @@
+[ratchet]
+adapter = "ratchet_adapter:adapter"
+evals = "evals.quick.jsonl"
+out = "../../results/public-docs-sample/quick"
+env_file = "../../.env"
+dev_budget = 4
+holdout_top_k = 2
+harnesser_model = "gpt-5.4"
+harnesser_reasoning = "medium"
+harnesser_enabled = false
+max_case_retries = 2
+case_timeout_s = 30
+fail_fast = false
