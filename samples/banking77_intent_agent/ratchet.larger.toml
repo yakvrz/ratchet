@@ -1,10 +1,10 @@
 [ratchet]
 adapter = "ratchet_adapter:adapter"
-evals = "evals.sanity.jsonl"
-out = "results/sanity"
+evals = "evals.larger.jsonl"
+out = "results/larger"
 env_file = "../../.env"
-dev_budget = 8
-holdout_budget = 4
+dev_budget = 12
+holdout_budget = 5
 optimizer_model = "gemini-3-flash-preview"
 optimizer_reasoning = "medium"
 samples_per_case = 1

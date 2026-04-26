@@ -29,6 +29,7 @@ RUN_CONFIG_KEYS = {
     "optimizer_model",
     "optimizer_reasoning",
     "samples_per_case",
+    "case_concurrency",
     "max_case_retries",
     "case_timeout_s",
     "fail_fast",
@@ -58,6 +59,7 @@ class RatchetRunConfig:
     optimizer_model: str = "gpt-5.4"
     optimizer_reasoning: str = "medium"
     samples_per_case: int = 1
+    case_concurrency: int = 1
     max_case_retries: int = 2
     case_timeout_s: int = 180
     fail_fast: bool = False
@@ -81,6 +83,7 @@ class RatchetRunConfig:
             "optimizer_model": self.optimizer_model,
             "optimizer_reasoning": self.optimizer_reasoning,
             "samples_per_case": self.samples_per_case,
+            "case_concurrency": self.case_concurrency,
             "max_case_retries": self.max_case_retries,
             "case_timeout_s": self.case_timeout_s,
             "fail_fast": self.fail_fast,
@@ -146,6 +149,7 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         optimizer_model=str(payload.get("optimizer_model", "gpt-5.4")),
         optimizer_reasoning=str(payload.get("optimizer_reasoning", "medium")),
         samples_per_case=int(payload.get("samples_per_case", 1)),
+        case_concurrency=int(payload.get("case_concurrency", 1)),
         max_case_retries=int(payload.get("max_case_retries", 2)),
         case_timeout_s=int(payload.get("case_timeout_s", 180)),
         fail_fast=_as_bool(payload, "fail_fast", False),
@@ -189,6 +193,7 @@ def resolve_run_config(
     optimizer_model: str | None,
     optimizer_reasoning: str | None,
     samples_per_case: int | None,
+    case_concurrency: int | None,
     max_case_retries: int | None,
     case_timeout_s: int | None,
     fail_fast: bool | None,
@@ -228,6 +233,7 @@ def resolve_run_config(
         optimizer_model=optimizer_model or base.optimizer_model,
         optimizer_reasoning=optimizer_reasoning or base.optimizer_reasoning,
         samples_per_case=samples_per_case if samples_per_case is not None else base.samples_per_case,
+        case_concurrency=case_concurrency if case_concurrency is not None else base.case_concurrency,
         max_case_retries=max_case_retries if max_case_retries is not None else base.max_case_retries,
         case_timeout_s=case_timeout_s if case_timeout_s is not None else base.case_timeout_s,
         fail_fast=fail_fast if fail_fast is not None else base.fail_fast,

@@ -204,6 +204,21 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(recommendation["highest_quality_patch_hash"], "highest")
         self.assertEqual(recommendation["validated_candidate_count"], 2)
         self.assertGreater(recommendation["equivalence_margin"], 0.0)
+        self.assertEqual(recommendation["recommendation_policy"], "lowest_cost_within_quality_margin")
+        self.assertTrue(recommendation["frontier_variants"])
+
+    def test_recommendation_highest_correctness_policy_picks_best_score(self) -> None:
+        highest = make_summary("highest", [1.0] * 24, [0.010] * 24, [900] * 24, [1.0] * 24)
+        cheaper = make_summary("cheaper", [1.0] * 23 + [0.0], [0.002] * 24, [120] * 24, [1.0] * 24)
+        selected, recommendation = select_recommended_patch(
+            [highest, cheaper],
+            OptimizationObjective(mode="correctness", tie_breakers=["highest_correctness"]),
+        )
+        self.assertEqual(selected.patch_hash, "highest")
+        self.assertEqual(recommendation["recommendation_policy"], "highest_correctness")
+        variants = {item["role"]: item for item in recommendation["frontier_variants"]}
+        self.assertEqual(variants["highest_quality"]["patch_hash"], "highest")
+        self.assertEqual(variants["lowest_cost_within_margin"]["patch_hash"], "cheaper")
 
     def test_recommendation_keeps_highest_quality_when_no_equivalent_alternative(self) -> None:
         highest = make_summary("highest", [1.0] * 24, [0.010] * 24, [900] * 24, [1.0] * 24)

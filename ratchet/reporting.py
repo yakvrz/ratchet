@@ -221,6 +221,11 @@ class RatchetReporter:
             f"Outcome status: `{result.outcome_analysis['status']}`",
             f"Outcome summary: {result.outcome_analysis['summary']}",
             f"Recommendation: {result.frontier_recommendation.get('reason', result.selection_reason)}",
+            f"Recommendation policy: `{result.frontier_recommendation.get('recommendation_policy', 'n/a')}`",
+            "",
+            "## Validated Frontier",
+            "",
+            *self._frontier_variant_rows(result),
             "",
             "## Baseline vs Selected Holdout",
             "",
@@ -269,6 +274,10 @@ class RatchetReporter:
             "## Simplification",
             "",
             *self._simplification_rows(result),
+            "",
+            "## Few-Shot Compression",
+            "",
+            *self._few_shot_compression_rows(result),
             "",
             "## Runtime Reliability",
             "",
@@ -444,6 +453,72 @@ class RatchetReporter:
         return rows
 
     @staticmethod
+    def _frontier_variant_rows(result: RatchetResult) -> list[str]:
+        variants = result.frontier_recommendation.get("frontier_variants") or []
+        if not variants:
+            if result.holdout_patches:
+                variants = [
+                    {
+                        "role": "validated_candidate",
+                        "patch_hash": item.patch_hash,
+                        "pass_count": item.pass_count,
+                        "case_count": item.case_count,
+                        "mean_score": item.mean_score,
+                        "mean_cost_usd": item.mean_cost_usd,
+                        "mean_total_tokens": item.mean_total_tokens,
+                        "median_latency_s": item.median_latency_s,
+                        "operation_count": item.operation_count,
+                        "operations": [
+                            {
+                                "op": operation.op,
+                                "target": operation.target,
+                                "value_summary": RatchetReporter._format_value(operation.value),
+                            }
+                            for operation in item.patch.operations
+                        ],
+                    }
+                    for item in result.holdout_patches
+                ]
+            else:
+                return ["No validated frontier candidates were available."]
+        rows = [
+            "| Role | Patch | Holdout | Score | Cost | Tokens | Latency | Ops |",
+            "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
+        ]
+        selected_hash = result.selected_patch_hash
+        for item in variants:
+            role = str(item.get("role", "candidate"))
+            if item.get("patch_hash") == selected_hash:
+                role = f"{role} (selected)"
+            rows.append(
+                "| "
+                f"{role} | "
+                f"`{item.get('patch_hash')}` | "
+                f"{int(item.get('pass_count') or 0)}/{int(item.get('case_count') or 0)} | "
+                f"{float(item.get('mean_score') or 0.0):.3f} | "
+                f"${float(item.get('mean_cost_usd') or 0.0):.6f} | "
+                f"{float(item.get('mean_total_tokens') or 0.0):.1f} | "
+                f"{float(item.get('median_latency_s') or 0.0):.2f}s | "
+                f"{RatchetReporter._format_frontier_ops(item.get('operations') or [])} |"
+            )
+        return rows
+
+    @staticmethod
+    def _format_frontier_ops(operations: list[dict[str, Any]]) -> str:
+        if not operations:
+            return "baseline"
+        rows = []
+        for operation in operations:
+            op = operation.get("op")
+            target = operation.get("target")
+            value = operation.get("value_summary")
+            if op == "add_few_shot" and isinstance(value, list):
+                rows.append(f"{op}:{target}({len(value)} examples)")
+            else:
+                rows.append(f"{op}:{target}")
+        return ", ".join(rows)
+
+    @staticmethod
     def _runtime_reliability_rows(result: RatchetResult) -> list[str]:
         findings = [
             item
@@ -456,7 +531,7 @@ class RatchetReporter:
         for item in findings:
             rows.append(
                 "- "
-                f"`{item.get('patch_hash')}`: {item.get('reason')} "
+                f"`{item.get('patch_hash')}` ({item.get('diagnostic_class', 'runtime_finding')}): {item.get('reason')} "
                 f"fixed_invalid={item.get('fixed_invalid_output_case_ids', [])}, "
                 f"low_token_fixed={item.get('low_token_fixed_case_ids', [])}, "
                 f"finish_reasons={json.dumps(item.get('finish_reasons_by_case', {}), sort_keys=True)}"
@@ -469,6 +544,44 @@ class RatchetReporter:
                     f"passed={item.get('passed')}; {item.get('reason')}"
                 )
         return rows
+
+    @staticmethod
+    def _few_shot_compression_rows(result: RatchetResult) -> list[str]:
+        rows = [
+            row
+            for row in result.proposals
+            if row.get("transform_family") == "targeted_few_shot" and row.get("metrics")
+        ]
+        if not rows:
+            return ["No evaluated few-shot variants were recorded."]
+        table = [
+            "| Patch | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
+            "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
+        ]
+        for row in rows[:12]:
+            parameters = row.get("transform_parameters") or {}
+            materialization = row.get("materialization") or {}
+            example_count = int(parameters.get("few_shot_example_count") or len(materialization.get("source_case_ids") or []) or 0)
+            comparison = row.get("comparison_to_parent") or {}
+            token_delta = float(comparison.get("token_delta") or 0.0)
+            score_delta = float(comparison.get("score_delta") or 0.0)
+            token_per_example = token_delta / example_count if example_count > 0 else 0.0
+            source_ids = materialization.get("source_case_ids") or parameters.get("source_case_ids") or []
+            status = "accepted" if row.get("accepted") else "rejected"
+            table.append(
+                "| "
+                f"`{row.get('patch_hash')}` | "
+                f"{status} | "
+                f"{example_count} | "
+                f"{parameters.get('selection_strategy', 'unspecified')} | "
+                f"{score_delta:+.3f} | "
+                f"{token_delta:+.1f} | "
+                f"{token_per_example:+.1f} | "
+                f"{', '.join(str(item) for item in source_ids[:4])} |"
+            )
+        if len(rows) > 12:
+            table.append(f"- {len(rows) - 12} additional few-shot variants omitted from this table.")
+        return table
 
     @staticmethod
     def _simplification_rows(result: RatchetResult) -> list[str]:

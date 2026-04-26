@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import contextlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -71,6 +72,7 @@ SEARCH_FRONTIER_WIDTH = 2
 PROPOSAL_RETRY_BUDGET = 1
 FINALIST_CONFIRMATION_SAMPLES = 2
 FRONTIER_PARENT_STALL_LIMIT = 2
+MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 2
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -89,7 +91,9 @@ def case_timeout(timeout_s: int) -> Iterable[None]:
         yield
         return
     if threading.current_thread() is not threading.main_thread():
-        raise RuntimeError("case_timeout with SIGALRM requires the main thread; set case_timeout_s=0 in worker threads.")
+        # SIGALRM is process-wide and cannot safely enforce per-case deadlines in worker threads.
+        yield
+        return
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def _handle_timeout(signum: int, frame: Any) -> None:
@@ -116,6 +120,7 @@ class RatchetOptimizer:
         optimizer_model: str = "gpt-5.4",
         optimizer_reasoning: str = "medium",
         samples_per_case: int = 1,
+        case_concurrency: int = 1,
         max_case_retries: int = 2,
         case_timeout_s: int = 180,
         fail_fast: bool = False,
@@ -143,6 +148,9 @@ class RatchetOptimizer:
         if samples_per_case <= 0:
             raise ValueError("samples_per_case must be positive.")
         self.samples_per_case = samples_per_case
+        if case_concurrency <= 0:
+            raise ValueError("case_concurrency must be positive.")
+        self.case_concurrency = case_concurrency
         self.max_case_retries = max_case_retries
         self.case_timeout_s = case_timeout_s
         self.fail_fast = fail_fast
@@ -158,6 +166,9 @@ class RatchetOptimizer:
         self.progress_callback = progress_callback
         self._progress_started_at: float | None = None
         self._progress_path: Path | None = None
+        self._progress_lock = threading.Lock()
+        self._store_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
         self.optimizer_call_diagnostics: list[dict[str, Any]] = []
 
     def run(self, cases: tuple[EvalCase, ...]) -> RatchetResult:
@@ -178,6 +189,7 @@ class RatchetOptimizer:
             proposal_example_count=len(proposal_example_bank.examples),
             dev_budget=self.dev_budget,
             holdout_budget=self.holdout_budget,
+            case_concurrency=self.case_concurrency,
             objective=self.objective.mode,
         )
 
@@ -758,7 +770,7 @@ class RatchetOptimizer:
         known_by_hash = {summary.patch_hash: summary for summary in [baseline_dev, *accepted_dev_patches]}
         augmented_by_hash = {summary.patch_hash: summary for summary in finalist_dev_patches}
         for parent in list(finalist_dev_patches):
-            for variant in _simplification_variants(parent.patch):
+            for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]:
                 digest = patch_hash(variant)
                 if digest == parent.patch_hash:
                     continue
@@ -773,17 +785,29 @@ class RatchetOptimizer:
                         patch_hash=digest,
                         simplification=variant.metadata.get("simplification"),
                     )
-                    summary = self.evaluate_patch(variant, dev_cases)
+                    summary, rejection_reason, stage_rows = self._evaluate_simplification_variant(
+                        patch=variant,
+                        parent=parent,
+                        baseline=baseline_dev,
+                        dev_cases=dev_cases,
+                    )
                     evaluated_patch_hashes.add(digest)
                     known_by_hash[digest] = summary
-                comparison_to_baseline = compare_summaries(baseline_dev, summary)
-                comparison_to_parent = compare_summaries(parent, summary)
-                rejection_reason = patch_rejection_reason(
-                    baseline=baseline_dev,
-                    reference=baseline_dev,
-                    patch_summary=summary,
-                    objective=self.objective,
-                )
+                else:
+                    rejection_reason = None
+                    stage_rows = []
+                summary_cases = tuple(evaluation.case for evaluation in summary.evaluations)
+                comparable_baseline = _summary_for_cases(baseline_dev, summary_cases) or baseline_dev
+                comparable_parent = _summary_for_cases(parent, summary_cases) or parent
+                comparison_to_baseline = compare_summaries(comparable_baseline, summary)
+                comparison_to_parent = compare_summaries(comparable_parent, summary)
+                if rejection_reason is None:
+                    rejection_reason = patch_rejection_reason(
+                        baseline=baseline_dev,
+                        reference=baseline_dev,
+                        patch_summary=summary,
+                        objective=self.objective,
+                    )
                 accepted = rejection_reason is None
                 row = {
                     "type": "simplification_evaluation",
@@ -794,6 +818,7 @@ class RatchetOptimizer:
                     "reused_existing_summary": reused,
                     "accepted": accepted,
                     "rejection_reason": rejection_reason,
+                    "evaluation_stages": stage_rows,
                     "metrics": summary.to_dict(),
                     "comparison_to_baseline": comparison_to_baseline.to_dict(),
                     "comparison_to_parent": comparison_to_parent.to_dict(),
@@ -817,6 +842,61 @@ class RatchetOptimizer:
             augmented_by_hash.values(),
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
+
+    def _evaluate_simplification_variant(
+        self,
+        *,
+        patch: AgentPatch,
+        parent: PatchSummary,
+        baseline: PatchSummary,
+        dev_cases: tuple[EvalCase, ...],
+    ) -> tuple[PatchSummary, str | None, list[dict[str, Any]]]:
+        stages = self._progressive_eval_stages(parent, dev_cases)
+        smoke_name, smoke_cases = stages[0]
+        parent_smoke = _summary_for_cases(parent, smoke_cases) or self.evaluate_patch(parent.patch, smoke_cases)
+        candidate_smoke = self.evaluate_patch(patch, smoke_cases)
+        smoke_rejection = _smoke_rejection_reason(parent_smoke, candidate_smoke)
+        smoke_comparison = compare_summaries(parent_smoke, candidate_smoke)
+        smoke_flip_summary = behavior_flip_summary(parent_smoke, candidate_smoke)
+        stage_rows = [
+            {
+                "stage": smoke_name,
+                "case_ids": [case.id for case in smoke_cases],
+                "case_count": len(smoke_cases),
+                "patch_hash": candidate_smoke.patch_hash,
+                "metrics": candidate_smoke.to_dict(),
+                "comparison_to_parent": smoke_comparison.to_dict(),
+                "behavior_flip_summary": smoke_flip_summary,
+                "rejection_reason": smoke_rejection,
+                "passed": smoke_rejection is None,
+            }
+        ]
+        if smoke_rejection is not None:
+            return candidate_smoke, f"simplification smoke gate rejected variant: {smoke_rejection}", stage_rows
+        candidate_full = self.evaluate_patch(patch, dev_cases)
+        baseline_full = _summary_for_cases(baseline, dev_cases) or self.evaluate_patch(baseline.patch, dev_cases)
+        full_comparison = compare_summaries(baseline_full, candidate_full)
+        full_flip_summary = behavior_flip_summary(baseline_full, candidate_full)
+        full_rejection = patch_rejection_reason(
+            baseline=baseline_full,
+            reference=baseline_full,
+            patch_summary=candidate_full,
+            objective=self.objective,
+        )
+        stage_rows.append(
+            {
+                "stage": "full_dev",
+                "case_ids": [case.id for case in dev_cases],
+                "case_count": len(dev_cases),
+                "patch_hash": candidate_full.patch_hash,
+                "metrics": candidate_full.to_dict(),
+                "comparison_to_baseline": full_comparison.to_dict(),
+                "behavior_flip_summary": full_flip_summary,
+                "rejection_reason": full_rejection,
+                "passed": full_rejection is None,
+            }
+        )
+        return candidate_full, full_rejection, stage_rows
 
     def _propose_and_evaluate_parent(
         self,
@@ -1023,7 +1103,7 @@ class RatchetOptimizer:
             )
             if accepted:
                 accepted_rows.append((candidate, summary, comparison))
-        return accepted_rows, evaluations_used
+        return _prefer_simple_few_shot_strategy(accepted_rows), evaluations_used
 
     def _evaluate_candidate_progressively(
         self,
@@ -1039,8 +1119,8 @@ class RatchetOptimizer:
         final_flip_summary: dict[str, Any] | None = None
         final_rejection_reason: str | None = None
         for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
-            reference_summary = reference if _same_cases(reference, stage_cases) else self.evaluate_patch(reference.patch, stage_cases)
-            baseline_summary = baseline if _same_cases(baseline, stage_cases) else self.evaluate_patch(baseline.patch, stage_cases)
+            reference_summary = _summary_for_cases(reference, stage_cases) or self.evaluate_patch(reference.patch, stage_cases)
+            baseline_summary = _summary_for_cases(baseline, stage_cases) or self.evaluate_patch(baseline.patch, stage_cases)
             candidate_summary = self.evaluate_patch(patch, stage_cases)
             comparison = compare_summaries(reference_summary, candidate_summary)
             flip_summary = behavior_flip_summary(reference_summary, candidate_summary)
@@ -1124,16 +1204,20 @@ class RatchetOptimizer:
         sample_indices: Iterable[int] | None = None,
     ) -> PatchSummary:
         digest = patch_hash(patch)
-        evaluations: list[CaseEvaluation] = []
         indices = tuple(sample_indices) if sample_indices is not None else tuple(range(self.samples_per_case))
         if not indices:
             raise ValueError("sample_indices must not be empty.")
+        ordered: list[CaseEvaluation | None] = [None] * (len(cases) * len(indices))
+        uncached: list[tuple[int, EvalCase, int]] = []
+        order = 0
         for case in cases:
             for sample_index in indices:
-                cached = self.store.get(digest, case, sample_index=sample_index)
+                with self._store_lock:
+                    cached = self.store.get(digest, case, sample_index=sample_index)
                 if cached is not None:
-                    self.stats.cache_hits += 1
-                    evaluations.append(cached)
+                    with self._stats_lock:
+                        self.stats.cache_hits += 1
+                    ordered[order] = cached
                     self._emit_progress(
                         "case_cache_hit",
                         patch_hash=digest,
@@ -1141,38 +1225,102 @@ class RatchetOptimizer:
                         split=case.split,
                         sample_index=sample_index,
                     )
-                    continue
-                self._emit_progress(
-                    "case_started",
-                    patch_hash=digest,
-                    case_id=case.id,
-                    split=case.split,
-                    sample_index=sample_index,
-                )
-                evaluation = self._execute_case(patch, case, sample_index=sample_index)
-                self.store.put(digest, patch, evaluation)
-                self._emit_progress(
-                    "case_completed",
-                    patch_hash=digest,
-                    case_id=case.id,
-                    split=case.split,
-                    sample_index=sample_index,
-                    passed=evaluation.grade.passed,
-                    score=evaluation.grade.score,
-                    error=evaluation.record.metrics.error,
-                    latency_s=evaluation.record.metrics.latency_s,
-                    cost_usd=evaluation.record.metrics.cost_usd,
-                )
-                if self.fail_fast and evaluation.record.metrics.error:
-                    raise RuntimeError(
-                        f"Fail-fast stopping after case {case.id}: {evaluation.record.metrics.error}"
+                else:
+                    uncached.append((order, case, sample_index))
+                order += 1
+        if uncached:
+            effective_concurrency = 1 if self.fail_fast else min(self.case_concurrency, len(uncached))
+            self._emit_progress(
+                "case_batch_started",
+                patch_hash=digest,
+                split=cases[0].split,
+                case_count=len(cases),
+                sample_count=len(indices),
+                fresh_count=len(uncached),
+                concurrency=effective_concurrency,
+            )
+            if effective_concurrency == 1:
+                for item_order, case, sample_index in uncached:
+                    ordered[item_order] = self._run_uncached_case(
+                        digest,
+                        patch,
+                        case,
+                        sample_index=sample_index,
                     )
-                evaluations.append(evaluation)
+            else:
+                futures: dict[Future[CaseEvaluation], tuple[int, EvalCase, int]] = {}
+                with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+                    for item_order, case, sample_index in uncached:
+                        self._emit_progress(
+                            "case_started",
+                            patch_hash=digest,
+                            case_id=case.id,
+                            split=case.split,
+                            sample_index=sample_index,
+                        )
+                        future = executor.submit(self._execute_case, patch, case, sample_index=sample_index)
+                        futures[future] = (item_order, case, sample_index)
+                    for future in as_completed(futures):
+                        item_order, case, sample_index = futures[future]
+                        evaluation = future.result()
+                        with self._store_lock:
+                            self.store.put(digest, patch, evaluation)
+                        self._emit_case_completed(digest, evaluation)
+                        ordered[item_order] = evaluation
+            self._emit_progress(
+                "case_batch_completed",
+                patch_hash=digest,
+                split=cases[0].split,
+                fresh_count=len(uncached),
+                concurrency=effective_concurrency,
+            )
+        evaluations = [evaluation for evaluation in ordered if evaluation is not None]
+        if len(evaluations) != len(ordered):
+            raise RuntimeError("internal evaluation error: missing case evaluation result")
         return PatchSummary(
             patch_hash=digest,
             patch=patch,
             split=cases[0].split,
             evaluations=evaluations,
+        )
+
+    def _run_uncached_case(
+        self,
+        digest: str,
+        patch: AgentPatch,
+        case: EvalCase,
+        *,
+        sample_index: int,
+    ) -> CaseEvaluation:
+        self._emit_progress(
+            "case_started",
+            patch_hash=digest,
+            case_id=case.id,
+            split=case.split,
+            sample_index=sample_index,
+        )
+        evaluation = self._execute_case(patch, case, sample_index=sample_index)
+        with self._store_lock:
+            self.store.put(digest, patch, evaluation)
+        self._emit_case_completed(digest, evaluation)
+        if self.fail_fast and evaluation.record.metrics.error:
+            raise RuntimeError(
+                f"Fail-fast stopping after case {case.id}: {evaluation.record.metrics.error}"
+            )
+        return evaluation
+
+    def _emit_case_completed(self, digest: str, evaluation: CaseEvaluation) -> None:
+        self._emit_progress(
+            "case_completed",
+            patch_hash=digest,
+            case_id=evaluation.case.id,
+            split=evaluation.case.split,
+            sample_index=evaluation.sample_index,
+            passed=evaluation.grade.passed,
+            score=evaluation.grade.score,
+            error=evaluation.record.metrics.error,
+            latency_s=evaluation.record.metrics.latency_s,
+            cost_usd=evaluation.record.metrics.cost_usd,
         )
 
     def _execute_case(self, patch: AgentPatch, case: EvalCase, *, sample_index: int = 0) -> CaseEvaluation:
@@ -1209,25 +1357,30 @@ class RatchetOptimizer:
                             metadata=diagnostic_metadata,
                         ),
                     )
-                self.stats.fresh_case_evaluations += 1
+                with self._stats_lock:
+                    self.stats.fresh_case_evaluations += 1
                 return CaseEvaluation(case=case, record=record, grade=grade, sample_index=sample_index)
             except Exception as error:
                 last_error = error
                 if attempt < total_attempts:
-                    self.stats.retries += 1
+                    with self._stats_lock:
+                        self.stats.retries += 1
                     continue
 
         assert last_error is not None
         elapsed = time.perf_counter() - started_at
         message = f"{type(last_error).__name__}: {last_error}"
         if isinstance(last_error, TimeoutError):
-            self.stats.timeouts += 1
+            with self._stats_lock:
+                self.stats.timeouts += 1
             labels = ["timeout"]
         elif last_phase == "grade":
-            self.stats.grader_errors += 1
+            with self._stats_lock:
+                self.stats.grader_errors += 1
             labels = ["grader_error"]
         else:
-            self.stats.runtime_errors += 1
+            with self._stats_lock:
+                self.stats.runtime_errors += 1
             labels = ["runtime_error"]
         record = RunRecord(
             output=None,
@@ -1242,7 +1395,8 @@ class RatchetOptimizer:
             diagnostics=DiagnosticTrace(metadata={"phase": last_phase}),
         )
         grade = GradeResult(score=0.0, passed=False, labels=labels, notes=message)
-        self.stats.fresh_case_evaluations += 1
+        with self._stats_lock:
+            self.stats.fresh_case_evaluations += 1
         return CaseEvaluation(case=case, record=record, grade=grade, sample_index=sample_index)
 
     def build_manifest(
@@ -1296,6 +1450,7 @@ class RatchetOptimizer:
             "optimizer_call_diagnostics": optimizer_call_diagnostics,
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "samples_per_case": self.samples_per_case,
+            "case_concurrency": self.case_concurrency,
             "selected_patch_hash": selected_patch_hash,
             "promoted": promoted,
             "progress_path": str(self.out_dir / "progress.jsonl"),
@@ -1320,14 +1475,31 @@ class RatchetOptimizer:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             **fields,
         }
-        if self._progress_path is not None:
-            append_jsonl(self._progress_path, row)
-        if self.progress_callback is not None:
-            self.progress_callback(row)
+        with self._progress_lock:
+            if self._progress_path is not None:
+                append_jsonl(self._progress_path, row)
+            if self.progress_callback is not None:
+                self.progress_callback(row)
 
 
 def _same_cases(summary: PatchSummary, cases: tuple[EvalCase, ...]) -> bool:
     return tuple(summary.grouped_evaluations) == tuple(case.id for case in cases)
+
+
+def _summary_for_cases(summary: PatchSummary, cases: tuple[EvalCase, ...]) -> PatchSummary | None:
+    grouped = summary.grouped_evaluations
+    selected: list[CaseEvaluation] = []
+    for case in cases:
+        evaluations = grouped.get(case.id)
+        if not evaluations:
+            return None
+        selected.extend(evaluations)
+    return PatchSummary(
+        patch_hash=summary.patch_hash,
+        patch=summary.patch,
+        split=cases[0].split,
+        evaluations=selected,
+    )
 
 
 def _ordered_unique(values: Iterable[str]) -> list[str]:
@@ -1405,6 +1577,47 @@ def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:
         if variant.operations:
             unique.setdefault(patch_hash(variant), variant)
     return list(unique.values())
+
+
+def _prefer_simple_few_shot_strategy(
+    accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]],
+) -> list[tuple[CandidateProposal, PatchSummary, Comparison]]:
+    representative_rows = [
+        row
+        for row in accepted_rows
+        if row[0].transform_family == "targeted_few_shot"
+        and str(row[0].transform_parameters.get("selection_strategy") or "").lower() == "representative"
+    ]
+    if not representative_rows:
+        return accepted_rows
+    filtered: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
+    for row in accepted_rows:
+        candidate, summary, _ = row
+        strategy = str(candidate.transform_parameters.get("selection_strategy") or "").lower()
+        if candidate.transform_family != "targeted_few_shot" or strategy != "contrastive":
+            filtered.append(row)
+            continue
+        example_count = _few_shot_example_count(candidate)
+        dominated = any(
+            _few_shot_example_count(rep_candidate) <= example_count
+            and rep_summary.mean_score >= summary.mean_score - 1e-9
+            for rep_candidate, rep_summary, _ in representative_rows
+        )
+        if not dominated:
+            filtered.append(row)
+    return filtered
+
+
+def _few_shot_example_count(candidate: CandidateProposal) -> int:
+    raw = candidate.transform_parameters.get("few_shot_example_count")
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        pass
+    for operation in candidate.patch.operations:
+        if operation.op == "add_few_shot" and isinstance(operation.value, list):
+            return len(operation.value)
+    return 0
 
 
 def _transform_lineage_families(patch_hash_value: str, proposals: list[dict[str, Any]]) -> list[str]:

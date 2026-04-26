@@ -81,7 +81,7 @@ class V2PatchSurfaceTests(unittest.TestCase):
         self.assertNotIn("TransformContextState", ratchet.__all__)
         self.assertNotIn("TransformFamilyState", ratchet.__all__)
 
-    def test_case_timeout_fails_fast_in_worker_thread(self) -> None:
+    def test_case_timeout_is_noop_in_worker_thread(self) -> None:
         errors: list[str] = []
 
         def worker() -> None:
@@ -95,8 +95,7 @@ class V2PatchSurfaceTests(unittest.TestCase):
         thread.start()
         thread.join()
 
-        self.assertEqual(len(errors), 1)
-        self.assertIn("main thread", errors[0])
+        self.assertEqual(errors, [])
 
     def test_surface_generator_derives_targets_from_agent_spec(self) -> None:
         objective = OptimizationObjective(

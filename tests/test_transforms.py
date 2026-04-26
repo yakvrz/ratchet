@@ -176,9 +176,21 @@ class TransformLibraryTests(unittest.TestCase):
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=patch,
         )
+        reference_only = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_parameters={"source_case_ids": ["train-1"]},
+            patch=AgentPatch.empty(),
+        )
+        malformed = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_parameters={"source_case_ids": "train-1"},
+            patch=AgentPatch.empty(),
+        )
 
         self.assertIn("requires transform_parameters.source_case_ids", validate_candidate_transform(missing, surface=surface) or "")
         self.assertIsNone(validate_candidate_transform(valid, surface=surface))
+        self.assertIsNone(validate_candidate_transform(reference_only, surface=surface))
+        self.assertIn("must be a non-empty string array", validate_candidate_transform(malformed, surface=surface) or "")
 
     def test_candidate_validation_rejects_unknown_and_incompatible_family(self) -> None:
         spec = AgentSpec(

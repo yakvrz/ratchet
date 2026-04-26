@@ -327,6 +327,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 optimizer_model=None,
                 optimizer_reasoning=None,
                 samples_per_case=None,
+                case_concurrency=None,
                 max_case_retries=None,
                 case_timeout_s=None,
                 fail_fast=None,

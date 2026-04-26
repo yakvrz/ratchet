@@ -413,23 +413,152 @@ class GatePredicate:
             for summary in candidates
             if best_primary - self.primary_metric(summary) <= margin + 1e-9
         ]
-        selected = sorted(equivalent, key=self.secondary_sort_key)[0]
+        policy = self._recommendation_policy()
+        selected = self._select_by_policy(
+            highest_quality=highest_quality,
+            equivalent=equivalent,
+            candidates=candidates,
+            policy=policy,
+        )
         if selected.patch_hash == highest_quality.patch_hash:
             reason = f"Promoted highest-quality validated patch for {self.mode} objective."
         else:
             reason = (
-                f"Promoted equivalent-primary-axis validated patch with stronger tiebreaker for "
-                f"{self.mode} objective (margin {margin:.4f})."
+                f"Promoted `{policy}` validated patch within primary-axis equivalence margin "
+                f"for {self.mode} objective (margin {margin:.4f})."
             )
+        variants = self._frontier_variants(
+            highest_quality=highest_quality,
+            equivalent=equivalent,
+            candidates=candidates,
+        )
         return selected, {
             "recommended_patch_hash": selected.patch_hash,
             "highest_quality_patch_hash": highest_quality.patch_hash,
             "validated_candidate_count": len(candidates),
             "equivalence_margin": margin,
+            "recommendation_policy": policy,
             "reason": reason,
+            "frontier_variants": variants,
             "recommended_metrics": selected.to_dict(),
             "highest_quality_metrics": highest_quality.to_dict(),
         }
+
+    def _recommendation_policy(self) -> str:
+        normalized = [_normalize_policy_token(item) for item in self.objective.tie_breakers]
+        if self.mode == "correctness":
+            for token in normalized:
+                if token in {"highest_correctness", "highest_quality", "maximize_correctness"}:
+                    return "highest_correctness"
+                if token in {"lowest_cost_within_quality_margin", "lower_cost"}:
+                    return "lowest_cost_within_quality_margin"
+                if token in {"lowest_latency_within_quality_margin", "lower_latency"}:
+                    return "lowest_latency_within_quality_margin"
+                if token in {"simplest_within_quality_margin", "smaller_patch", "simpler"}:
+                    return "simplest_within_quality_margin"
+                if token == "balanced":
+                    return "balanced"
+            return "lowest_cost_within_quality_margin"
+        if self.mode == "cost":
+            return "lowest_cost"
+        return "lowest_latency"
+
+    def _select_by_policy(
+        self,
+        *,
+        highest_quality: PatchSummary,
+        equivalent: list[PatchSummary],
+        candidates: list[PatchSummary],
+        policy: str,
+    ) -> PatchSummary:
+        if policy == "highest_correctness":
+            return highest_quality
+        if policy in {"lowest_cost", "lowest_cost_within_quality_margin"}:
+            return min(
+                equivalent,
+                key=lambda summary: (
+                    summary.mean_cost_usd,
+                    -summary.mean_score,
+                    summary.median_latency_s,
+                    summary.operation_count,
+                    summary.patch_hash,
+                ),
+            )
+        if policy in {"lowest_latency", "lowest_latency_within_quality_margin"}:
+            return min(
+                equivalent,
+                key=lambda summary: (
+                    summary.median_latency_s,
+                    -summary.mean_score,
+                    summary.mean_cost_usd,
+                    summary.operation_count,
+                    summary.patch_hash,
+                ),
+            )
+        if policy == "simplest_within_quality_margin":
+            return min(
+                equivalent,
+                key=lambda summary: (
+                    summary.operation_count,
+                    summary.mean_cost_usd,
+                    summary.median_latency_s,
+                    -summary.mean_score,
+                    summary.patch_hash,
+                ),
+            )
+        if policy == "balanced":
+            return sorted(equivalent, key=self.secondary_sort_key)[0]
+        return sorted(candidates, key=self.sort_key)[0]
+
+    def _frontier_variants(
+        self,
+        *,
+        highest_quality: PatchSummary,
+        equivalent: list[PatchSummary],
+        candidates: list[PatchSummary],
+    ) -> list[dict[str, Any]]:
+        variants: list[tuple[str, PatchSummary]] = [("highest_quality", highest_quality)]
+        if self.mode == "correctness":
+            variants.extend(
+                [
+                    (
+                        "lowest_cost_within_margin",
+                        self._select_by_policy(
+                            highest_quality=highest_quality,
+                            equivalent=equivalent,
+                            candidates=candidates,
+                            policy="lowest_cost_within_quality_margin",
+                        ),
+                    ),
+                    (
+                        "lowest_latency_within_margin",
+                        self._select_by_policy(
+                            highest_quality=highest_quality,
+                            equivalent=equivalent,
+                            candidates=candidates,
+                            policy="lowest_latency_within_quality_margin",
+                        ),
+                    ),
+                    (
+                        "simplest_within_margin",
+                        self._select_by_policy(
+                            highest_quality=highest_quality,
+                            equivalent=equivalent,
+                            candidates=candidates,
+                            policy="simplest_within_quality_margin",
+                        ),
+                    ),
+                ]
+            )
+        seen: set[tuple[str, str]] = set()
+        rows: list[dict[str, Any]] = []
+        for role, summary in variants:
+            key = (role, summary.patch_hash)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(_frontier_variant_row(role, summary))
+        return rows
 
 
 def _predicate(objective: OptimizationObjective | None) -> GatePredicate:
@@ -525,6 +654,42 @@ def select_recommended_patch(
     objective: OptimizationObjective,
 ) -> tuple[PatchSummary, dict[str, Any]]:
     return _predicate(objective).select_recommended(candidates)
+
+
+def _normalize_policy_token(value: str) -> str:
+    return str(value).strip().lower().replace("-", "_")
+
+
+def _frontier_variant_row(role: str, summary: PatchSummary) -> dict[str, Any]:
+    return {
+        "role": role,
+        "patch_hash": summary.patch_hash,
+        "pass_count": summary.pass_count,
+        "case_count": summary.case_count,
+        "mean_score": summary.mean_score,
+        "mean_cost_usd": summary.mean_cost_usd,
+        "mean_total_tokens": summary.mean_total_tokens,
+        "median_latency_s": summary.median_latency_s,
+        "operation_count": summary.operation_count,
+        "operations": [
+            {
+                "op": operation.op,
+                "target": operation.target,
+                "value_summary": _operation_value_summary(operation.value),
+            }
+            for operation in summary.patch.operations
+        ],
+    }
+
+
+def _operation_value_summary(value: Any) -> Any:
+    if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+        source_ids = [item.get("source_case_id") for item in value if item.get("source_case_id")]
+        if source_ids:
+            return source_ids
+    if isinstance(value, str):
+        return value if len(value) <= 160 else value[:157] + "..."
+    return value
 
 
 def pareto_frontier(summaries: list[PatchSummary]) -> list[dict[str, Any]]:

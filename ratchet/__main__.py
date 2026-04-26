@@ -38,6 +38,7 @@ def run_optimizer(
     optimizer_model: str | None = "gpt-5.4",
     optimizer_reasoning: str | None = "medium",
     samples_per_case: int | None = 1,
+    case_concurrency: int | None = 1,
     max_case_retries: int | None = 2,
     case_timeout_s: int | None = 180,
     fail_fast: bool | None = False,
@@ -58,6 +59,7 @@ def run_optimizer(
         optimizer_model=optimizer_model,
         optimizer_reasoning=optimizer_reasoning,
         samples_per_case=samples_per_case,
+        case_concurrency=case_concurrency,
         max_case_retries=max_case_retries,
         case_timeout_s=case_timeout_s,
         fail_fast=fail_fast,
@@ -74,6 +76,7 @@ def run_optimizer(
         optimizer_model=config.optimizer_model,
         optimizer_reasoning=config.optimizer_reasoning,
         samples_per_case=config.samples_per_case,
+        case_concurrency=config.case_concurrency,
         max_case_retries=config.max_case_retries,
         case_timeout_s=config.case_timeout_s,
         fail_fast=config.fail_fast,
@@ -99,7 +102,7 @@ def _print_progress_event(row: dict[str, Any]) -> None:
     if event == "run_started":
         message = (
             f"run started: dev={row.get('dev_cases')} holdout={row.get('holdout_cases')} "
-            f"dev_budget={row.get('dev_budget')}"
+            f"dev_budget={row.get('dev_budget')} concurrency={row.get('case_concurrency')}"
         )
     elif event == "baseline_dev_started":
         message = f"baseline dev started: cases={row.get('case_count')}"
@@ -231,6 +234,7 @@ def _apply_run_overrides(
         optimizer_model=getattr(args, "optimizer_model", None),
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
         samples_per_case=getattr(args, "samples_per_case", None),
+        case_concurrency=getattr(args, "case_concurrency", None),
         max_case_retries=getattr(args, "max_case_retries", None),
         case_timeout_s=getattr(args, "case_timeout_s", None),
         fail_fast=True if getattr(args, "fail_fast", False) else None,
@@ -257,6 +261,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--optimizer-model", help="Model used by Ratchet's diagnosis/proposal loop")
     parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's diagnosis/proposal loop")
     parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per patch/case")
+    parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
     parser.add_argument("--max-case-retries", type=int, help="Per-case retry budget after the first attempt")
     parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds")
     parser.add_argument(

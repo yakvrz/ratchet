@@ -130,70 +130,80 @@ class ProposalEngine:
         invalid_candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
         for raw_candidate in proposals:
-            candidate, materialization = _materialize_candidate_references(raw_candidate, proposal_example_bank)
-            family_error = validate_candidate_transform(
-                candidate,
-                surface=surface,
-                search_hypothesis=search_hypothesis,
-            )
-            if family_error is not None:
-                invalid_reasons[family_error] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, family_error, materialization=materialization))
-                continue
-            is_valid, invalid_reason = validator.validate_with_reason(
-                candidate.patch,
-                current_spec=current_spec,
-                surface=surface,
-                objective=objective,
-                evidence_cases=[evaluation.case for evaluation in summary.evaluations],
-                proposal_example_case_ids=proposal_example_bank.case_ids if proposal_example_bank is not None else None,
-                proposal_example_cases=list(proposal_example_cases),
-            )
-            if not is_valid:
-                reason = invalid_reason or "invalid patch"
-                invalid_reasons[reason] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, reason, materialization=materialization))
-                continue
-            digest = patch_hash(compose_patches(summary.patch, candidate.patch))
-            if digest in seen_hashes or digest in local_seen:
-                invalid_reasons["duplicate patch"] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, "duplicate patch", materialization=materialization))
-                continue
-            local_seen.add(digest)
-            valid.append(candidate)
-            raw_quota = family_quotas.get(candidate.transform_family)
-            if raw_quota is None:
-                quota = proposal_budget if not family_quotas else 0
-            else:
-                quota = max(1, raw_quota)
-            if family_counts[candidate.transform_family] >= quota:
-                reason = (
-                    f"transform family budget exceeded for {candidate.transform_family!r} "
-                    f"(quota {quota})"
+            materialized_candidate, materialization = _materialize_candidate_references(raw_candidate, proposal_example_bank)
+            for candidate in _few_shot_count_variants(materialized_candidate):
+                variant_materialization = _few_shot_variant_materialization(candidate, materialization)
+                family_error = validate_candidate_transform(
+                    candidate,
+                    surface=surface,
+                    search_hypothesis=search_hypothesis,
                 )
-                invalid_reasons[reason] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, reason, materialization=materialization))
-                continue
-            family_counts[candidate.transform_family] += 1
-            budget_valid.append(candidate)
-            candidate_rows.append(
-                {
-                    "rank": len(candidate_rows) + 1,
-                    "proposal_patch_hash": patch_hash(candidate.patch),
-                    "patch_hash": digest,
-                    "proposal": candidate.patch.to_dict(),
-                    "candidate": candidate.to_dict(),
-                    "transform_family": candidate.transform_family,
-                    "transform_instance": candidate.transform_instance,
-                    "target_slice": candidate.target_slice,
-                    "hypothesis": candidate.hypothesis,
-                    "evaluation_plan": candidate.evaluation_plan,
-                    "materialization": materialization,
-                    "scheduled": len(candidate_rows) < proposal_budget,
-                    "family_quota": quota,
-                    "family_rank": family_counts[candidate.transform_family],
-                }
-            )
+                if family_error is not None:
+                    invalid_reasons[family_error] += 1
+                    invalid_candidate_rows.append(
+                        _invalid_candidate_row(candidate, family_error, materialization=variant_materialization)
+                    )
+                    continue
+                is_valid, invalid_reason = validator.validate_with_reason(
+                    candidate.patch,
+                    current_spec=current_spec,
+                    surface=surface,
+                    objective=objective,
+                    evidence_cases=[evaluation.case for evaluation in summary.evaluations],
+                    proposal_example_case_ids=proposal_example_bank.case_ids if proposal_example_bank is not None else None,
+                    proposal_example_cases=list(proposal_example_cases),
+                )
+                if not is_valid:
+                    reason = invalid_reason or "invalid patch"
+                    invalid_reasons[reason] += 1
+                    invalid_candidate_rows.append(
+                        _invalid_candidate_row(candidate, reason, materialization=variant_materialization)
+                    )
+                    continue
+                digest = patch_hash(compose_patches(summary.patch, candidate.patch))
+                if digest in seen_hashes or digest in local_seen:
+                    invalid_reasons["duplicate patch"] += 1
+                    invalid_candidate_rows.append(
+                        _invalid_candidate_row(candidate, "duplicate patch", materialization=variant_materialization)
+                    )
+                    continue
+                local_seen.add(digest)
+                valid.append(candidate)
+                raw_quota = family_quotas.get(candidate.transform_family)
+                if raw_quota is None:
+                    quota = proposal_budget if not family_quotas else 0
+                else:
+                    quota = max(1, raw_quota)
+                if family_counts[candidate.transform_family] >= quota:
+                    reason = (
+                        f"transform family budget exceeded for {candidate.transform_family!r} "
+                        f"(quota {quota})"
+                    )
+                    invalid_reasons[reason] += 1
+                    invalid_candidate_rows.append(
+                        _invalid_candidate_row(candidate, reason, materialization=variant_materialization)
+                    )
+                    continue
+                family_counts[candidate.transform_family] += 1
+                budget_valid.append(candidate)
+                candidate_rows.append(
+                    {
+                        "rank": len(candidate_rows) + 1,
+                        "proposal_patch_hash": patch_hash(candidate.patch),
+                        "patch_hash": digest,
+                        "proposal": candidate.patch.to_dict(),
+                        "candidate": candidate.to_dict(),
+                        "transform_family": candidate.transform_family,
+                        "transform_instance": candidate.transform_instance,
+                        "target_slice": candidate.target_slice,
+                        "hypothesis": candidate.hypothesis,
+                        "evaluation_plan": candidate.evaluation_plan,
+                        "materialization": variant_materialization,
+                        "scheduled": len(candidate_rows) < proposal_budget,
+                        "family_quota": quota,
+                        "family_rank": family_counts[candidate.transform_family],
+                    }
+                )
         returned = budget_valid[:proposal_budget]
         self.last_candidate_rows = candidate_rows
         self.last_invalid_candidate_rows = invalid_candidate_rows
@@ -351,7 +361,7 @@ class ProposalEngine:
                                             "evaluation_plan": {"type": "string", "maxLength": 240},
                                             "patch": _patch_schema(),
                                         },
-                                        "required": ["transform_family", "hypothesis", "patch"],
+                                        "required": ["transform_family", "hypothesis"],
                                     },
                                 },
                             },
@@ -372,13 +382,19 @@ class ProposalEngine:
                     "materially distinct from constrained_or_paused_contexts; use different targets, operations, slices, "
                     "or concrete mechanism classes, and explain that distinction in transform_instance and hypothesis. "
                     "Each patch must have operations, rationale, expected_effect, and optional metadata. "
+                    "Exception: targeted_few_shot candidates should select examples with "
+                    "transform_parameters.source_case_ids and may omit patch; Ratchet will materialize the "
+                    "add_few_shot patch from proposal_example_bank. "
                     "Use only editable_targets listed in the prompt. Use only operations allowed by each target. "
                     "The patch operations must be compatible with the declared transform_family's supported_ops and "
                     "supported_edit_kinds. "
                     "Each operation value must satisfy the target value_schema exactly: respect type, enum, and maxLength. "
                     "Few-shot operation values must be arrays of objects shaped by the few_shot target schema. "
-                    "Every few-shot item must cite source_case_id from proposal_example_bank, and may copy only those "
-                    "train example inputs/outputs. Do not invent few-shot examples when proposal_example_bank is empty. "
+                    "For targeted_few_shot, prefer not to emit operation values at all; emit "
+                    "transform_parameters.source_case_ids as a JSON array of strings, for example "
+                    "{\"source_case_ids\":[\"train-example-1\",\"train-example-2\"],"
+                    "\"selection_strategy\":\"contrastive\"}. Do not use a comma-separated string. "
+                    "Do not invent few-shot examples when proposal_example_bank is empty. "
                     "Allowed operations are add_instruction, revise_instruction, add_output_constraint, "
                     "revise_tool_description, revise_tool_policy, set_retrieval_param, set_runtime_param, "
                     "change_model, add_few_shot, and add_verifier_retry. Touch at most two targets per patch. "
@@ -636,7 +652,7 @@ def _materialize_candidate_references(
     candidate: CandidateProposal,
     proposal_example_bank: ProposalExampleBank | None,
 ) -> tuple[CandidateProposal, dict[str, Any]]:
-    if proposal_example_bank is None or not candidate.patch.operations:
+    if proposal_example_bank is None:
         return candidate, {}
     example_by_id = {example.case_id: example for example in proposal_example_bank.examples}
     operations: list[PatchOperation] = []
@@ -649,7 +665,17 @@ def _materialize_candidate_references(
         if isinstance(raw_parameter_source_ids, list)
         else []
     )
-    for operation in candidate.patch.operations:
+    candidate_operations = list(candidate.patch.operations)
+    if candidate.transform_family == "targeted_few_shot" and not candidate_operations and parameter_source_ids:
+        candidate_operations = [
+            PatchOperation(
+                op="add_few_shot",
+                target="few_shot",
+                value=[{"source_case_id": source_id} for source_id in parameter_source_ids],
+                rationale="Materialize proposer-selected train examples.",
+            )
+        ]
+    for operation in candidate_operations:
         if operation.op != "add_few_shot":
             operations.append(operation)
             continue
@@ -682,7 +708,7 @@ def _materialize_candidate_references(
             )
         )
         changed = True
-        transform_parameters.setdefault("source_case_ids", source_ids)
+        transform_parameters["source_case_ids"] = source_ids
     if not changed:
         return candidate, {}
     patch = AgentPatch(
@@ -714,6 +740,128 @@ def _materialize_candidate_references(
             "raw_patch": candidate.patch.to_dict(),
         },
     )
+
+
+def _few_shot_count_variants(candidate: CandidateProposal) -> list[CandidateProposal]:
+    if candidate.transform_family != "targeted_few_shot":
+        return [candidate]
+    operations = list(candidate.patch.operations)
+    few_shot_indexes = [
+        index
+        for index, operation in enumerate(operations)
+        if operation.op == "add_few_shot" and isinstance(operation.value, list)
+    ]
+    if not few_shot_indexes:
+        return [candidate]
+    op_index = few_shot_indexes[0]
+    operation = operations[op_index]
+    examples = list(operation.value)
+    if len(examples) <= 1:
+        return [_annotated_few_shot_variant(candidate, keep_count=len(examples), original_count=len(examples))]
+    variants: list[CandidateProposal] = []
+    for keep_count in range(1, min(3, len(examples)) + 1):
+        reduced_operations = list(operations)
+        reduced_operations[op_index] = PatchOperation(
+            op=operation.op,
+            target=operation.target,
+            value=examples[:keep_count],
+            rationale=operation.rationale,
+        )
+        variants.append(
+            _annotated_few_shot_variant(
+                CandidateProposal(
+                    patch=AgentPatch(
+                        operations=reduced_operations,
+                        rationale=candidate.patch.rationale,
+                        expected_effect=candidate.patch.expected_effect,
+                        metadata=dict(candidate.patch.metadata),
+                    ),
+                    transform_family=candidate.transform_family,
+                    transform_instance=candidate.transform_instance,
+                    transform_parameters=dict(candidate.transform_parameters),
+                    target_slice=candidate.target_slice,
+                    hypothesis=candidate.hypothesis,
+                    expected_effects=dict(candidate.expected_effects),
+                    evaluation_plan=candidate.evaluation_plan,
+                ),
+                keep_count=keep_count,
+                original_count=len(examples),
+            )
+        )
+    return variants
+
+
+def _annotated_few_shot_variant(
+    candidate: CandidateProposal,
+    *,
+    keep_count: int,
+    original_count: int,
+) -> CandidateProposal:
+    source_ids = _candidate_few_shot_source_ids(candidate)
+    kept_source_ids = source_ids[:keep_count] if source_ids else []
+    strategy = str(candidate.transform_parameters.get("selection_strategy") or "unspecified")
+    transform_parameters = {
+        **candidate.transform_parameters,
+        "source_case_ids": kept_source_ids or candidate.transform_parameters.get("source_case_ids", []),
+        "few_shot_example_count": keep_count,
+        "original_few_shot_example_count": original_count,
+        "selection_strategy": strategy,
+    }
+    patch = AgentPatch(
+        operations=list(candidate.patch.operations),
+        rationale=candidate.patch.rationale,
+        expected_effect=candidate.patch.expected_effect,
+        metadata={
+            **candidate.patch.metadata,
+            "few_shot_variant": {
+                "example_count": keep_count,
+                "original_example_count": original_count,
+                "selection_strategy": strategy,
+                "source_case_ids": kept_source_ids,
+            },
+        },
+    )
+    return CandidateProposal(
+        patch=patch,
+        transform_family=candidate.transform_family,
+        transform_instance=f"{candidate.transform_instance or 'few_shot'}_{keep_count}_shot",
+        transform_parameters=transform_parameters,
+        target_slice=candidate.target_slice,
+        hypothesis=candidate.hypothesis,
+        expected_effects={
+            **candidate.expected_effects,
+            "few_shot_example_count": keep_count,
+            "selection_strategy": strategy,
+        },
+        evaluation_plan=candidate.evaluation_plan,
+    )
+
+
+def _candidate_few_shot_source_ids(candidate: CandidateProposal) -> list[str]:
+    for operation in candidate.patch.operations:
+        if operation.op == "add_few_shot" and isinstance(operation.value, list):
+            return _few_shot_source_ids(operation.value)
+    raw = candidate.transform_parameters.get("source_case_ids", [])
+    if isinstance(raw, list):
+        return [str(item) for item in raw if isinstance(item, str) and item]
+    return []
+
+
+def _few_shot_variant_materialization(
+    candidate: CandidateProposal,
+    materialization: dict[str, Any],
+) -> dict[str, Any]:
+    if candidate.transform_family != "targeted_few_shot":
+        return materialization
+    variant = candidate.patch.metadata.get("few_shot_variant")
+    if not isinstance(variant, dict):
+        return materialization
+    rows = dict(materialization)
+    source_ids = variant.get("source_case_ids")
+    if isinstance(source_ids, list):
+        rows["source_case_ids"] = [str(item) for item in source_ids]
+    rows["few_shot_variant"] = dict(variant)
+    return rows
 
 
 def _few_shot_source_ids(raw_items: list[Any]) -> list[str]:

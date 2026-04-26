@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 
 from ratchet.__main__ import run_optimizer
@@ -173,6 +174,31 @@ class BranchingAdapter:
     def export(self, patch: AgentPatch, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
+
+
+class SleepingAdapter:
+    def agent_spec(self) -> AgentSpec:
+        return BRANCH_SPEC
+
+    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+        time.sleep(0.2)
+        return RunRecord(
+            output=case.expected,
+            metrics=OperationalMetrics(
+                latency_s=0.2,
+                input_tokens=10,
+                output_tokens=2,
+                total_tokens=12,
+                cost_usd=0.0,
+            ),
+            diagnostics=DiagnosticTrace(raw_output_text=str(case.expected)),
+        )
+
+    def grade(self, case: EvalCase, output: object) -> GradeResult:
+        return GradeResult(score=1.0, passed=True)
+
+    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+        out_dir.mkdir(parents=True, exist_ok=True)
 
 
 class BranchingDiagnosisClient:
@@ -789,6 +815,37 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(len(stage_rows), 1)
             self.assertIn("smoke rejected", rejection_reason or "")
             self.assertLess(summary.case_count, len(cases))
+
+    def test_evaluate_patch_runs_cases_with_bounded_concurrency(self) -> None:
+        cases = tuple(
+            EvalCase(id=f"dev-{index}", split="dev", input=str(index), expected=str(index))
+            for index in range(4)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            progress_rows: list[dict[str, object]] = []
+            optimizer = RatchetOptimizer(
+                adapter=SleepingAdapter(),
+                out_dir=Path(tmp) / "run",
+                env_path=".env",
+                dev_budget=0,
+                holdout_budget=0,
+                case_concurrency=4,
+                progress_callback=progress_rows.append,
+            )
+            optimizer.out_dir.mkdir()
+            optimizer._progress_started_at = time.perf_counter()
+            optimizer._progress_path = Path(tmp) / "run" / "progress.jsonl"
+            optimizer._progress_path.write_text("")
+
+            started_at = time.perf_counter()
+            summary = optimizer.evaluate_patch(AgentPatch.empty(), cases)
+            elapsed_s = time.perf_counter() - started_at
+
+            self.assertEqual(summary.pass_count, 4)
+            self.assertLess(elapsed_s, 0.55)
+            batch_rows = [row for row in progress_rows if row.get("event") == "case_batch_started"]
+            self.assertEqual(batch_rows[0]["concurrency"], 4)
+            self.assertEqual([evaluation.case.id for evaluation in summary.evaluations], [case.id for case in cases])
 
     def test_rejected_batch_retry_does_not_run_when_dev_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

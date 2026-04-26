@@ -132,6 +132,19 @@ class TransformContextKey:
     @classmethod
     def from_candidate(cls, candidate: "CandidateProposal") -> "TransformContextKey":
         operations = tuple(candidate.patch.operations)
+        if candidate.transform_family == "targeted_few_shot" and not operations:
+            source_ids = candidate.transform_parameters.get("source_case_ids")
+            mechanism = _parameter_mechanism_signature(candidate.transform_parameters)
+            if isinstance(source_ids, list):
+                mechanism = (f"few_shot:count={len(source_ids)}", *mechanism)
+            return cls(
+                family=candidate.transform_family,
+                target_names=("few_shot",),
+                ops=("add_few_shot",),
+                target_slice=candidate.target_slice,
+                mechanism=mechanism,
+                transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
+            )
         return cls(
             family=candidate.transform_family,
             target_names=tuple(operation.target for operation in operations),
@@ -349,7 +362,12 @@ class CandidateProposal:
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
-        patch_payload = payload.get("patch", payload)
+        if "patch" in payload:
+            patch_payload = payload["patch"]
+        elif str(payload.get("transform_family", "")) == "targeted_few_shot":
+            patch_payload = {"operations": []}
+        else:
+            patch_payload = payload
         return cls(
             patch=AgentPatch.from_dict(dict(patch_payload)),
             transform_family=str(payload.get("transform_family", "")),
@@ -804,6 +822,8 @@ def validate_candidate_transform(
     parameter_error = _transform_parameter_contract_error(candidate, family)
     if parameter_error is not None:
         return parameter_error
+    if not candidate.patch.operations and candidate.transform_family != "targeted_few_shot":
+        return "candidate patch must include at least one operation"
     target_by_name = {target.name: target for target in surface}
     target_by_path = {target.path: target for target in surface}
     for operation in candidate.patch.operations:

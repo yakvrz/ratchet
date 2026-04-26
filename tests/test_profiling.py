@@ -4,8 +4,8 @@ import unittest
 
 from ratchet.evidence import ProposalExample, ProposalExampleBank
 from ratchet.profiling import quality_cost_tradeoffs, runtime_reliability_diagnostics
-from ratchet.proposals import _materialize_candidate_references
-from ratchet.optimizer import _simplification_variants
+from ratchet.proposals import _few_shot_count_variants, _materialize_candidate_references
+from ratchet.optimizer import _prefer_simple_few_shot_strategy, _simplification_variants
 from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.transforms import CandidateProposal
 from ratchet.types import (
@@ -81,6 +81,8 @@ class ProfilingTests(unittest.TestCase):
         diagnostics = runtime_reliability_diagnostics(baseline, candidate)
 
         self.assertTrue(diagnostics["runtime_finding"])
+        self.assertTrue(diagnostics["baseline_runtime_defect_fixed"])
+        self.assertEqual(diagnostics["diagnostic_class"], "baseline_runtime_defect_fixed")
         self.assertNotIn("suspicious", diagnostics)
         self.assertEqual(diagnostics["fixed_invalid_output_case_ids"], ["case-1"])
         self.assertEqual(diagnostics["low_token_fixed_case_ids"], ["case-1"])
@@ -121,6 +123,144 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(value[0]["input"], "How do I verify identity?")
         self.assertEqual(value[0]["output"], {"label": "verify_my_identity"})
         self.assertEqual(materialization["source_case_ids"], ["train-1"])
+
+    def test_reference_only_few_shot_candidate_is_materialized(self) -> None:
+        bank = ProposalExampleBank(
+            examples=[
+                ProposalExample(
+                    case_id="train-1",
+                    input="I do not recognize this card payment.",
+                    expected={"label": "card_payment_not_recognised"},
+                    metadata={"category": "card_payment_not_recognised"},
+                    label="card_payment_not_recognised",
+                ),
+                ProposalExample(
+                    case_id="train-2",
+                    input="Why was I charged a fee for using my card?",
+                    expected={"label": "card_payment_fee_charged"},
+                    metadata={"category": "card_payment_fee_charged"},
+                    label="card_payment_fee_charged",
+                ),
+            ],
+            label_counts={"card_payment_not_recognised": 1, "card_payment_fee_charged": 1},
+            metadata_categories={"card_payment_not_recognised": 1, "card_payment_fee_charged": 1},
+            label_field="label",
+        )
+        candidate = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_instance="contrastive_card_examples",
+            transform_parameters={
+                "source_case_ids": ["train-1", "train-2"],
+                "selection_strategy": "contrastive",
+            },
+            hypothesis="Contrast unknown card payments against recognized card fees.",
+            patch=AgentPatch.empty(),
+        )
+
+        materialized, materialization = _materialize_candidate_references(candidate, bank)
+
+        self.assertEqual(len(materialized.patch.operations), 1)
+        operation = materialized.patch.operations[0]
+        self.assertEqual(operation.op, "add_few_shot")
+        self.assertEqual(operation.target, "few_shot")
+        self.assertEqual([item["source_case_id"] for item in operation.value], ["train-1", "train-2"])
+        self.assertEqual(operation.value[0]["output"], {"label": "card_payment_not_recognised"})
+        self.assertTrue(materialized.patch.metadata["materialized_few_shot"])
+        self.assertEqual(materialization["source_case_ids"], ["train-1", "train-2"])
+
+    def test_few_shot_candidate_expands_to_one_two_three_shot_variants(self) -> None:
+        candidate = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_instance="contrastive_card_examples",
+            transform_parameters={
+                "source_case_ids": ["train-1", "train-2", "train-3", "train-4"],
+                "selection_strategy": "contrastive",
+            },
+            hypothesis="Compare several card payment intents.",
+            patch=AgentPatch(
+                operations=[
+                    PatchOperation(
+                        op="add_few_shot",
+                        target="few_shot",
+                        value=[
+                            {"source_case_id": "train-1"},
+                            {"source_case_id": "train-2"},
+                            {"source_case_id": "train-3"},
+                            {"source_case_id": "train-4"},
+                        ],
+                    )
+                ]
+            ),
+        )
+
+        variants = _few_shot_count_variants(candidate)
+
+        self.assertEqual(
+            [variant.transform_parameters["few_shot_example_count"] for variant in variants],
+            [1, 2, 3],
+        )
+        self.assertEqual(
+            [len(variant.patch.operations[0].value) for variant in variants],
+            [1, 2, 3],
+        )
+        self.assertEqual(variants[2].patch.metadata["few_shot_variant"]["selection_strategy"], "contrastive")
+        self.assertEqual(variants[2].transform_parameters["source_case_ids"], ["train-1", "train-2", "train-3"])
+
+    def test_contrastive_few_shot_is_not_frontier_preferred_when_representative_ties(self) -> None:
+        representative_candidate = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_parameters={
+                "selection_strategy": "representative",
+                "few_shot_example_count": 1,
+            },
+            hypothesis="Representative example.",
+            patch=AgentPatch(
+                operations=[
+                    PatchOperation(op="add_few_shot", target="few_shot", value=[{"source_case_id": "train-1"}])
+                ]
+            ),
+        )
+        contrastive_candidate = CandidateProposal(
+            transform_family="targeted_few_shot",
+            transform_parameters={
+                "selection_strategy": "contrastive",
+                "few_shot_example_count": 2,
+            },
+            hypothesis="Contrastive examples.",
+            patch=AgentPatch(
+                operations=[
+                    PatchOperation(
+                        op="add_few_shot",
+                        target="few_shot",
+                        value=[{"source_case_id": "train-1"}, {"source_case_id": "train-2"}],
+                    )
+                ]
+            ),
+        )
+        representative_summary = summary(representative_candidate.patch, passed=True, output={"label": "ok"})
+        contrastive_summary = summary(contrastive_candidate.patch, passed=True, output={"label": "ok"})
+
+        filtered = _prefer_simple_few_shot_strategy(
+            [
+                (contrastive_candidate, contrastive_summary, None),
+                (representative_candidate, representative_summary, None),
+            ]
+        )
+
+        self.assertEqual([row[0].transform_parameters["selection_strategy"] for row in filtered], ["representative"])
+
+    def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
+        candidate = CandidateProposal.from_dict(
+            {
+                "transform_family": "targeted_few_shot",
+                "transform_instance": "identity_examples",
+                "transform_parameters": {"source_case_ids": ["train-1"]},
+                "hypothesis": "Use a representative train example.",
+            }
+        )
+
+        self.assertTrue(candidate.patch.is_empty)
+        self.assertEqual(candidate.transform_parameters["source_case_ids"], ["train-1"])
 
     def test_unknown_few_shot_reference_is_rejected_after_materialization(self) -> None:
         bank = ProposalExampleBank(

@@ -41,15 +41,21 @@ def runtime_reliability_diagnostics(
             finish_reason = str(evaluation.record.diagnostics.metadata.get("finish_reason") or "")
             if finish_reason:
                 finish_reasons[case_id].append(finish_reason)
-    suspect = bool(runtime_involved and fixed_invalid and low_token_fixed)
+    baseline_runtime_defect_fixed = bool(runtime_involved and fixed_invalid and low_token_fixed)
     return {
         "patch_hash": candidate.patch_hash,
         "runtime_only": runtime_only,
         "runtime_involved": runtime_involved,
-        "runtime_finding": suspect,
+        "runtime_finding": baseline_runtime_defect_fixed,
+        "diagnostic_class": (
+            "baseline_runtime_defect_fixed"
+            if baseline_runtime_defect_fixed
+            else "no_runtime_reliability_finding"
+        ),
+        "baseline_runtime_defect_fixed": baseline_runtime_defect_fixed,
         "reason": (
-            "Runtime candidate fixed invalid outputs even though fixed baseline outputs used far fewer tokens than the configured cap."
-            if suspect
+            "Baseline runtime defect fixed: runtime patch corrected invalid outputs where baseline runs ended far below the requested output cap."
+            if baseline_runtime_defect_fixed
             else "No runtime reliability suspicion detected."
         ),
         "fixed_invalid_output_case_ids": fixed_invalid,
