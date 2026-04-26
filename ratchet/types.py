@@ -293,7 +293,7 @@ class EvalCase:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.split not in {"dev", "holdout"}:
+        if self.split not in {"train", "dev", "holdout"}:
             raise ValueError(f"Unsupported split: {self.split}")
 
     def to_dict(self) -> dict[str, Any]:
@@ -489,7 +489,10 @@ def _apply_operation(spec: dict[str, Any], operation: PatchOperation) -> None:
 
     if operation.op == "add_few_shot":
         few_shot = [dict(item) for item in spec.get("few_shot", [])]
-        few_shot.append(dict(value) if isinstance(value, dict) else {"text": str(value)})
+        if isinstance(value, list):
+            few_shot.extend(dict(item) if isinstance(item, dict) else {"text": str(item)} for item in value)
+        else:
+            few_shot.append(dict(value) if isinstance(value, dict) else {"text": str(value)})
         spec["few_shot"] = few_shot
         return
 

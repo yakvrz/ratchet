@@ -44,6 +44,7 @@ class CompatResponse:
     output: list[CompatOutputItem]
     output_text: str
     usage: CompatUsage
+    finish_reason: str = ""
 
 
 class ResponsesModelClient:
@@ -158,6 +159,7 @@ class ResponsesModelClient:
             id=str(getattr(completion, "id", "")),
             output=output_items,
             output_text=text,
+            finish_reason=str(getattr(choice, "finish_reason", "") or ""),
             usage=CompatUsage(
                 input_tokens=int(getattr(usage, "prompt_tokens", 0) or getattr(usage, "input_tokens", 0) or 0),
                 output_tokens=int(

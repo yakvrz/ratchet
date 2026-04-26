@@ -197,31 +197,41 @@ def _materialization_audit(
 
 
 def _preferred_materialization_target(target: EditableTarget) -> bool:
-    schema_type = target.value_schema.get("type")
-    return schema_type in {"string", "object"} or target.kind in {"model", "verifier"}
+    schema_types = _schema_types(target)
+    return bool(schema_types & {"string", "object", "array"}) or target.kind in {"model", "verifier"}
 
 
 def _sentinel_patch_for_target(target: EditableTarget, index: int) -> tuple[AgentPatch, str]:
     op = _sentinel_op(target)
     sentinel = f"RATCHET_MATERIALIZATION_SENTINEL_{target.kind}_{index}"
-    schema_type = target.value_schema.get("type")
+    schema_types = _schema_types(target)
     if op == "change_model":
         value = target.choices[0]
         expected = f'"model": "{value}"'
-    elif schema_type == "boolean":
+    elif op == "add_few_shot":
+        value = [
+            {
+                "source_case_id": "preflight-sentinel",
+                "input": sentinel,
+                "output": {"label": sentinel},
+                "purpose": "Preflight materialization audit sentinel.",
+            }
+        ]
+        expected = sentinel
+    elif schema_types == {"boolean"}:
         value = not bool(target.current_value)
         leaf = target.path.rsplit(".", 1)[-1]
         expected = f'"{leaf}": {str(value).lower()}'
-    elif schema_type == "integer":
+    elif schema_types == {"integer"}:
         value = 912345 + index
         expected = str(value)
-    elif schema_type == "number":
+    elif schema_types == {"number"}:
         value = 912345.25 + index
         expected = str(value)
-    elif schema_type == "object":
+    elif "object" in schema_types:
         value = {"ratchet_materialization_sentinel": sentinel}
         expected = sentinel
-    elif schema_type == "array":
+    elif "array" in schema_types:
         value = [{"ratchet_materialization_sentinel": sentinel}]
         expected = sentinel
     else:
@@ -242,6 +252,15 @@ def _sentinel_patch_for_target(target: EditableTarget, index: int) -> tuple[Agen
         ),
         expected,
     )
+
+
+def _schema_types(target: EditableTarget) -> set[str]:
+    schema_type = target.value_schema.get("type")
+    if isinstance(schema_type, list):
+        return {str(item) for item in schema_type}
+    if schema_type is None:
+        return set()
+    return {str(schema_type)}
 
 
 def _sentinel_op(target: EditableTarget) -> str:

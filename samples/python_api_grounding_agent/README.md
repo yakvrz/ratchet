@@ -35,7 +35,7 @@ Run the flagship demo configuration:
 python3 -m ratchet optimize --config samples/python_api_grounding_agent/ratchet.demo.toml
 ```
 
-This sample keeps Ratchet's optimizer model separate from the optimized agent: the agent baseline starts at `gemini-2.5-flash`, while the diagnosis/proposal loop is configured independently through `optimizer_model` and `optimizer_reasoning` in `ratchet.toml`.
+This sample keeps Ratchet's optimizer model separate from the optimized agent: the agent baseline starts at `gemini-2.5-flash`, while the diagnosis/proposal loop is configured independently through `optimizer_model` and `optimizer_reasoning` in `ratchet.toml`. The Gemini configs use `gemini-3.1-pro-preview` for Ratchet's diagnosis/proposal loop, and the agent model surface includes current Gemini 3.x preview alternatives such as `gemini-3.1-flash-lite-preview` and `gemini-3-flash-preview`.
 
 The adapter exposes a descriptive `AgentSpec`; Ratchet generates the editable surface and validates `AgentPatch` proposals itself.
 

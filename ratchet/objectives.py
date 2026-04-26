@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import random
 import statistics
 from typing import Any
@@ -12,6 +13,31 @@ NON_INFERIORITY_MARGIN = 0.01
 DEFAULT_COST_GUARD = 3.0
 DEFAULT_LATENCY_GUARD = 3.0
 DEFAULT_COST_MODE_LATENCY_GUARD = 1.15
+FINALIST_STATUSES = {"validated", "directional", "failed"}
+
+
+@dataclass(frozen=True)
+class FinalGateResult:
+    status: str
+    reason: str | None
+    comparison: Comparison
+
+    @property
+    def validated(self) -> bool:
+        return self.status == "validated"
+
+    @property
+    def directional(self) -> bool:
+        return self.status == "directional"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "reason": self.reason,
+            "validated": self.validated,
+            "directional": self.directional,
+            "comparison": self.comparison.to_dict(),
+        }
 
 
 def bootstrap_mean_ci(values: list[float], iterations: int = 2000, seed: int = 7) -> tuple[float, float]:
@@ -227,8 +253,8 @@ def final_gate(
     patch_summary: PatchSummary,
     objective: OptimizationObjective | None = None,
 ) -> tuple[bool, Comparison]:
-    rejection_reason, comparison = final_gate_rejection_reason(baseline, patch_summary, objective)
-    return rejection_reason is None, comparison
+    gate = final_gate_status(baseline, patch_summary, objective)
+    return gate.validated, gate.comparison
 
 
 def final_gate_rejection_reason(
@@ -236,18 +262,27 @@ def final_gate_rejection_reason(
     patch_summary: PatchSummary,
     objective: OptimizationObjective | None = None,
 ) -> tuple[str | None, Comparison]:
+    gate = final_gate_status(baseline, patch_summary, objective)
+    return (None if gate.validated else gate.reason), gate.comparison
+
+
+def final_gate_status(
+    baseline: PatchSummary,
+    patch_summary: PatchSummary,
+    objective: OptimizationObjective | None = None,
+) -> FinalGateResult:
     objective = objective or OptimizationObjective()
     comparison = compare_summaries(baseline, patch_summary)
     constraint_reason = constraint_rejection_reason(baseline, patch_summary, objective)
     if constraint_reason is not None:
-        return constraint_reason, comparison
+        return FinalGateResult(status="failed", reason=constraint_reason, comparison=comparison)
     objective_reason = objective_rejection_reason(baseline, patch_summary, objective)
     if objective_reason is not None:
-        return objective_reason, comparison
+        return FinalGateResult(status="failed", reason=objective_reason, comparison=comparison)
     uncertainty_reason = uncertainty_rejection_reason(comparison, objective)
     if uncertainty_reason is not None:
-        return uncertainty_reason, comparison
-    return None, comparison
+        return FinalGateResult(status="directional", reason=uncertainty_reason, comparison=comparison)
+    return FinalGateResult(status="validated", reason=None, comparison=comparison)
 
 
 def uncertainty_rejection_reason(

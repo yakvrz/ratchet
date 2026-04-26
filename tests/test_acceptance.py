@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ratchet.objectives import compare_summaries, final_gate, objective_rejection_reason
+from ratchet.objectives import compare_summaries, final_gate, final_gate_status, objective_rejection_reason
 from ratchet.reporting import build_outcome_analysis
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.types import (
@@ -116,6 +116,21 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(comparison.score_ci[0], 0.0)
         passed, _ = final_gate(baseline, patch_summary, OptimizationObjective(mode="correctness"))
         self.assertFalse(passed)
+
+    def test_underpowered_holdout_gain_is_directional_not_validated(self) -> None:
+        baseline = make_summary("baseline", [1.0] * 18 + [0.0] * 6, [0.002] * 24, [100] * 24, [1.0] * 24)
+        patch_summary = make_summary("patch_summary", [1.0] * 20 + [0.0] * 4, [0.002] * 24, [100] * 24, [1.0] * 24)
+        gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "directional")
+        self.assertTrue(gate.directional)
+        self.assertFalse(gate.validated)
+
+    def test_ci_positive_holdout_gain_is_validated(self) -> None:
+        baseline = make_summary("baseline", [0.0] * 24, [0.002] * 24, [100] * 24, [1.0] * 24)
+        patch_summary = make_summary("patch_summary", [1.0] * 24, [0.002] * 24, [100] * 24, [1.0] * 24)
+        gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "validated")
+        self.assertTrue(gate.validated)
 
     def test_latency_mode_requires_confident_latency_gain(self) -> None:
         baseline = make_summary("baseline", [1.0, 1.0, 1.0], [0.002] * 3, [100] * 3, [1.0, 1.0, 1.0])

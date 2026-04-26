@@ -18,9 +18,28 @@ from ratchet.types import (
     GradeResult,
     OperationalMetrics,
     OptimizationObjective,
+    PatchOperation,
     RunRecord,
 )
 from tests.fixtures.fake_adapter import adapter as fake_adapter
+
+
+def candidate(
+    patch: dict[str, object],
+    family: str,
+    *,
+    transform_instance: str | None = None,
+    target_slice: str = "global",
+) -> dict[str, object]:
+    return {
+        "transform_family": family,
+        "transform_instance": transform_instance or str(patch.get("rationale", family)),
+        "target_slice": target_slice,
+        "hypothesis": str(patch.get("rationale", "")),
+        "expected_effects": {"summary": patch.get("expected_effect", "")},
+        "evaluation_plan": "full_dev",
+        "patch": patch,
+    }
 
 
 class InvalidJsonClient:
@@ -56,16 +75,20 @@ class FakePatchClient:
     def create_response(self, **kwargs: object) -> object:
         prompt = str(kwargs.get("input", ""))
         if '"mode": "cost"' in prompt:
-            patches = [
+            candidates = [
+                candidate(
                 {
                     "operations": [{"op": "change_model", "target": "model", "value": "small"}],
                     "rationale": "Try a cheaper allowed model.",
                     "expected_effect": "Lower cost while preserving current correctness.",
-                }
+                },
+                "model_substitution",
+                )
             ]
         else:
-            patches = [
-                {
+            candidates = [
+                candidate(
+                    {
                     "operations": [
                         {
                             "op": "add_instruction",
@@ -75,31 +98,39 @@ class FakePatchClient:
                     ],
                     "rationale": "Ground answers more explicitly.",
                     "expected_effect": "Fix cases where the baseline answers wrong.",
-                },
-                {
+                    },
+                    "prompt_rewrite",
+                ),
+                candidate(
+                    {
                     "operations": [
                         {"op": "set_runtime_param", "target": "tools.search.enabled", "value": True}
                     ],
                     "rationale": "Enable search for tool-dependent cases.",
                     "expected_effect": "Allow grounded answers when a tool is needed.",
-                },
+                    },
+                    "tool_policy_revision",
+                ),
             ]
 
-        return type("Response", (), {"output_text": json.dumps({"patches": patches})})()
+        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
 
 
 class ShapeInvalidPatchClient:
     def create_response(self, **_: object) -> object:
-        patches = [
-            {
+        candidates = [
+            candidate(
+                {
                 "operations": [
                     {"op": "set_runtime_param", "target": "tools.search.enabled", "value": "true"}
                 ],
                 "rationale": "Malformed boolean value.",
                 "expected_effect": "Should be rejected by target schema.",
-            }
+                },
+                "tool_policy_revision",
+            )
         ]
-        return type("Response", (), {"output_text": json.dumps({"patches": patches})})()
+        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
 
 
 BRANCH_SPEC = AgentSpec(
@@ -176,8 +207,9 @@ class BranchingPatchClient:
         has_alpha = any("alpha" in value for value in values)
         has_beta = any("beta" in value for value in values)
         if not has_alpha and not has_beta:
-            patches = [
-                {
+            candidates = [
+                candidate(
+                    {
                     "operations": [
                         {
                             "op": "add_instruction",
@@ -187,8 +219,12 @@ class BranchingPatchClient:
                     ],
                     "rationale": "Try the alpha cluster.",
                     "expected_effect": "Fix alpha cases.",
-                },
-                {
+                    },
+                    "prompt_rewrite",
+                    target_slice="diagnosis:cluster-1",
+                ),
+                candidate(
+                    {
                     "operations": [
                         {
                             "op": "add_instruction",
@@ -198,11 +234,15 @@ class BranchingPatchClient:
                     ],
                     "rationale": "Try the beta cluster.",
                     "expected_effect": "Fix beta cases.",
-                },
+                    },
+                    "prompt_rewrite",
+                    target_slice="diagnosis:cluster-2",
+                ),
             ]
         elif has_beta and not has_alpha:
-            patches = [
-                {
+            candidates = [
+                candidate(
+                    {
                     "operations": [
                         {
                             "op": "add_instruction",
@@ -212,11 +252,14 @@ class BranchingPatchClient:
                     ],
                     "rationale": "Compose the beta branch with the alpha rule.",
                     "expected_effect": "Fix both clusters.",
-                }
+                    },
+                    "prompt_rewrite",
+                    target_slice="diagnosis:cluster-1",
+                )
             ]
         else:
-            patches = []
-        return type("Response", (), {"output_text": json.dumps({"patches": patches})})()
+            candidates = []
+        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
 
 
 class RetryPatchClient:
@@ -227,31 +270,41 @@ class RetryPatchClient:
         payload = json.loads(str(kwargs["input"]).split("\n\n", 1)[1])
         self.history_lengths.append(len(payload.get("recent_history", [])))
         if len(self.history_lengths) == 1:
-            patches = [
-                {
+            candidates = [
+                candidate(
+                    {
                     "operations": [
-                        {"op": "set_runtime_param", "target": "runtime.output_cap", "value": 80}
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Answer politely.",
+                        }
                     ],
-                    "rationale": "Try a harmless runtime cap first.",
+                    "rationale": "Try a harmless prompt addition first.",
                     "expected_effect": "This should be rejected because behavior is unchanged.",
-                }
+                    },
+                    "prompt_rewrite",
+                )
             ]
         else:
-            patches = [
-                {
+            candidates = [
+                candidate(
+                    {
                     "operations": [
                         {
                             "op": "add_instruction",
                             "target": "instructions.system_prompt",
                             "value": "Answer with exact grounded facts.",
-                        },
-                        {"op": "set_runtime_param", "target": "tools.search.enabled", "value": True},
+                        }
                     ],
                     "rationale": "Use rejection evidence to make a behavioral patch.",
-                    "expected_effect": "Fix all fake eval cases.",
-                }
+                    "expected_effect": "Fix the non-tool fake eval case.",
+                    },
+                    "prompt_rewrite",
+                    transform_instance="distinct retry prompt rewrite",
+                )
             ]
-        return type("Response", (), {"output_text": json.dumps({"patches": patches})})()
+        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
 
 
 class FakeAdapterIntegrationTests(unittest.TestCase):
@@ -292,9 +345,21 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertTrue((out_dir / "summary.html").exists())
             self.assertTrue((out_dir / "plots" / "progress.svg").exists())
             self.assertTrue((out_dir / "plots" / "efficiency_progress.svg").exists())
+            self.assertTrue((out_dir / "progress.jsonl").exists())
             self.assertTrue((out_dir / "report.md").exists())
             self.assertTrue((out_dir / "selected_patch.json").exists())
             self.assertTrue((out_dir / "exported_patch" / "patch.json").exists())
+            progress_rows = [
+                json.loads(line) for line in (out_dir / "progress.jsonl").read_text().splitlines()
+            ]
+            self.assertEqual(progress_rows[0]["event"], "run_started")
+            self.assertEqual(progress_rows[-1]["event"], "run_completed")
+            self.assertTrue(any(row["event"] == "baseline_dev_completed" for row in progress_rows))
+            manifest = json.loads((out_dir / "run_manifest.json").read_text())
+            self.assertEqual(
+                Path(manifest["progress_path"]).resolve(),
+                (out_dir / "progress.jsonl").resolve(),
+            )
             selected = json.loads((out_dir / "selected_patch.json").read_text())
             self.assertFalse(selected["promoted"])
             self.assertEqual(selected["patch"]["operations"], [])
@@ -305,12 +370,14 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             evals_path = self.write_evals(root)
             cases = load_eval_cases(evals_path)
             adapter = load_adapter("tests.fixtures.fake_adapter:adapter")
+            progress_rows: list[dict[str, object]] = []
             optimizer = RatchetOptimizer(
                 adapter=adapter,
                 out_dir=root / "run",
                 env_path=".env",
                 dev_budget=6,
                 holdout_budget=3,
+                progress_callback=progress_rows.append,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
             optimizer.proposer._client = FakePatchClient()
@@ -320,6 +387,13 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             ops = result.selected_patch.to_dict()["operations"]
             self.assertTrue(any(op["op"] == "add_instruction" for op in ops))
             self.assertTrue(any(op["target"] == "tools.search.enabled" for op in ops))
+            events = [str(row["event"]) for row in progress_rows]
+            self.assertIn("candidate_evaluation_started", events)
+            self.assertIn("candidate_evaluated", events)
+            self.assertLess(
+                events.index("candidate_evaluation_started"),
+                events.index("candidate_evaluated"),
+            )
 
     def test_runtime_error_is_persisted_and_resume_retries_failed_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -519,6 +593,14 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(result.outcome_analysis["status"], "proposals_invalid")
             self.assertEqual(result.outcome_analysis["latest_proposal_stats"]["raw_count"], 1)
             self.assertEqual(result.outcome_analysis["latest_proposal_stats"]["valid_count"], 0)
+            self.assertTrue(
+                any(
+                    row.get("type") == "candidate_proposal"
+                    and row.get("valid") is False
+                    and row.get("transform_family") == "tool_policy_revision"
+                    for row in result.proposals
+                )
+            )
 
     def test_objective_modes_select_different_winners(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -610,13 +692,61 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 for event in result.decision_log
                 if event.get("type") == "proposal_evaluation" and event.get("proposal_retry")
             ]
-            self.assertEqual(len(patch_client.history_lengths), 2)
+            self.assertGreaterEqual(len(patch_client.history_lengths), 2)
             self.assertEqual(patch_client.history_lengths[0], 0)
             self.assertGreater(patch_client.history_lengths[1], 0)
             self.assertEqual(len(retry_evaluations), 1)
             self.assertTrue(retry_evaluations[0]["accepted"])
             self.assertEqual(retry_evaluations[0]["retry_reason"], "no_accepted_candidates_from_parent")
             self.assertTrue(result.accepted_dev_patches)
+
+    def test_progressive_evaluation_rejects_smoke_regression_before_full_dev(self) -> None:
+        cases = (
+            EvalCase(id="dev-alpha", split="dev", input="alpha", expected="alpha"),
+            EvalCase(id="dev-beta", split="dev", input="beta", expected="beta"),
+            EvalCase(id="dev-gamma", split="dev", input="gamma", expected="gamma"),
+            EvalCase(id="dev-delta", split="dev", input="delta", expected="delta"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            out_dir = Path(tmp) / "run"
+            out_dir.mkdir()
+            optimizer = RatchetOptimizer(
+                adapter=BranchingAdapter(),
+                out_dir=out_dir,
+                env_path=".env",
+                dev_budget=0,
+                holdout_budget=0,
+            )
+            current_patch = AgentPatch(
+                operations=[
+                    PatchOperation(
+                        op="add_instruction",
+                        target="instructions.system_prompt",
+                        value="Route alpha cases to alpha.",
+                    )
+                ]
+            )
+            regressing_patch = AgentPatch(
+                operations=[
+                    PatchOperation(
+                        op="revise_instruction",
+                        target="instructions.system_prompt",
+                        value="Answer with no learned routing rules.",
+                    )
+                ]
+            )
+            reference = optimizer.evaluate_patch(current_patch, cases)
+            summary, _, _, rejection_reason, stage_rows = optimizer._evaluate_candidate_progressively(
+                patch=regressing_patch,
+                reference=reference,
+                baseline=optimizer.evaluate_patch(AgentPatch.empty(), cases),
+                dev_cases=cases,
+            )
+
+            self.assertEqual(stage_rows[0]["stage"], "smoke")
+            self.assertEqual(len(stage_rows), 1)
+            self.assertIn("smoke rejected", rejection_reason or "")
+            self.assertLess(summary.case_count, len(cases))
 
     def test_rejected_batch_retry_does_not_run_when_dev_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

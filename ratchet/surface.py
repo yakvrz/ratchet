@@ -174,8 +174,26 @@ class SurfaceGenerator:
                     path="few_shot",
                     current_value=spec.few_shot,
                     allowed_ops=["add_few_shot"],
-                    description="Few-shot examples appended to the agent spec.",
-                    value_schema={"type": "object", "shape": "structured"},
+                    description=(
+                        "Few-shot examples appended to the agent spec. Values must be arrays of proposal-safe "
+                        "examples that cite source_case_id from the provided train example bank."
+                    ),
+                    value_schema={
+                        "type": "array",
+                        "shape": "few_shot_examples",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "required": ["source_case_id", "input", "output", "purpose"],
+                            "properties": {
+                                "source_case_id": {"type": "string", "maxLength": 160},
+                                "input": {"type": "string", "maxLength": 1200},
+                                "output": {"type": "object"},
+                                "purpose": {"type": "string", "maxLength": 240},
+                            },
+                            "additionalProperties": True,
+                        },
+                    },
                 )
             )
         if "verifier" in allowed:

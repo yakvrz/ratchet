@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+from collections import Counter, defaultdict
+from dataclasses import asdict, dataclass
+from typing import Any
+
+from ratchet.results import PatchSummary, _compact_prompt_value
+from ratchet.types import EvalCase
+
+
+LABEL_FIELD_CANDIDATES = ("label", "intent", "class", "category")
+
+
+@dataclass(frozen=True)
+class ProposalExample:
+    case_id: str
+    input: Any
+    expected: Any
+    metadata: dict[str, Any]
+    label: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ProposalExampleBank:
+    examples: list[ProposalExample]
+    label_counts: dict[str, int]
+    metadata_categories: dict[str, int]
+    label_field: str | None = None
+
+    @property
+    def case_ids(self) -> set[str]:
+        return {example.case_id for example in self.examples}
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "usage": (
+                "proposal-safe train examples. Candidate patches may copy these inputs/expected outputs "
+                "only when they reference source_case_id."
+            ),
+            "label_field": self.label_field,
+            "example_count": len(self.examples),
+            "label_counts": dict(self.label_counts),
+            "metadata_categories": dict(self.metadata_categories),
+            "examples": [example.to_dict() for example in self.examples],
+        }
+
+    def to_prompt_dict(
+        self,
+        *,
+        target_labels: set[str] | None = None,
+        max_examples: int = 24,
+    ) -> dict[str, Any]:
+        labels = target_labels or set()
+        selected = sorted(
+            self.examples,
+            key=lambda example: (
+                0 if example.label in labels else 1,
+                example.label or "",
+                example.case_id,
+            ),
+        )[:max_examples]
+        return {
+            "usage": (
+                "proposal-safe train examples. Candidate few-shot patches may copy these inputs/expected outputs "
+                "only when each item references source_case_id."
+            ),
+            "label_field": self.label_field,
+            "example_count": len(self.examples),
+            "included_example_count": len(selected),
+            "label_counts": dict(self.label_counts),
+            "metadata_categories": dict(self.metadata_categories),
+            "examples": [example.to_dict() for example in selected],
+        }
+
+
+def build_proposal_example_bank(
+    cases: tuple[EvalCase, ...],
+    *,
+    limit: int = 80,
+    max_text_chars: int = 600,
+) -> ProposalExampleBank:
+    label_field = infer_label_field_from_cases(cases)
+    selected = _balanced_examples(cases, label_field=label_field, limit=limit)
+    examples = [
+        ProposalExample(
+            case_id=case.id,
+            input=_compact_prompt_value(case.input, max_text_chars=max_text_chars),
+            expected=_compact_prompt_value(case.expected, max_text_chars=max_text_chars),
+            metadata=_compact_prompt_value(case.metadata, max_text_chars=max_text_chars),
+            label=_label_from_case(case, label_field=label_field),
+        )
+        for case in selected
+    ]
+    label_counts = Counter(example.label for example in examples if example.label)
+    category_counts = Counter(
+        str(example.metadata.get("category"))
+        for example in examples
+        if isinstance(example.metadata, dict) and example.metadata.get("category") is not None
+    )
+    return ProposalExampleBank(
+        examples=examples,
+        label_counts=dict(sorted(label_counts.items())),
+        metadata_categories=dict(sorted(category_counts.items())),
+        label_field=label_field,
+    )
+
+
+def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) -> dict[str, Any]:
+    label_field = infer_label_field_from_cases(tuple(evaluation.case for evaluation in summary.evaluations))
+    per_label: dict[str, dict[str, Any]] = {}
+    confusion_counts: Counter[tuple[str, str]] = Counter()
+    confusion_case_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
+    actual_counts: Counter[str] = Counter()
+    invalid_case_ids: list[str] = []
+
+    for case_id, evaluations, mean_score, _, case_passed in summary._case_rows():
+        evaluation = next((item for item in evaluations if not item.grade.passed), evaluations[0])
+        expected_label = _label_from_case(evaluation.case, label_field=label_field)
+        actual_label = _actual_label(evaluation.record.output, evaluation.grade.labels, label_field=label_field)
+        if expected_label:
+            row = per_label.setdefault(
+                expected_label,
+                {"support": 0, "pass_count": 0, "score_sum": 0.0, "case_ids": []},
+            )
+            row["support"] += 1
+            row["pass_count"] += int(case_passed)
+            row["score_sum"] += mean_score
+            if len(row["case_ids"]) < max_case_ids:
+                row["case_ids"].append(case_id)
+        if actual_label:
+            actual_counts[actual_label] += 1
+        if not case_passed and expected_label and actual_label:
+            key = (expected_label, actual_label)
+            confusion_counts[key] += 1
+            if len(confusion_case_ids[key]) < max_case_ids:
+                confusion_case_ids[key].append(case_id)
+        if not case_passed and any("invalid_output" in label for label in evaluation.grade.labels):
+            invalid_case_ids.append(case_id)
+
+    label_metrics = []
+    for label, row in per_label.items():
+        support = int(row["support"])
+        pass_count = int(row["pass_count"])
+        mean_score = float(row["score_sum"]) / max(support, 1)
+        label_metrics.append(
+            {
+                "label": label,
+                "support": support,
+                "pass_count": pass_count,
+                "pass_rate": round(pass_count / max(support, 1), 4),
+                "mean_score": round(mean_score, 4),
+                "case_ids": list(row["case_ids"]),
+            }
+        )
+    label_metrics.sort(key=lambda item: (float(item["pass_rate"]), -int(item["support"]), str(item["label"])))
+    global_pass_rate = summary.pass_rate
+    weak_labels = [
+        str(row["label"])
+        for row in label_metrics
+        if int(row["support"]) > int(row["pass_count"]) and float(row["pass_rate"]) <= global_pass_rate
+    ]
+    confusions = [
+        {
+            "expected": expected,
+            "actual": actual,
+            "count": count,
+            "case_ids": confusion_case_ids[(expected, actual)],
+        }
+        for (expected, actual), count in confusion_counts.most_common(12)
+        if expected != actual
+    ]
+    overpredicted = [
+        {"label": label, "count": count}
+        for label, count in actual_counts.most_common(12)
+        if count > 0
+    ]
+    return {
+        "label_field": label_field,
+        "per_label": label_metrics[:30],
+        "weak_labels": weak_labels[:20],
+        "confusions": confusions,
+        "overpredicted_labels": overpredicted,
+        "invalid_output_case_ids": invalid_case_ids[:max_case_ids],
+        "category_metrics": summary.category_metrics,
+    }
+
+
+def infer_label_field_from_cases(cases: tuple[EvalCase, ...]) -> str | None:
+    counts: Counter[str] = Counter()
+    for case in cases:
+        if isinstance(case.expected, dict):
+            for key in LABEL_FIELD_CANDIDATES:
+                if key in case.expected and isinstance(case.expected[key], str):
+                    counts[key] += 1
+    if not counts:
+        return None
+    return counts.most_common(1)[0][0]
+
+
+def _balanced_examples(cases: tuple[EvalCase, ...], *, label_field: str | None, limit: int) -> list[EvalCase]:
+    if limit <= 0:
+        return []
+    if label_field is None:
+        return list(cases[:limit])
+    grouped: dict[str, list[EvalCase]] = defaultdict(list)
+    for case in cases:
+        grouped[_label_from_case(case, label_field=label_field) or "unlabeled"].append(case)
+    rows: list[EvalCase] = []
+    labels = sorted(grouped)
+    index = 0
+    while len(rows) < limit:
+        added = False
+        for label in labels:
+            bucket = grouped[label]
+            if index < len(bucket):
+                rows.append(bucket[index])
+                added = True
+                if len(rows) >= limit:
+                    break
+        if not added:
+            break
+        index += 1
+    return rows
+
+
+def _label_from_case(case: EvalCase, *, label_field: str | None) -> str | None:
+    if label_field and isinstance(case.expected, dict) and isinstance(case.expected.get(label_field), str):
+        return str(case.expected[label_field])
+    category = case.metadata.get("category")
+    if isinstance(category, str):
+        return category
+    return None
+
+
+def _actual_label(output: Any, grade_labels: list[str], *, label_field: str | None) -> str | None:
+    if label_field and isinstance(output, dict) and output.get(label_field) is not None:
+        return str(output[label_field])
+    for label in grade_labels:
+        if label.startswith("actual:"):
+            return label.split(":", 1)[1]
+    return None

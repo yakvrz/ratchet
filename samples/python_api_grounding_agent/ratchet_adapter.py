@@ -23,7 +23,14 @@ ANSWER_TOKEN_PATTERN = re.compile(
 BASE_SPEC = AgentSpec(
     name="python-api-grounding-agent",
     model="gemini-2.5-flash",
-    model_options=["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.5-pro"],
+    model_options=[
+        "gemini-3.1-flash-lite-preview",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+    ],
     instructions={
         "output_rule": "Return JSON with a single string field named answer.",
         "grounding_rule": "Prefer exact literals from docs_search results, but if the search is inconclusive you may provide the most likely Python symbol or argument.",

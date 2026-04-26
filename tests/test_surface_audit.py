@@ -26,7 +26,37 @@ class FakePatchClient:
         self.patches = patches
 
     def create_response(self, **_: object) -> object:
-        return type("Response", (), {"output_text": json.dumps({"patches": self.patches})})()
+        candidates = [
+            {
+                "transform_family": _family_for_patch(patch),
+                "transform_instance": str(patch.get("rationale", "")) or _family_for_patch(patch),
+                "target_slice": "global",
+                "hypothesis": str(patch.get("rationale", "")),
+                "expected_effects": {"summary": patch.get("expected_effect", "")},
+                "evaluation_plan": "full_dev",
+                "patch": patch,
+            }
+            for patch in self.patches
+        ]
+        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+
+
+def _family_for_patch(patch: dict[str, object]) -> str:
+    operations = patch.get("operations", [])
+    if not isinstance(operations, list) or not operations:
+        return "prompt_rewrite"
+    operation = operations[0]
+    if not isinstance(operation, dict):
+        return "prompt_rewrite"
+    op = str(operation.get("op", ""))
+    target = str(operation.get("target", ""))
+    if op == "change_model":
+        return "model_substitution"
+    if op == "set_retrieval_param":
+        return "retrieval_tuning"
+    if target.startswith("output") or op == "add_output_constraint":
+        return "output_contract_tightening"
+    return "prompt_rewrite"
 
 
 class FakeDiagnosisClient:
@@ -53,6 +83,14 @@ class FakeDiagnosisClient:
 class InvalidJsonClient:
     def create_response(self, **_: object) -> object:
         return type("Response", (), {"output_text": "not-json"})()
+
+
+class BarePatchClient:
+    def __init__(self, patches: list[dict[str, object]]) -> None:
+        self.patches = patches
+
+    def create_response(self, **_: object) -> object:
+        return type("Response", (), {"output_text": json.dumps({"patches": self.patches})})()
 
 
 def make_summary(patch_hash: str, scores: list[float]) -> PatchSummary:
@@ -179,8 +217,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertTrue(proposals)
-        self.assertEqual(proposals[0].operations[0].op, "add_instruction")
-        self.assertIn("Validated LLM patch proposals", analysis)
+        self.assertEqual(proposals[0].patch.operations[0].op, "add_instruction")
+        self.assertEqual(proposals[0].transform_family, "prompt_rewrite")
+        self.assertIn("Validated LLM transform candidate proposals", analysis)
 
     def test_llm_proposer_preserves_model_rank_and_logs_deferred_candidates(self) -> None:
         spec = AgentSpec(
@@ -243,7 +282,8 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(len(proposals), 1)
-        self.assertEqual(proposals[0].operations[0].op, "change_model")
+        self.assertEqual(proposals[0].patch.operations[0].op, "change_model")
+        self.assertEqual(proposals[0].transform_family, "model_substitution")
         self.assertEqual(engine.last_stats.valid_count, 3)
         self.assertEqual(engine.last_stats.returned_count, 1)
         self.assertEqual(len(engine.last_candidate_rows), 3)
@@ -294,8 +334,92 @@ class GeneratedSurfaceTests(unittest.TestCase):
             history=[],
         )
 
-        targets = [operation.target for patch in proposals for operation in patch.operations]
+        targets = [operation.target for candidate in proposals for operation in candidate.patch.operations]
         self.assertEqual(targets, ["retrieval.knowledge_mode"])
+
+    def test_llm_proposer_rejects_legacy_bare_patches(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+        )
+        surface = SurfaceGenerator().generate(spec, OptimizationObjective())
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = BarePatchClient(
+            [
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Answer exactly.",
+                        }
+                    ],
+                    "rationale": "Legacy bare patch.",
+                    "expected_effect": "Should not be accepted.",
+                }
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0]),
+            surface,
+            objective=OptimizationObjective(),
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertEqual(engine.last_stats.raw_count, 0)
+
+    def test_llm_proposer_rejects_inactive_family_candidate(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = FakePatchClient(
+            [
+                {
+                    "operations": [
+                        {
+                            "op": "add_output_constraint",
+                            "target": "output_contract",
+                            "value": "Return concise text.",
+                        }
+                    ],
+                    "rationale": "Output family has no current signal.",
+                    "expected_effect": "Should be inactive.",
+                }
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [1.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn("inactive transform family", next(iter(engine.last_stats.invalid_reasons or {})))
 
 
 if __name__ == "__main__":

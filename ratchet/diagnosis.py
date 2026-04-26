@@ -4,6 +4,7 @@ import json
 import re
 from typing import Any
 
+from ratchet.evidence import build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
 from ratchet.model_client import ResponsesModelClient
 from ratchet.results import PatchSummary
@@ -56,6 +57,7 @@ class FailureDiagnoser:
                 "pass_rate": summary.pass_rate,
                 "failure_labels": summary.failure_labels,
             },
+            "behavior_diagnostics": build_behavior_diagnostics(summary),
             "operational": {
                 "mean_cost_usd": summary.mean_cost_usd,
                 "mean_total_tokens": summary.mean_total_tokens,
@@ -114,7 +116,8 @@ class FailureDiagnoser:
                     "Each diagnosis object must include case_ids, category, root_cause, target_names, and evidence. "
                     "case_ids must come from failed_examples. target_names must come from editable_targets. "
                     "evidence must be an array of compact objects that cite case_id plus the observed output, expected signal, "
-                    "or grader note that supports the diagnosis. If labels, notes, output fields, or raw_output_text indicate "
+                    "behavior_diagnostics may include label confusion, weak-label, and slice summaries; use those summaries "
+                    "to group related failures when they are clearer than individual rows. If labels, notes, output fields, or raw_output_text indicate "
                     "malformed output, empty output, parser fallback, or an invalid output contract, diagnose that as an "
                     "output-format/contract failure before attributing it to semantic caution or grader behavior. "
                     "Do not propose patches. Do not mention hidden evaluator or judge changes; the scorer is frozen and "
@@ -157,7 +160,16 @@ class FailureDiagnoser:
 
     @staticmethod
     def _extract_json_object(text: str) -> dict[str, Any]:
-        match = re.search(r"\{.*\}", text, flags=re.DOTALL)
-        if not match:
-            raise ValueError("No JSON object found in diagnoser response.")
-        return json.loads(match.group(0))
+        decoder = json.JSONDecoder()
+        last_error: Exception | None = None
+        for match in re.finditer(r"\{", text):
+            try:
+                payload, _ = decoder.raw_decode(text[match.start() :])
+            except json.JSONDecodeError as exc:
+                last_error = exc
+                continue
+            if isinstance(payload, dict):
+                return payload
+        if last_error is not None:
+            raise last_error
+        raise ValueError("No JSON object found in diagnoser response.")

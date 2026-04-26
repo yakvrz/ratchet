@@ -21,6 +21,7 @@ def build_outcome_analysis(
     accepted_dev_patches: list[PatchSummary],
     holdout_patches: list[PatchSummary],
     decision_log: list[dict[str, Any]],
+    finalist_statuses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     proposal_iterations = [event for event in decision_log if event.get("type") == "proposal_iteration"]
     proposal_evaluations = [event for event in decision_log if event.get("type") == "proposal_evaluation"]
@@ -44,6 +45,20 @@ def build_outcome_analysis(
     latest_stats = dict(latest_iteration.get("proposal_stats") or {})
     diagnosis_analysis = str(latest_iteration.get("diagnosis_analysis", ""))
     proposal_analysis = str(latest_iteration.get("proposal_analysis", ""))
+    finalist_status_rows = list(finalist_statuses or [])
+    if not finalist_status_rows:
+        finalist_status_rows = [
+            {
+                "status": event.get("finalist_status"),
+                "reason": event.get("rejection_reason"),
+                "patch_hash": event.get("patch_hash"),
+            }
+            for event in holdout_validations
+            if event.get("finalist_status")
+        ]
+    finalist_status_counts: Counter[str] = Counter(
+        str(row.get("status")) for row in finalist_status_rows if row.get("status")
+    )
 
     status = "promoted"
     summary = "Promoted an optimized patch after holdout validation."
@@ -55,7 +70,12 @@ def build_outcome_analysis(
         ):
             status = "no_failures"
             summary = "Baseline had no dev failures under the correctness objective."
-        elif latest_stats.get("raw_count", 0) > 0 and latest_stats.get("valid_count", 0) == 0:
+        elif (
+            latest_stats.get("raw_count", 0) > 0
+            and latest_stats.get("valid_count", 0) == 0
+            and not accepted_dev_patches
+            and not holdout_patches
+        ):
             status = "proposals_invalid"
             summary = "The optimizing model returned patches, but none satisfied the generated surface schema."
         elif proposal_iterations and not proposal_evaluations:
@@ -78,7 +98,10 @@ def build_outcome_analysis(
             status = "holdout_not_run_budget_exhausted"
             summary = "At least one dev patch improved, but holdout validation budget was zero."
         elif holdout_validations and not any(event.get("passed_final_gate") for event in holdout_validations):
-            if any("uncertainty rejected" in reason for reason in holdout_rejection_reasons):
+            if finalist_status_counts.get("directional", 0) > 0:
+                status = "directional_holdout_gain"
+                summary = "A dev finalist improved holdout directionally, but the uncertainty gate did not validate it."
+            elif any("uncertainty rejected" in reason for reason in holdout_rejection_reasons):
                 status = "holdout_gain_uncertain"
                 summary = "A dev finalist reached holdout, but its measured gain was not statistically supported."
             elif any("tradeoff" in reason or "constraint rejected" in reason for reason in holdout_rejection_reasons):
@@ -102,6 +125,7 @@ def build_outcome_analysis(
         "latest_proposal_analysis": proposal_analysis,
         "latest_proposal_stats": latest_stats,
         "rejection_reasons": dict(sorted(rejection_reasons.items(), key=lambda item: (-item[1], item[0]))),
+        "finalist_status_counts": dict(sorted(finalist_status_counts.items())),
     }
 
 
@@ -137,6 +161,14 @@ class RatchetReporter:
                 "holdout_patches": [summary.to_dict() for summary in result.holdout_patches],
                 "pareto_frontier": result.pareto_frontier,
                 "generated_surface": result.generated_surface,
+                "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
+                "transform_summaries": result.transform_summaries,
+                "transform_context_summaries": result.transform_context_summaries,
+                "finalist_statuses": result.finalist_statuses,
+                "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
+                "confirmation_results": result.confirmation_results,
+                "run_profile": result.run_profile,
+                "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
             },
         )
         write_json(
@@ -148,6 +180,13 @@ class RatchetReporter:
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
+                "transform_summaries": result.transform_summaries,
+                "transform_context_summaries": result.transform_context_summaries,
+                "finalist_statuses": result.finalist_statuses,
+                "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
+                "confirmation_results": result.confirmation_results,
+                "run_profile": result.run_profile,
+                "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "holdout_comparison_to_baseline": selected_comparison.to_dict(),
                 "baseline": result.baseline_holdout.to_dict(),
                 "selected": result.selected_holdout.to_dict(),
@@ -162,6 +201,7 @@ class RatchetReporter:
     def _write_report(self, result: RatchetResult) -> None:
         changes = self._patch_change_rows(result.selected_patch)
         comparison = compare_summaries(result.baseline_holdout, result.selected_holdout)
+        transform_narrative = self._transform_narrative(result)
         lines = [
             "# Ratchet Report",
             "",
@@ -209,6 +249,52 @@ class RatchetReporter:
             f"- Latest diagnosis: {result.outcome_analysis['latest_diagnosis_analysis'] or 'n/a'}",
             f"- Latest proposal: {result.outcome_analysis['latest_proposal_analysis'] or 'n/a'}",
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
+            f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
+            "",
+            "## Finalist Statuses",
+            "",
+            *self._finalist_status_rows(result),
+            "",
+            "## Runtime Reliability",
+            "",
+            *self._runtime_reliability_rows(result),
+            "",
+            "## Quality/Cost Tradeoffs",
+            "",
+            *self._quality_cost_tradeoff_rows(result),
+            "",
+            "## Run Profile",
+            "",
+            *self._run_profile_rows(result),
+            "",
+            "## Search Narrative",
+            "",
+            transform_narrative,
+            "",
+            "## Transform Families",
+            "",
+            *[
+                "- "
+                f"`{name}`: state={summary.get('state')}, "
+                f"proposed={summary.get('proposed_count')}, "
+                f"evaluated={summary.get('evaluated_count')}, "
+                f"accepted={summary.get('accepted_count')}; "
+                f"{summary.get('reason')}"
+                for name, summary in sorted(result.transform_summaries.items())
+            ],
+            "",
+            "## Transform Contexts",
+            "",
+            *[
+                "- "
+                f"`{summary.get('key', {}).get('family')}` "
+                f"targets={','.join(summary.get('key', {}).get('target_names', [])) or 'global'} "
+                f"instance={summary.get('key', {}).get('transform_instance')} "
+                f"slice={summary.get('key', {}).get('target_slice')}: "
+                f"state={summary.get('state')}, evaluated={summary.get('evaluated_count')}, "
+                f"accepted={summary.get('accepted_count')}; {summary.get('reason')}"
+                for _, summary in sorted(result.transform_context_summaries.items())
+            ],
             "",
             "## Run Health",
             "",
@@ -218,6 +304,7 @@ class RatchetReporter:
             f"- Grader errors: {self.stats.grader_errors}",
             f"- Timeouts: {self.stats.timeouts}",
             f"- Samples per case: {result.baseline_holdout.samples_per_case:g}",
+            f"- Proposal-safe train examples: {(result.manifest.get('proposal_example_bank') or {}).get('example_count', 0)}",
         ]
         (self.out_dir / "report.md").write_text("\n".join(lines) + "\n")
 
@@ -320,11 +407,150 @@ class RatchetReporter:
         )
 
     @staticmethod
+    def _finalist_status_rows(result: RatchetResult) -> list[str]:
+        if not result.finalist_statuses:
+            return ["No finalist status rows were recorded."]
+        rows = []
+        for item in result.finalist_statuses:
+            status = str(item.get("status", "unknown"))
+            patch_hash_value = str(item.get("patch_hash", "unknown"))
+            reason = str(item.get("reason") or "passed")
+            stage = str(item.get("stage") or "unknown")
+            holdout_metrics = item.get("holdout_metrics") or {}
+            pass_count = holdout_metrics.get("pass_count")
+            case_count = holdout_metrics.get("case_count")
+            metric_text = f"; holdout={pass_count}/{case_count}" if pass_count is not None and case_count is not None else ""
+            rows.append(f"- `{patch_hash_value}`: `{status}` at `{stage}`{metric_text}; {reason}")
+        return rows
+
+    @staticmethod
+    def _runtime_reliability_rows(result: RatchetResult) -> list[str]:
+        suspicious = [
+            item for item in result.runtime_reliability_diagnostics if item.get("suspicious")
+        ]
+        if not suspicious:
+            return ["No suspicious runtime-only improvements were flagged."]
+        rows = []
+        for item in suspicious:
+            rows.append(
+                "- "
+                f"`{item.get('patch_hash')}`: {item.get('reason')} "
+                f"fixed_invalid={item.get('fixed_invalid_output_case_ids', [])}, "
+                f"low_token_fixed={item.get('low_token_fixed_case_ids', [])}, "
+                f"finish_reasons={json.dumps(item.get('finish_reasons_by_case', {}), sort_keys=True)}"
+            )
+        if result.confirmation_results:
+            for item in result.confirmation_results:
+                rows.append(
+                    "- "
+                    f"confirmation `{item.get('patch_hash')}`: "
+                    f"passed={item.get('passed')}; {item.get('reason')}"
+                )
+        return rows
+
+    @staticmethod
+    def _quality_cost_tradeoff_rows(result: RatchetResult) -> list[str]:
+        if not result.quality_cost_tradeoffs:
+            return ["No model substitutions were rejected by the cost guard."]
+        return [
+            "- "
+            f"`{item.get('patch_hash')}`: {item.get('rejection_reason')} "
+            f"metrics={json.dumps(item.get('metrics', {}), sort_keys=True)}"
+            for item in result.quality_cost_tradeoffs
+        ]
+
+    @staticmethod
+    def _run_profile_rows(result: RatchetResult) -> list[str]:
+        profile = result.run_profile or {}
+        rows = [
+            f"- Elapsed: {float(profile.get('elapsed_s') or 0.0):.3f}s",
+            f"- Phase durations: {json.dumps(profile.get('phase_durations_s', {}), sort_keys=True)}",
+            f"- Cache events: {json.dumps(profile.get('cache_events', {}), sort_keys=True)}",
+            f"- Cache hit rate: {float(profile.get('cache_hit_rate') or 0.0):.3f}",
+        ]
+        slowest = profile.get("slowest_cases") or []
+        if slowest:
+            rows.append("- Slowest cases: " + RatchetReporter._compact_profile_rows(slowest, "latency_s"))
+        token_heavy = profile.get("highest_token_cases") or []
+        if token_heavy:
+            rows.append("- Highest token cases: " + RatchetReporter._compact_profile_rows(token_heavy, "total_tokens"))
+        patch_profiles = profile.get("patch_profiles") or []
+        if patch_profiles:
+            rows.append("- Patch profiles: " + RatchetReporter._compact_patch_profile_rows(patch_profiles))
+        patch_deltas = profile.get("patch_deltas_vs_baseline") or []
+        if patch_deltas:
+            rows.append("- Patch deltas vs baseline: " + RatchetReporter._compact_patch_delta_rows(patch_deltas))
+        return rows
+
+    @staticmethod
+    def _compact_profile_rows(rows: list[dict[str, Any]], metric: str, *, limit: int = 5) -> str:
+        return "; ".join(
+            f"{row.get('split_group')}:{row.get('case_id')}@{row.get('patch_hash')}={row.get(metric)}"
+            for row in rows[:limit]
+        )
+
+    @staticmethod
+    def _compact_patch_profile_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+        return "; ".join(
+            f"{row.get('split')}:{row.get('patch_hash')} score={float(row.get('mean_score') or 0.0):.3f} "
+            f"cost=${float(row.get('mean_cost_usd') or 0.0):.6f} "
+            f"tokens={float(row.get('mean_total_tokens') or 0.0):.1f} "
+            f"lat={float(row.get('median_latency_s') or 0.0):.2f}s"
+            for row in rows[:limit]
+        )
+
+    @staticmethod
+    def _compact_patch_delta_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+        return "; ".join(
+            f"{row.get('split')}:{row.get('patch_hash')} "
+            f"score_delta={float(row.get('score_delta') or 0.0):+.3f} "
+            f"cost_delta=${float(row.get('cost_delta') or 0.0):+.6f} "
+            f"token_delta={float(row.get('token_delta') or 0.0):+.1f} "
+            f"lat_delta={float(row.get('latency_delta') or 0.0):+.2f}s"
+            for row in rows[:limit]
+        )
+
+    @staticmethod
     def _patch_change_rows(patch: AgentPatch) -> list[str]:
         return [
             f"`{operation.op}` on `{operation.target}`: {RatchetReporter._format_value(operation.value)}"
             for operation in patch.operations
         ]
+
+    @staticmethod
+    def _transform_narrative(result: RatchetResult) -> str:
+        tested = [
+            name
+            for name, summary in sorted(result.transform_summaries.items())
+            if int(summary.get("evaluated_count") or 0) > 0
+        ]
+        promoted = [
+            name
+            for name, summary in sorted(result.transform_summaries.items())
+            if summary.get("state") == "promoted"
+        ]
+        constrained = [
+            name
+            for name, summary in sorted(result.transform_summaries.items())
+            if summary.get("state") == "constrained"
+        ]
+        paused = [
+            name
+            for name, summary in sorted(result.transform_summaries.items())
+            if summary.get("state") == "paused"
+        ]
+        if not tested:
+            return "Ratchet did not evaluate any transform-family candidates after profiling the current branch."
+        parts = [f"Ratchet evaluated transform families: {', '.join(f'`{name}`' for name in tested)}."]
+        if promoted:
+            parts.append(f"Promoted families: {', '.join(f'`{name}`' for name in promoted)}.")
+        if constrained:
+            parts.append(f"Constrained families after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
+        if paused:
+            parts.append(f"Paused families pending stronger evidence: {', '.join(f'`{name}`' for name in paused)}.")
+        if not result.promoted:
+            parts.append("No candidate cleared the configured dev and holdout gates, so Ratchet kept the baseline.")
+        return " ".join(parts)
 
     @staticmethod
     def _format_value(value: Any) -> str:

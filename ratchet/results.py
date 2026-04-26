@@ -309,6 +309,13 @@ class RatchetResult:
     diagnoses: list[dict[str, Any]]
     proposals: list[dict[str, Any]]
     generated_surface: list[dict[str, Any]]
+    transform_summaries: dict[str, dict[str, Any]]
+    transform_context_summaries: dict[str, dict[str, Any]]
+    finalist_statuses: list[dict[str, Any]]
+    runtime_reliability_diagnostics: list[dict[str, Any]]
+    confirmation_results: list[dict[str, Any]]
+    run_profile: dict[str, Any]
+    quality_cost_tradeoffs: list[dict[str, Any]]
     selection_reason: str
     outcome_analysis: dict[str, Any]
     manifest: dict[str, Any]
@@ -381,3 +388,12 @@ def split_cases(cases: Iterable[EvalCase]) -> tuple[tuple[EvalCase, ...], tuple[
     if not holdout:
         raise ValueError("Eval file must include at least one holdout case.")
     return dev, holdout
+
+
+def split_train_dev_holdout(
+    cases: Iterable[EvalCase],
+) -> tuple[tuple[EvalCase, ...], tuple[EvalCase, ...], tuple[EvalCase, ...]]:
+    rows = tuple(cases)
+    train = tuple(case for case in rows if case.split == "train")
+    dev, holdout = split_cases(rows)
+    return train, dev, holdout

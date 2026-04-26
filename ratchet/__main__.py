@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import sys
 from typing import Any
 
 from ratchet.adapters import adapter_fingerprint, load_adapter
@@ -78,6 +79,7 @@ def run_optimizer(
             "adapter_fingerprint": adapter_fingerprint(config.adapter),
             "evals_sha256": file_sha256(config.evals),
         },
+        progress_callback=_print_progress_event,
     )
     result = optimizer.run(cases)
     print(
@@ -86,6 +88,97 @@ def run_optimizer(
     )
     print(f"Report: {config.out / 'report.md'}")
     return config.out
+
+
+def _print_progress_event(row: dict[str, Any]) -> None:
+    event = row.get("event")
+    message: str | None = None
+    if event == "run_started":
+        message = (
+            f"run started: dev={row.get('dev_cases')} holdout={row.get('holdout_cases')} "
+            f"dev_budget={row.get('dev_budget')}"
+        )
+    elif event == "baseline_dev_started":
+        message = f"baseline dev started: cases={row.get('case_count')}"
+    elif event == "baseline_dev_completed":
+        message = _format_score_message("baseline dev", row)
+    elif event == "baseline_holdout_started":
+        message = f"baseline holdout started: cases={row.get('case_count')}"
+    elif event == "baseline_holdout_completed":
+        message = _format_score_message("baseline holdout", row)
+    elif event == "iteration_started":
+        message = (
+            f"iteration {row.get('iteration')}: frontier={row.get('frontier_width')} "
+            f"dev_evals={row.get('dev_evaluations')}/{row.get('dev_budget')}"
+        )
+    elif event == "parent_started":
+        message = (
+            f"parent {row.get('parent_rank')}: patch={_short_hash(row.get('parent_patch_hash'))} "
+            f"score={row.get('mean_score')} pass={row.get('pass_count')}/{row.get('case_count')}"
+        )
+    elif event == "diagnosis_started":
+        message = (
+            f"diagnosis started: parent={row.get('parent_rank')} "
+            f"failures={row.get('failure_count')}"
+        )
+    elif event == "search_hypothesis_ready":
+        families = row.get("active_families") or []
+        message = (
+            f"hypothesis ready: families={','.join(families[:5]) or 'none'} "
+            f"contexts={row.get('active_context_count')}"
+        )
+    elif event == "proposal_started":
+        families = row.get("active_families") or []
+        message = (
+            f"proposal started: budget={row.get('proposal_budget')} "
+            f"families={','.join(families[:5]) or 'none'}"
+        )
+    elif event == "proposal_completed":
+        message = (
+            f"proposals: returned={row.get('returned_count')} valid={row.get('valid_count')} "
+            f"invalid={row.get('invalid_count')} duplicates={row.get('duplicate_count')}"
+        )
+    elif event == "candidate_evaluation_started":
+        message = (
+            f"candidate started: family={row.get('transform_family')} "
+            f"patch={_short_hash(row.get('patch_hash'))}"
+        )
+    elif event == "candidate_evaluated":
+        status = "accepted" if row.get("accepted") else "rejected"
+        reason = row.get("rejection_reason")
+        suffix = f" ({reason})" if reason else ""
+        message = f"candidate {status}: family={row.get('transform_family')}{suffix}"
+    elif event == "retry_started":
+        message = f"retrying parent {row.get('parent_rank')}: {row.get('reason')}"
+    elif event == "frontier_updated":
+        message = f"frontier updated: accepted={row.get('accepted_count')}"
+    elif event == "holdout_candidate_started":
+        message = f"holdout started: patch={_short_hash(row.get('patch_hash'))}"
+    elif event == "holdout_candidate_completed":
+        status = "passed" if row.get("passed_final_gate") else "rejected"
+        message = f"holdout {status}: patch={_short_hash(row.get('patch_hash'))}"
+    elif event == "holdout_validation_skipped":
+        message = f"holdout skipped: {row.get('reason')}"
+    elif event == "run_completed":
+        status = "promoted" if row.get("promoted") else "baseline kept"
+        message = f"run completed: {status}, selected={_short_hash(row.get('selected_patch_hash'))}"
+
+    if message:
+        print(f"[ratchet] {message}", file=sys.stderr, flush=True)
+
+
+def _format_score_message(label: str, row: dict[str, Any]) -> str:
+    return (
+        f"{label} complete: score={row.get('mean_score')} "
+        f"pass={row.get('pass_count')}/{row.get('case_count')} "
+        f"cost=${float(row.get('mean_cost_usd') or 0):.4f}/case "
+        f"latency={float(row.get('median_latency_s') or 0):.2f}s"
+    )
+
+
+def _short_hash(value: object) -> str:
+    text = str(value or "")
+    return text[:8] if text else "unknown"
 
 
 def run_check(

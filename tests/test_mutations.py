@@ -74,6 +74,49 @@ class V2PatchSurfaceTests(unittest.TestCase):
         self.assertEqual(schemas["tools.search.enabled"]["type"], "boolean")
         self.assertEqual(schemas["model"]["shape"], "categorical")
 
+    def test_few_shot_patch_accepts_single_or_multiple_examples(self) -> None:
+        spec = self.make_spec()
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["few_shot"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        validator = PatchValidator()
+        patch = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_few_shot",
+                    target="few_shot",
+                    value=[
+                        {
+                            "source_case_id": "train-1",
+                            "input": "How do I reset access?",
+                            "output": {"label": "account_help"},
+                            "purpose": "representative account help example",
+                        },
+                        {
+                            "source_case_id": "train-2",
+                            "input": "Why was I charged?",
+                            "output": {"label": "fee_question"},
+                            "purpose": "representative fee question example",
+                        },
+                    ],
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validator.validate(
+                patch,
+                current_spec=spec,
+                surface=surface,
+                objective=objective,
+                proposal_example_case_ids={"train-1", "train-2"},
+            )
+        )
+        updated = spec.apply_patch(patch)
+        self.assertEqual(len(updated.few_shot), 2)
+        self.assertEqual(updated.few_shot[0]["output"]["label"], "account_help")
+
     def test_patch_validator_rejects_invalid_model_and_unsupported_target(self) -> None:
         spec = self.make_spec()
         objective = OptimizationObjective(
@@ -180,6 +223,107 @@ class V2PatchSurfaceTests(unittest.TestCase):
                     evidence_cases=[case],
                 )
             )
+
+    def test_patch_validator_restricts_few_shot_to_proposal_examples(self) -> None:
+        spec = self.make_spec()
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["few_shot", "instruction"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        validator = PatchValidator()
+        train_case = EvalCase(
+            id="train-1",
+            split="train",
+            input="Private train wording for access reset with a distinctive protected phrase",
+            expected={"label": "account_help"},
+        )
+        valid_few_shot = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_few_shot",
+                    target="few_shot",
+                    value=[
+                        {
+                            "source_case_id": "train-1",
+                            "input": "Private train wording for access reset with a distinctive protected phrase",
+                            "output": {"label": "account_help"},
+                            "purpose": "representative train example",
+                        }
+                    ],
+                )
+            ]
+        )
+        prompt_copy = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_instruction",
+                    target="instructions.system_prompt",
+                    value="Always remember Private train wording for access reset with a distinctive protected phrase.",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validator.validate(
+                valid_few_shot,
+                current_spec=spec,
+                surface=surface,
+                objective=objective,
+                proposal_example_case_ids={"train-1"},
+                proposal_example_cases=[train_case],
+            )
+        )
+        self.assertFalse(
+            validator.validate(
+                prompt_copy,
+                current_spec=spec,
+                surface=surface,
+                objective=objective,
+                proposal_example_case_ids={"train-1"},
+                proposal_example_cases=[train_case],
+            )
+        )
+
+    def test_patch_validator_allows_eval_literals_already_in_agent_spec(self) -> None:
+        spec = AgentSpec(
+            name="intent-agent",
+            model="large",
+            instructions={
+                "label_rule": "Allowed labels: card_payment_fee_charged, extra_charge_on_statement.",
+                "decision_rule": "Choose a label.",
+            },
+        )
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["instruction"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        validator = PatchValidator()
+        case = EvalCase(
+            id="case-1",
+            split="dev",
+            input="Why was I charged for a card payment?",
+            expected={"label": "card_payment_fee_charged"},
+            metadata={"category": "card_payment_fee_charged"},
+        )
+        patch = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="revise_instruction",
+                    target="instructions.decision_rule",
+                    value="Prefer card_payment_fee_charged for card payment fee complaints.",
+                )
+            ]
+        )
+
+        self.assertTrue(
+            validator.validate(
+                patch,
+                current_spec=spec,
+                surface=surface,
+                objective=objective,
+                evidence_cases=[case],
+            )
+        )
 
     def test_patch_hash_is_deterministic(self) -> None:
         first = patch_hash(

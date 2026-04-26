@@ -48,6 +48,28 @@ def _value_schema_error(value: Any, schema: dict[str, Any]) -> str | None:
     if isinstance(value, str) and schema.get("maxLength") is not None:
         if len(value) > int(schema["maxLength"]):
             return "string value exceeds target maxLength"
+    if isinstance(value, list):
+        if schema.get("maxItems") is not None and len(value) > int(schema["maxItems"]):
+            return "array value exceeds target maxItems"
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                item_error = _value_schema_error(item, item_schema)
+                if item_error is not None:
+                    return f"array item {index}: {item_error}"
+    if isinstance(value, dict):
+        required = schema.get("required")
+        if isinstance(required, list):
+            for key in required:
+                if str(key) not in value:
+                    return f"object value is missing required key {key!r}"
+        properties = schema.get("properties")
+        if isinstance(properties, dict):
+            for key, item_schema in properties.items():
+                if key in value and isinstance(item_schema, dict):
+                    item_error = _value_schema_error(value[key], item_schema)
+                    if item_error is not None:
+                        return f"object key {key!r}: {item_error}"
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         if schema.get("minimum") is not None and value < float(schema["minimum"]):
             return "numeric value is below target minimum"
@@ -65,6 +87,8 @@ class PatchValidator:
         surface: list[EditableTarget],
         objective: OptimizationObjective,
         evidence_cases: list[EvalCase] | None = None,
+        proposal_example_case_ids: set[str] | None = None,
+        proposal_example_cases: list[EvalCase] | None = None,
     ) -> tuple[bool, str | None]:
         if patch.is_empty:
             return False, "empty patch"
@@ -90,13 +114,31 @@ class PatchValidator:
             schema_error = _value_schema_error(operation.value, target.value_schema)
             if schema_error is not None:
                 return False, f"{target.name}: {schema_error}"
+            existing_public_context = _existing_public_context(current_spec, target.current_value)
+            protected_cases = list(evidence_cases or [])
+            if operation.op != "add_few_shot":
+                protected_cases.extend(proposal_example_cases or [])
             evidence_error = _eval_evidence_copy_error(
                 operation.value,
-                target.current_value,
-                evidence_cases or [],
+                existing_public_context,
+                protected_cases,
             )
             if evidence_error is not None:
                 return False, evidence_error
+            if operation.op == "add_few_shot":
+                source_error = _few_shot_source_error(
+                    operation.value,
+                    proposal_example_case_ids=proposal_example_case_ids,
+                )
+                if source_error is not None:
+                    return False, source_error
+                unreferenced_error = _unreferenced_proposal_example_copy_error(
+                    operation.value,
+                    existing_public_context,
+                    proposal_example_cases or [],
+                )
+                if unreferenced_error is not None:
+                    return False, unreferenced_error
             if operation.op == "change_model" and target.choices:
                 if str(operation.value) not in target.choices:
                     return False, "model value is not in the allowed model set"
@@ -115,6 +157,8 @@ class PatchValidator:
         surface: list[EditableTarget],
         objective: OptimizationObjective,
         evidence_cases: list[EvalCase] | None = None,
+        proposal_example_case_ids: set[str] | None = None,
+        proposal_example_cases: list[EvalCase] | None = None,
     ) -> bool:
         is_valid, _ = self.validate_with_reason(
             patch,
@@ -122,8 +166,53 @@ class PatchValidator:
             surface=surface,
             objective=objective,
             evidence_cases=evidence_cases,
+            proposal_example_case_ids=proposal_example_case_ids,
+            proposal_example_cases=proposal_example_cases,
         )
         return is_valid
+
+
+def _few_shot_source_error(value: Any, *, proposal_example_case_ids: set[str] | None) -> str | None:
+    if proposal_example_case_ids is None:
+        return None
+    if not proposal_example_case_ids:
+        return "few-shot patch requires proposal-safe train examples, but none are available"
+    rows = value if isinstance(value, list) else [value]
+    for index, item in enumerate(rows):
+        if not isinstance(item, dict):
+            return f"few-shot item {index} must be an object"
+        source_case_id = item.get("source_case_id")
+        if not isinstance(source_case_id, str) or not source_case_id:
+            return f"few-shot item {index} must include source_case_id"
+        if source_case_id not in proposal_example_case_ids:
+            return f"few-shot item {index} references unknown proposal example {source_case_id!r}"
+    return None
+
+
+def _unreferenced_proposal_example_copy_error(
+    value: Any,
+    current_value: Any,
+    proposal_example_cases: list[EvalCase],
+) -> str | None:
+    if not proposal_example_cases:
+        return None
+    referenced = _few_shot_source_ids(value)
+    unreferenced = [case for case in proposal_example_cases if case.id not in referenced]
+    if not unreferenced:
+        return None
+    error = _eval_evidence_copy_error(value, current_value, unreferenced)
+    if error is None:
+        return None
+    return error.replace("eval", "unreferenced proposal example", 1)
+
+
+def _few_shot_source_ids(value: Any) -> set[str]:
+    rows = value if isinstance(value, list) else [value]
+    ids: set[str] = set()
+    for item in rows:
+        if isinstance(item, dict) and isinstance(item.get("source_case_id"), str):
+            ids.add(item["source_case_id"])
+    return ids
 
 
 def _eval_evidence_copy_error(value: Any, current_value: Any, cases: list[EvalCase]) -> str | None:
@@ -151,6 +240,15 @@ def _eval_evidence_copy_error(value: Any, current_value: Any, cases: list[EvalCa
             if copied is not None:
                 return f"patch value copies eval {label} fragment"
     return None
+
+
+def _existing_public_context(current_spec: AgentSpec | None, target_current_value: Any) -> Any:
+    if current_spec is None:
+        return target_current_value
+    return {
+        "agent_spec": current_spec.to_dict(),
+        "target_current_value": target_current_value,
+    }
 
 
 def _stringify_value(value: Any) -> str:
