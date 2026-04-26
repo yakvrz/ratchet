@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 
+import ratchet
 from ratchet.io import agent_spec_hash, load_eval_cases, patch_hash
+from ratchet.optimizer import case_timeout
 from ratchet.surface import SurfaceGenerator
 from ratchet.types import (
     AgentPatch,
@@ -51,6 +54,50 @@ class V2PatchSurfaceTests(unittest.TestCase):
         self.assertIn("exact grounded", updated.instructions["system_prompt"].lower())
         self.assertNotEqual(agent_spec_hash(spec), agent_spec_hash(updated))
 
+    def test_agent_spec_apply_patch_preserves_original_spec(self) -> None:
+        spec = self.make_spec()
+        original = spec.to_dict()
+        patch = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_instruction",
+                    target="instructions.system_prompt",
+                    value="Answer with exact grounded facts.",
+                ),
+                PatchOperation(op="set_runtime_param", target="runtime.output_cap", value=256),
+            ]
+        )
+
+        updated = spec.apply_patch(patch)
+
+        self.assertEqual(spec.to_dict(), original)
+        self.assertNotEqual(updated.to_dict(), original)
+        self.assertEqual(spec.runtime["output_cap"], 128)
+        self.assertEqual(updated.runtime["output_cap"], 256)
+
+    def test_public_api_exports_user_facing_errors_not_transform_internals(self) -> None:
+        self.assertIn("OptimizerModelError", ratchet.__all__)
+        self.assertIn("RatchetConfigError", ratchet.__all__)
+        self.assertNotIn("TransformContextState", ratchet.__all__)
+        self.assertNotIn("TransformFamilyState", ratchet.__all__)
+
+    def test_case_timeout_fails_fast_in_worker_thread(self) -> None:
+        errors: list[str] = []
+
+        def worker() -> None:
+            try:
+                with case_timeout(1):
+                    pass
+            except RuntimeError as exc:
+                errors.append(str(exc))
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        thread.join()
+
+        self.assertEqual(len(errors), 1)
+        self.assertIn("main thread", errors[0])
+
     def test_surface_generator_derives_targets_from_agent_spec(self) -> None:
         objective = OptimizationObjective(
             mode="correctness",
@@ -73,6 +120,41 @@ class V2PatchSurfaceTests(unittest.TestCase):
         self.assertEqual(schemas["runtime.output_cap"]["type"], "integer")
         self.assertEqual(schemas["tools.search.enabled"]["type"], "boolean")
         self.assertEqual(schemas["model"]["shape"], "categorical")
+
+    def test_surface_generator_memoizes_by_spec_and_objective(self) -> None:
+        class CountingSurfaceGenerator(SurfaceGenerator):
+            def __init__(self) -> None:
+                super().__init__()
+                self.uncached_calls = 0
+
+            def _generate_uncached(
+                self,
+                spec: AgentSpec | None,
+                objective: OptimizationObjective,
+            ):
+                self.uncached_calls += 1
+                return super()._generate_uncached(spec, objective)
+
+        spec = self.make_spec()
+        generator = CountingSurfaceGenerator()
+        correctness = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["instruction"])
+        )
+        cost = OptimizationObjective(
+            mode="cost",
+            constraints=OptimizationConstraints(allowed_edits=["instruction"]),
+        )
+
+        first = generator.generate(spec, correctness)
+        second = generator.generate(spec, correctness)
+        third = generator.generate(spec.apply_patch(AgentPatch.empty()), correctness)
+        fourth = generator.generate(spec, cost)
+
+        self.assertEqual(generator.uncached_calls, 2)
+        self.assertIsNot(first, second)
+        self.assertEqual([target.to_dict() for target in first], [target.to_dict() for target in second])
+        self.assertEqual([target.to_dict() for target in first], [target.to_dict() for target in third])
+        self.assertEqual([target.to_dict() for target in first], [target.to_dict() for target in fourth])
 
     def test_few_shot_patch_accepts_single_or_multiple_examples(self) -> None:
         spec = self.make_spec()
@@ -116,6 +198,41 @@ class V2PatchSurfaceTests(unittest.TestCase):
         updated = spec.apply_patch(patch)
         self.assertEqual(len(updated.few_shot), 2)
         self.assertEqual(updated.few_shot[0]["output"]["label"], "account_help")
+
+    def test_few_shot_patch_rejects_ignored_extra_fields(self) -> None:
+        spec = self.make_spec()
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["few_shot"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        validator = PatchValidator()
+        patch = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_few_shot",
+                    target="few_shot",
+                    value=[
+                        {
+                            "source_case_id": "train-1",
+                            "input": "How do I reset access?",
+                            "output": {"label": "account_help"},
+                            "purpose": "representative account help example",
+                            "ignored": "this renderer would ignore me",
+                        }
+                    ],
+                )
+            ]
+        )
+
+        is_valid, reason = validator.validate_with_reason(
+            patch,
+            current_spec=spec,
+            surface=surface,
+            objective=objective,
+            proposal_example_case_ids={"train-1"},
+        )
+        self.assertFalse(is_valid)
+        self.assertIn("unsupported key 'ignored'", reason or "")
 
     def test_patch_validator_rejects_invalid_model_and_unsupported_target(self) -> None:
         spec = self.make_spec()

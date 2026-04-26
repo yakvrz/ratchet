@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import unittest
 
-from ratchet.objectives import compare_summaries, final_gate, final_gate_status, objective_rejection_reason
+from ratchet.objectives import (
+    GatePredicate,
+    compare_summaries,
+    final_gate,
+    final_gate_status,
+    objective_rejection_reason,
+    select_recommended_patch,
+)
 from ratchet.reporting import build_outcome_analysis
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.types import (
@@ -52,6 +59,40 @@ def make_summary(
     )
 
 
+def make_repeated_summary(
+    patch_hash_value: str,
+    case_sample_scores: list[list[float]],
+) -> PatchSummary:
+    evaluations = []
+    for case_index, sample_scores in enumerate(case_sample_scores, start=1):
+        case = EvalCase(id=f"case-{case_index}", split="holdout", input=f"case {case_index}")
+        for sample_index, score in enumerate(sample_scores):
+            evaluations.append(
+                CaseEvaluation(
+                    case=case,
+                    record=RunRecord(
+                        output="ok",
+                        metrics=OperationalMetrics(
+                            latency_s=1.0,
+                            input_tokens=50,
+                            output_tokens=50,
+                            total_tokens=100,
+                            cost_usd=0.002,
+                        ),
+                        diagnostics=DiagnosticTrace(),
+                    ),
+                    grade=GradeResult(score=score, passed=score == 1.0, labels=[]),
+                    sample_index=sample_index,
+                )
+            )
+    return PatchSummary(
+        patch_hash=patch_hash_value,
+        patch=AgentPatch(metadata={"name": patch_hash_value}),
+        split="holdout",
+        evaluations=evaluations,
+    )
+
+
 class AcceptanceGateTests(unittest.TestCase):
     def test_equal_quality_lower_cost_and_tokens_passes_final_gate(self) -> None:
         baseline = make_summary("baseline", [1.0, 1.0, 1.0], [0.004, 0.004, 0.004], [200, 200, 200], [1.0, 1.0, 1.0])
@@ -84,8 +125,8 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(passed)
 
     def test_higher_quality_patch_can_pass_final_gate_without_efficiency_gain(self) -> None:
-        baseline = make_summary("baseline", [0.0, 0.0, 0.0], [0.002, 0.002, 0.002], [100, 100, 100], [1.0, 1.0, 1.0])
-        patch_summary = make_summary("patch_summary", [1.0, 1.0, 1.0], [0.004, 0.004, 0.004], [300, 300, 300], [1.0, 1.0, 1.0])
+        baseline = make_summary("baseline", [0.0, 0.0, 0.0, 0.0], [0.002] * 4, [100] * 4, [1.0] * 4)
+        patch_summary = make_summary("patch_summary", [1.0, 1.0, 1.0, 1.0], [0.004] * 4, [300] * 4, [1.0] * 4)
         comparison = compare_summaries(baseline, patch_summary)
         self.assertGreater(comparison.score_ci[0], 0.0)
         passed, _ = final_gate(baseline, patch_summary, OptimizationObjective(mode="correctness"))
@@ -124,6 +165,26 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(gate.status, "directional")
         self.assertTrue(gate.directional)
         self.assertFalse(gate.validated)
+        self.assertIn("paired pass-flip p-value", gate.reason or "")
+
+    def test_score_only_holdout_gain_is_directional_not_validated(self) -> None:
+        baseline = make_summary("baseline", [0.4] * 8, [0.002] * 8, [100] * 8, [1.0] * 8)
+        patch_summary = make_summary("patch_summary", [0.8] * 8, [0.002] * 8, [100] * 8, [1.0] * 8)
+        comparison = compare_summaries(baseline, patch_summary)
+        self.assertGreater(comparison.score_ci[0], 0.0)
+        gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "directional")
+        self.assertFalse(gate.validated)
+        self.assertEqual(gate.comparison.pass_significance.fixed_count, 0)
+        self.assertEqual(gate.comparison.pass_significance.regressed_count, 0)
+
+    def test_repeated_sample_pass_flip_significance_uses_case_majorities(self) -> None:
+        baseline = make_repeated_summary("baseline", [[0.0, 0.0, 1.0]] * 4)
+        patch_summary = make_repeated_summary("patch_summary", [[1.0, 1.0, 0.0]] * 4)
+        gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "validated")
+        self.assertEqual(gate.comparison.pass_significance.fixed_count, 4)
+        self.assertEqual(gate.comparison.pass_significance.regressed_count, 0)
 
     def test_ci_positive_holdout_gain_is_validated(self) -> None:
         baseline = make_summary("baseline", [0.0] * 24, [0.002] * 24, [100] * 24, [1.0] * 24)
@@ -131,6 +192,83 @@ class AcceptanceGateTests(unittest.TestCase):
         gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
         self.assertEqual(gate.status, "validated")
         self.assertTrue(gate.validated)
+
+    def test_recommendation_prefers_cheaper_equivalent_validated_frontier(self) -> None:
+        highest = make_summary("highest", [1.0] * 24, [0.010] * 24, [900] * 24, [1.0] * 24)
+        cheaper = make_summary("cheaper", [1.0] * 23 + [0.0], [0.002] * 24, [120] * 24, [1.0] * 24)
+        selected, recommendation = select_recommended_patch(
+            [highest, cheaper],
+            OptimizationObjective(mode="correctness"),
+        )
+        self.assertEqual(selected.patch_hash, "cheaper")
+        self.assertEqual(recommendation["highest_quality_patch_hash"], "highest")
+        self.assertEqual(recommendation["validated_candidate_count"], 2)
+        self.assertGreater(recommendation["equivalence_margin"], 0.0)
+
+    def test_recommendation_keeps_highest_quality_when_no_equivalent_alternative(self) -> None:
+        highest = make_summary("highest", [1.0] * 24, [0.010] * 24, [900] * 24, [1.0] * 24)
+        far_cheaper_far_worse = make_summary(
+            "weak", [0.5] * 24, [0.001] * 24, [100] * 24, [1.0] * 24
+        )
+        selected, recommendation = select_recommended_patch(
+            [highest, far_cheaper_far_worse],
+            OptimizationObjective(mode="correctness"),
+        )
+        self.assertEqual(selected.patch_hash, "highest")
+        self.assertEqual(recommendation["highest_quality_patch_hash"], "highest")
+
+    def test_recommendation_cost_mode_picks_cheapest_validated_patch(self) -> None:
+        cheap = make_summary("cheap", [1.0] * 12, [0.001] * 12, [100] * 12, [1.0] * 12)
+        cheaper = make_summary("cheaper", [1.0] * 12, [0.0008] * 12, [100] * 12, [1.0] * 12)
+        selected, _ = select_recommended_patch(
+            [cheap, cheaper],
+            OptimizationObjective(mode="cost"),
+        )
+        self.assertEqual(selected.patch_hash, "cheaper")
+
+    def test_recommendation_latency_mode_picks_fastest_validated_patch(self) -> None:
+        fast = make_summary("fast", [1.0] * 12, [0.002] * 12, [100] * 12, [0.8] * 12)
+        faster = make_summary("faster", [1.0] * 12, [0.002] * 12, [100] * 12, [0.6] * 12)
+        selected, _ = select_recommended_patch(
+            [fast, faster],
+            OptimizationObjective(mode="latency"),
+        )
+        self.assertEqual(selected.patch_hash, "faster")
+
+    def test_predicate_dev_gate_short_circuits_on_constraint_violation(self) -> None:
+        baseline = make_summary("baseline", [1.0] * 6, [0.002] * 6, [100] * 6, [1.0] * 6)
+        bad = make_summary("bad", [1.0] * 6, [0.020] * 6, [100] * 6, [1.0] * 6)
+        objective = OptimizationObjective(
+            mode="correctness",
+            constraints=OptimizationConstraints(max_cost_ratio=2.0),
+        )
+        predicate = GatePredicate(objective)
+        reason = predicate.dev_gate_reason(baseline=baseline, reference=baseline, candidate=bad)
+        self.assertIsNotNone(reason)
+        self.assertIn("cost constraint", reason or "")
+
+    def test_predicate_confirmation_flags_regressions(self) -> None:
+        baseline = make_summary("baseline", [1.0, 1.0, 1.0, 1.0], [0.002] * 4, [100] * 4, [1.0] * 4)
+        candidate = make_summary("candidate", [1.0, 1.0, 1.0, 0.0], [0.002] * 4, [100] * 4, [1.0] * 4)
+        predicate = GatePredicate(OptimizationObjective(mode="correctness"))
+        reason = predicate.confirmation_reason(
+            baseline=baseline,
+            candidate=candidate,
+            regressed_case_ids=["case-4"],
+        )
+        self.assertIsNotNone(reason)
+
+    def test_predicate_confirmation_requires_pass_flip_significance(self) -> None:
+        baseline = make_summary("baseline", [0.0, 0.0], [0.002] * 2, [100] * 2, [1.0] * 2)
+        candidate = make_summary("candidate", [1.0, 1.0], [0.002] * 2, [100] * 2, [1.0] * 2)
+        predicate = GatePredicate(OptimizationObjective(mode="correctness"))
+        reason = predicate.confirmation_reason(
+            baseline=baseline,
+            candidate=candidate,
+            regressed_case_ids=[],
+        )
+        self.assertIsNotNone(reason)
+        self.assertIn("paired pass-flip p-value", reason or "")
 
     def test_latency_mode_requires_confident_latency_gain(self) -> None:
         baseline = make_summary("baseline", [1.0, 1.0, 1.0], [0.002] * 3, [100] * 3, [1.0, 1.0, 1.0])
@@ -177,6 +315,43 @@ class AcceptanceGateTests(unittest.TestCase):
             decision_log=[],
         )
         self.assertEqual(outcome["status"], "no_failures")
+
+    def test_failure_labels_ignore_sample_failures_when_case_majority_passes(self) -> None:
+        evaluations = []
+        case = EvalCase(id="case-split", split="dev", input="ok")
+        for sample_index, passed in enumerate([True, True, False]):
+            evaluations.append(
+                CaseEvaluation(
+                    case=case,
+                    record=RunRecord(
+                        output="ok" if passed else "wrong",
+                        metrics=OperationalMetrics(
+                            latency_s=1.0,
+                            input_tokens=10,
+                            output_tokens=5,
+                            total_tokens=15,
+                            cost_usd=0.001,
+                        ),
+                        diagnostics=DiagnosticTrace(),
+                    ),
+                    grade=GradeResult(
+                        score=1.0 if passed else 0.0,
+                        passed=passed,
+                        labels=[] if passed else ["sample_failure"],
+                    ),
+                    sample_index=sample_index,
+                )
+            )
+        summary = PatchSummary(
+            patch_hash="split",
+            patch=AgentPatch.empty(),
+            split="dev",
+            evaluations=evaluations,
+        )
+
+        self.assertEqual(summary.pass_count, 1)
+        self.assertEqual(summary.failure_labels, {})
+        self.assertEqual(summary.failed_examples(), [])
 
 
 if __name__ == "__main__":

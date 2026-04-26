@@ -9,6 +9,43 @@ from typing import Any
 from ratchet.types import OptimizationConstraints, OptimizationObjective
 
 
+class RatchetConfigError(ValueError):
+    """Raised when a Ratchet run config is missing required fields or has unknown keys."""
+
+
+RUN_CONFIG_KEYS = {
+    "adapter",
+    "evals",
+    "out",
+    "env_file",
+    "dev_budget",
+    "holdout_budget",
+    "holdout_top_k",
+    "objective",
+    "mode",
+    "allowed_models",
+    "allowed_edits",
+    "sanitize_examples",
+    "optimizer_model",
+    "optimizer_reasoning",
+    "samples_per_case",
+    "max_case_retries",
+    "case_timeout_s",
+    "fail_fast",
+}
+OBJECTIVE_KEYS = {"mode", "constraints", "tie_breakers"}
+CONSTRAINT_KEYS = {
+    "allowed_edits",
+    "allowed_models",
+    "max_cost_ratio",
+    "max_latency_ratio",
+    "min_correctness_delta",
+    "max_patch_operations",
+    "sanitize_examples",
+}
+REQUIRED_RUN_KEYS = {"adapter", "evals", "out"}
+
+
 @dataclass(frozen=True)
 class RatchetRunConfig:
     adapter: str
@@ -66,22 +103,37 @@ def _as_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
 
 def _objective_from_payload(payload: dict[str, Any]) -> OptimizationObjective:
     raw_objective = dict(payload.get("objective", {}))
+    _reject_unknown_keys(raw_objective, OBJECTIVE_KEYS, "ratchet.objective")
     if "mode" not in raw_objective and "mode" in payload:
         raw_objective["mode"] = payload["mode"]
     constraints = dict(raw_objective.get("constraints", {}))
+    _reject_unknown_keys(constraints, CONSTRAINT_KEYS, "ratchet.objective.constraints")
     if "allowed_models" in payload:
         constraints["allowed_models"] = payload["allowed_models"]
     if "allowed_edits" in payload:
         constraints["allowed_edits"] = payload["allowed_edits"]
+    if "sanitize_examples" in payload:
+        constraints["sanitize_examples"] = payload["sanitize_examples"]
     raw_objective["constraints"] = constraints
     return OptimizationObjective.from_dict(raw_objective)
 
 
 def load_run_config(path: str | Path) -> RatchetRunConfig:
     config_path = Path(path).resolve()
-    payload = tomllib.loads(config_path.read_text())
+    try:
+        payload = tomllib.loads(config_path.read_text())
+    except tomllib.TOMLDecodeError as exc:
+        raise RatchetConfigError(f"Invalid TOML in {config_path}: {exc}") from exc
     if "ratchet" in payload:
+        extra_top_level = sorted(set(payload) - {"ratchet"})
+        if extra_top_level:
+            raise RatchetConfigError(
+                f"Unknown top-level config key(s): {', '.join(extra_top_level)}"
+            )
+        if not isinstance(payload["ratchet"], dict):
+            raise RatchetConfigError("Config key 'ratchet' must be a table.")
         payload = dict(payload["ratchet"])
+    _validate_run_payload(payload)
     root = config_path.parent
     return RatchetRunConfig(
         adapter=str(payload["adapter"]),
@@ -99,6 +151,27 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         fail_fast=_as_bool(payload, "fail_fast", False),
         config_path=config_path,
     )
+
+
+def _validate_run_payload(payload: dict[str, Any]) -> None:
+    _reject_unknown_keys(payload, RUN_CONFIG_KEYS, "ratchet")
+    missing = sorted(key for key in REQUIRED_RUN_KEYS if key not in payload)
+    if missing:
+        raise RatchetConfigError(f"Missing required config key(s): {', '.join(missing)}")
+    raw_objective = payload.get("objective", {})
+    if raw_objective is not None and not isinstance(raw_objective, dict):
+        raise RatchetConfigError("Config key 'ratchet.objective' must be a table.")
+    raw_constraints = dict(raw_objective or {}).get("constraints", {})
+    if raw_constraints is not None and not isinstance(raw_constraints, dict):
+        raise RatchetConfigError("Config key 'ratchet.objective.constraints' must be a table.")
+
+
+def _reject_unknown_keys(payload: dict[str, Any], allowed: set[str], context: str) -> None:
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        raise RatchetConfigError(
+            f"Unknown config key(s) in {context}: {', '.join(unknown)}"
+        )
 
 
 def resolve_run_config(
@@ -119,6 +192,7 @@ def resolve_run_config(
     max_case_retries: int | None,
     case_timeout_s: int | None,
     fail_fast: bool | None,
+    sanitize_examples: bool | None = None,
 ) -> RatchetRunConfig:
     if config_path is not None:
         base = load_run_config(config_path)
@@ -136,6 +210,8 @@ def resolve_run_config(
         constraints_payload["allowed_models"] = allowed_models
     if allowed_edits is not None:
         constraints_payload["allowed_edits"] = allowed_edits
+    if sanitize_examples is not None:
+        constraints_payload["sanitize_examples"] = sanitize_examples
     objective = OptimizationObjective(
         mode=objective_mode or base.objective.mode,
         constraints=OptimizationConstraints.from_dict(constraints_payload),

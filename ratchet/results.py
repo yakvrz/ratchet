@@ -101,6 +101,9 @@ class PatchSummary:
             rows.append((case_id, evaluations, mean_score, pass_vote_rate, pass_vote_rate > 0.5))
         return rows
 
+    def _failed_case_rows(self) -> list[tuple[str, list[CaseEvaluation], float, float, bool]]:
+        return [row for row in self._case_rows() if not row[4]]
+
     @property
     def mean_score(self) -> float:
         return statistics.fmean(row[2] for row in self._case_rows())
@@ -144,9 +147,7 @@ class PatchSummary:
     @property
     def failure_labels(self) -> dict[str, int]:
         counts: Counter[str] = Counter()
-        for _, evaluations, _, _, case_passed in self._case_rows():
-            if case_passed:
-                continue
+        for _, evaluations, _, _, _ in self._failed_case_rows():
             for evaluation in evaluations:
                 if not evaluation.grade.passed:
                     counts.update(evaluation.grade.labels or ["failed"])
@@ -168,27 +169,42 @@ class PatchSummary:
             }
         return metrics
 
-    def failed_examples(self, limit: int = 10, *, max_text_chars: int | None = 1200) -> list[dict[str, Any]]:
+    def failed_examples(
+        self,
+        limit: int = 10,
+        *,
+        max_text_chars: int | None = 1200,
+        sanitize_text: bool = False,
+    ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for _, evaluations, mean_score, pass_vote_rate, case_passed in self._case_rows():
-            if case_passed:
-                continue
+        for _, evaluations, mean_score, pass_vote_rate, _ in self._failed_case_rows():
             evaluation = next((item for item in evaluations if not item.grade.passed), evaluations[0])
+            redacted = "[redacted by sanitize_examples]"
             rows.append(
                 {
                     "case_id": evaluation.case.id,
                     "sample_index": evaluation.sample_index,
                     "case_mean_score": mean_score,
                     "case_pass_vote_rate": pass_vote_rate,
-                    "input": _compact_prompt_value(evaluation.case.input, max_text_chars=max_text_chars),
-                    "expected": _compact_prompt_value(evaluation.case.expected, max_text_chars=max_text_chars),
+                    "input": redacted
+                    if sanitize_text
+                    else _compact_prompt_value(evaluation.case.input, max_text_chars=max_text_chars),
+                    "expected": redacted
+                    if sanitize_text
+                    else _compact_prompt_value(evaluation.case.expected, max_text_chars=max_text_chars),
                     "score": evaluation.grade.score,
                     "labels": evaluation.grade.labels,
-                    "notes": _compact_prompt_value(evaluation.grade.notes, max_text_chars=max_text_chars),
-                    "output": _compact_prompt_value(evaluation.record.output, max_text_chars=max_text_chars),
+                    "notes": redacted
+                    if sanitize_text
+                    else _compact_prompt_value(evaluation.grade.notes, max_text_chars=max_text_chars),
+                    "output": redacted
+                    if sanitize_text
+                    else _compact_prompt_value(evaluation.record.output, max_text_chars=max_text_chars),
                     "error": evaluation.record.metrics.error,
                     "tool_calls": evaluation.record.diagnostics.tool_calls,
-                    "raw_output_text": _compact_prompt_value(
+                    "raw_output_text": redacted
+                    if sanitize_text
+                    else _compact_prompt_value(
                         evaluation.record.diagnostics.raw_output_text,
                         max_text_chars=max_text_chars,
                     ),
@@ -277,6 +293,18 @@ def _truncate_middle(text: str, max_chars: int) -> str:
     return f"{text[:head_chars]}... [truncated {omitted} chars] ...{text[-tail_chars:]}"
 
 
+@dataclass(frozen=True)
+class PassSignificance:
+    fixed_count: int
+    regressed_count: int
+    n_discordant: int
+    n_cases: int
+    p_value: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
 @dataclass
 class Comparison:
     score_delta: float
@@ -287,6 +315,7 @@ class Comparison:
     token_ci: tuple[float, float]
     latency_delta: float
     latency_ci: tuple[float, float]
+    pass_significance: PassSignificance | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -314,8 +343,11 @@ class RatchetResult:
     finalist_statuses: list[dict[str, Any]]
     runtime_reliability_diagnostics: list[dict[str, Any]]
     confirmation_results: list[dict[str, Any]]
+    simplification_results: list[dict[str, Any]]
+    frontier_recommendation: dict[str, Any]
     run_profile: dict[str, Any]
     quality_cost_tradeoffs: list[dict[str, Any]]
+    optimizer_call_diagnostics: list[dict[str, Any]]
     selection_reason: str
     outcome_analysis: dict[str, Any]
     manifest: dict[str, Any]

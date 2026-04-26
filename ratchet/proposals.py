@@ -3,13 +3,13 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 import json
-import re
+import time
 from typing import Any
 
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.io import patch_hash
-from ratchet.model_client import ResponsesModelClient
+from ratchet.io import extract_json_object, patch_hash
+from ratchet.model_client import ResponsesModelClient, error_response_diagnostics, response_diagnostics
 from ratchet.patches import compose_patches
 from ratchet.results import PatchSummary
 from ratchet.transforms import (
@@ -38,6 +38,7 @@ class ProposalStats:
     invalid_reasons: dict[str, int] | None = None
     target_considerations: list[dict[str, Any]] | None = None
     raw_output_text: str = ""
+    call_diagnostics: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -50,6 +51,7 @@ class ProposalStats:
             "invalid_reasons": dict(self.invalid_reasons or {}),
             "target_considerations": list(self.target_considerations or []),
             "raw_output_text": self.raw_output_text,
+            "call_diagnostics": dict(self.call_diagnostics or {}),
         }
 
 
@@ -65,10 +67,13 @@ class ProposalEngine:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self._client: ResponsesModelClient | None = None
-        self._last_raw_output_text = ""
         self.last_stats = ProposalStats()
         self.last_candidate_rows: list[dict[str, Any]] = []
         self.last_invalid_candidate_rows: list[dict[str, Any]] = []
+        self.last_call_diagnostics: dict[str, Any] | None = None
+        self._last_raw_candidate_count = 0
+        self._last_parse_invalid_reasons: Counter[str] = Counter()
+        self._last_parse_invalid_candidate_rows: list[dict[str, Any]] = []
 
     def propose(
         self,
@@ -111,11 +116,19 @@ class ProposalEngine:
         )
         proposals.extend(llm_proposals)
         analysis_parts.append("LLM proposer returned transform candidate proposals.")
+        invalid_reasons.update(self._last_parse_invalid_reasons)
         validator = PatchValidator()
         valid: list[CandidateProposal] = []
+        budget_valid: list[CandidateProposal] = []
         local_seen: set[str] = set()
+        family_quotas = _family_budget_quotas(
+            search_hypothesis.budget_allocation,
+            proposal_budget=proposal_budget,
+        )
+        family_counts: Counter[str] = Counter()
         candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows: list[dict[str, Any]] = []
+        invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
         for raw_candidate in proposals:
             candidate, materialization = _materialize_candidate_references(raw_candidate, proposal_example_bank)
             family_error = validate_candidate_transform(
@@ -148,6 +161,21 @@ class ProposalEngine:
                 continue
             local_seen.add(digest)
             valid.append(candidate)
+            raw_quota = family_quotas.get(candidate.transform_family)
+            if raw_quota is None:
+                quota = proposal_budget if not family_quotas else 0
+            else:
+                quota = max(1, raw_quota)
+            if family_counts[candidate.transform_family] >= quota:
+                reason = (
+                    f"transform family budget exceeded for {candidate.transform_family!r} "
+                    f"(quota {quota})"
+                )
+                invalid_reasons[reason] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(candidate, reason, materialization=materialization))
+                continue
+            family_counts[candidate.transform_family] += 1
+            budget_valid.append(candidate)
             candidate_rows.append(
                 {
                     "rank": len(candidate_rows) + 1,
@@ -162,14 +190,16 @@ class ProposalEngine:
                     "evaluation_plan": candidate.evaluation_plan,
                     "materialization": materialization,
                     "scheduled": len(candidate_rows) < proposal_budget,
+                    "family_quota": quota,
+                    "family_rank": family_counts[candidate.transform_family],
                 }
             )
-        returned = valid[:proposal_budget]
+        returned = budget_valid[:proposal_budget]
         self.last_candidate_rows = candidate_rows
         self.last_invalid_candidate_rows = invalid_candidate_rows
         self.last_stats = ProposalStats(
-            raw_count=len(proposals),
-            valid_count=len(valid),
+            raw_count=self._last_raw_candidate_count,
+            valid_count=len(budget_valid),
             returned_count=len(returned),
             invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate patch"),
             duplicate_count=invalid_reasons.get("duplicate patch", 0),
@@ -177,6 +207,7 @@ class ProposalEngine:
             invalid_reasons=dict(sorted(invalid_reasons.items())),
             target_considerations=target_considerations,
             raw_output_text=self._last_raw_output_text,
+            call_diagnostics=self.last_call_diagnostics,
         )
         if valid:
             analysis_parts.append("Validated LLM transform candidate proposals.")
@@ -249,8 +280,17 @@ class ProposalEngine:
             "primary_diagnosis": diagnoses[0].to_dict() if diagnoses else None,
             "editable_targets": [target.to_dict() for target in surface],
             "diagnostic_only_examples": {
-                "usage": "dev examples for diagnosis only. Do not copy their case IDs, inputs, or expected outputs into patches.",
-                "examples": summary.failed_examples(limit=8, max_text_chars=900),
+                "usage": (
+                    "dev examples for diagnosis only. Do not copy their case IDs, inputs, or expected outputs into patches."
+                    if not objective.constraints.sanitize_examples
+                    else "dev failure metadata for diagnosis only. Raw input, expected, output, notes, and raw_output_text fields are redacted."
+                ),
+                "sanitized": objective.constraints.sanitize_examples,
+                "examples": summary.failed_examples(
+                    limit=8,
+                    max_text_chars=900,
+                    sanitize_text=objective.constraints.sanitize_examples,
+                ),
             },
             "proposal_example_bank": (
                 proposal_example_bank.to_prompt_dict(
@@ -267,6 +307,7 @@ class ProposalEngine:
             "recent_history": _compact_recent_history(history, limit=10),
         }
         try:
+            started_at = time.perf_counter()
             response = self._client.create_response(
                 model=self.model,
                 reasoning={"effort": self.reasoning_effort},
@@ -367,23 +408,54 @@ class ProposalEngine:
                 ),
                 max_output_tokens=6000,
             )
+            self.last_call_diagnostics = {
+                "component": "proposer",
+                **response_diagnostics(
+                    response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
         except Exception as exc:
+            self.last_call_diagnostics = {
+                "component": "proposer",
+                **error_response_diagnostics(
+                    exc,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
             raise OptimizerModelError(f"Optimizer proposer failed: {exc}") from exc
         self._last_raw_output_text = response.output_text
+        self._last_raw_candidate_count = 0
+        self._last_parse_invalid_reasons = Counter()
+        self._last_parse_invalid_candidate_rows = []
         try:
-            payload = self._extract_json_object(response.output_text)
+            payload = extract_json_object(response.output_text)
         except Exception as exc:
             raise OptimizerModelError(f"Optimizer proposer returned invalid JSON: {exc}") from exc
         candidates: list[CandidateProposal] = []
         raw_candidates = payload.get("candidates")
         if not isinstance(raw_candidates, list):
+            self._last_parse_invalid_reasons["candidates field is not an array"] += 1
             raw_candidates = []
+        self._last_raw_candidate_count = len(raw_candidates)
         for raw_candidate in raw_candidates:
             if not isinstance(raw_candidate, dict):
+                reason = "candidate entry is not an object"
+                self._last_parse_invalid_reasons[reason] += 1
+                self._last_parse_invalid_candidate_rows.append(
+                    _invalid_raw_candidate_row(raw_candidate, reason)
+                )
                 continue
             try:
                 candidates.append(CandidateProposal.from_dict(raw_candidate))
-            except Exception:
+            except Exception as exc:
+                reason = f"malformed candidate: {exc}"
+                self._last_parse_invalid_reasons[reason] += 1
+                self._last_parse_invalid_candidate_rows.append(
+                    _invalid_raw_candidate_row(raw_candidate, reason)
+                )
                 continue
         considerations = [
             {
@@ -395,22 +467,6 @@ class ProposalEngine:
             if isinstance(item, dict)
         ]
         return candidates, considerations
-
-    @staticmethod
-    def _extract_json_object(text: str) -> dict[str, Any]:
-        decoder = json.JSONDecoder()
-        last_error: Exception | None = None
-        for match in re.finditer(r"\{", text):
-            try:
-                payload, _ = decoder.raw_decode(text[match.start() :])
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                continue
-            if isinstance(payload, dict):
-                return payload
-        if last_error is not None:
-            raise last_error
-        raise ValueError("No JSON object found in proposer response.")
 
 
 def _patch_schema() -> dict[str, Any]:
@@ -525,6 +581,55 @@ def _invalid_candidate_row(
         "valid": False,
         "invalid_reason": reason,
     }
+
+
+def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any]:
+    return {
+        "proposal_patch_hash": None,
+        "proposal": {},
+        "candidate": {},
+        "raw_candidate": _value_summary(raw_candidate),
+        "transform_family": None,
+        "transform_instance": None,
+        "transform_parameters": {},
+        "target_slice": None,
+        "hypothesis": "",
+        "evaluation_plan": "",
+        "materialization": {},
+        "scheduled": False,
+        "valid": False,
+        "invalid_reason": reason,
+    }
+
+
+def _family_budget_quotas(
+    budget_allocation: dict[str, float],
+    *,
+    proposal_budget: int,
+) -> dict[str, int]:
+    if proposal_budget <= 0:
+        return {family: 0 for family in budget_allocation}
+    positive = {
+        family: max(0.0, float(share))
+        for family, share in budget_allocation.items()
+        if float(share) > 0.0
+    }
+    if not positive:
+        return {}
+    total = sum(positive.values())
+    scaled = {
+        family: (share / total) * proposal_budget
+        for family, share in positive.items()
+    }
+    quotas = {family: int(value) for family, value in scaled.items()}
+    remaining = proposal_budget - sum(quotas.values())
+    ranked_remainders = sorted(
+        scaled.items(),
+        key=lambda item: (-(item[1] - int(item[1])), item[0]),
+    )
+    for family, _ in ranked_remainders[:remaining]:
+        quotas[family] += 1
+    return quotas
 
 
 def _materialize_candidate_references(

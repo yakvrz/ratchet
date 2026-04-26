@@ -6,7 +6,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from ratchet.model_client import GEMINI_OPENAI_BASE_URL, ResponsesModelClient
+from ratchet.model_client import (
+    GEMINI_OPENAI_BASE_URL,
+    ResponsesModelClient,
+    error_response_diagnostics,
+    validate_optimizer_model_access,
+)
 
 
 class FakeChatCompletions:
@@ -44,6 +49,19 @@ class FakeOpenAI:
         self.chat_completions = FakeChatCompletions()
         self.chat = SimpleNamespace(completions=self.chat_completions)
         FakeOpenAI.instances.append(self)
+
+
+class ProbeClient:
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def create_response(self, **kwargs: object) -> object:
+        self.requests.append(kwargs)
+        return SimpleNamespace(
+            id="resp-probe",
+            output_text="OK",
+            usage=SimpleNamespace(input_tokens=3, output_tokens=1),
+        )
 
 
 class GeminiCompatClientTests(unittest.TestCase):
@@ -179,6 +197,32 @@ class GeminiCompatClientTests(unittest.TestCase):
             self.assertEqual(requests[1]["messages"][-1]["tool_call_id"], "call-1")
             self.assertNotIn("tools", requests[1])
             self.assertEqual(requests[1]["response_format"]["type"], "json_schema")
+
+    def test_validate_optimizer_model_access_uses_one_token_probe(self) -> None:
+        client = ProbeClient()
+
+        diagnostics = validate_optimizer_model_access(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            client=client,
+        )
+
+        self.assertTrue(diagnostics["checked"])
+        self.assertEqual(client.requests[0]["model"], "gpt-5.4-mini")
+        self.assertEqual(client.requests[0]["max_output_tokens"], 1)
+        self.assertEqual(diagnostics["input_tokens"], 3)
+        self.assertEqual(diagnostics["output_tokens"], 1)
+
+    def test_error_response_diagnostics_uses_none_cost(self) -> None:
+        diagnostics = error_response_diagnostics(
+            RuntimeError("boom"),
+            model="gpt-5.4-mini",
+            elapsed_s=0.25,
+        )
+
+        self.assertEqual(diagnostics["error"], "boom")
+        self.assertIsNone(diagnostics["cost_usd"])
+        self.assertEqual(diagnostics["total_tokens"], 0)
 
 
 if __name__ == "__main__":

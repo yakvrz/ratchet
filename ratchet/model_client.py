@@ -8,6 +8,8 @@ from typing import Any
 
 from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI, RateLimitError
 
+from ratchet.pricing import estimate_cost_usd
+
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
 
@@ -45,6 +47,82 @@ class CompatResponse:
     output_text: str
     usage: CompatUsage
     finish_reason: str = ""
+
+
+def response_diagnostics(response: Any, *, model: str, elapsed_s: float) -> dict[str, Any]:
+    input_tokens, output_tokens = response_token_usage(response)
+    try:
+        cost_usd = estimate_cost_usd(model, input_tokens, output_tokens)
+    except KeyError:
+        cost_usd = None
+    return {
+        "model": model,
+        "elapsed_s": elapsed_s,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+        "cost_usd": cost_usd,
+        "finish_reason": str(getattr(response, "finish_reason", "") or _first_choice_finish_reason(response)),
+    }
+
+
+def error_response_diagnostics(error: Exception, *, model: str, elapsed_s: float) -> dict[str, Any]:
+    return {
+        "model": model,
+        "elapsed_s": elapsed_s,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cost_usd": None,
+        "finish_reason": "",
+        "error": str(error),
+    }
+
+
+def validate_optimizer_model_access(
+    *,
+    env_path: str,
+    model: str,
+    client: ResponsesModelClient | None = None,
+) -> dict[str, Any]:
+    probe_client = client or ResponsesModelClient(env_path=env_path)
+    started_at = time.perf_counter()
+    response = probe_client.create_response(
+        model=model,
+        input="Return OK.",
+        max_output_tokens=1,
+        timeout=20,
+    )
+    diagnostics = response_diagnostics(
+        response,
+        model=model,
+        elapsed_s=time.perf_counter() - started_at,
+    )
+    return {"checked": True, **diagnostics}
+
+
+def response_token_usage(response: Any) -> tuple[int, int]:
+    usage = getattr(response, "usage", None)
+    if usage is None:
+        return 0, 0
+    input_tokens = int(
+        getattr(usage, "input_tokens", 0)
+        or getattr(usage, "prompt_tokens", 0)
+        or 0
+    )
+    output_tokens = int(
+        getattr(usage, "output_tokens", 0)
+        or getattr(usage, "completion_tokens", 0)
+        or 0
+    )
+    return input_tokens, output_tokens
+
+
+def _first_choice_finish_reason(response: Any) -> str:
+    choices = getattr(response, "choices", None)
+    if not choices:
+        return ""
+    return str(getattr(choices[0], "finish_reason", "") or "")
 
 
 class ResponsesModelClient:

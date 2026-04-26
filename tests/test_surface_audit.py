@@ -8,6 +8,7 @@ from ratchet.errors import OptimizerModelError
 from ratchet.proposals import ProposalEngine
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.surface import SurfaceGenerator
+from ratchet.transforms import BehaviorProfile, SearchHypothesis, TransformFamilyState
 from ratchet.types import (
     AgentPatch,
     AgentSpec,
@@ -59,6 +60,45 @@ def _family_for_patch(patch: dict[str, object]) -> str:
     return "prompt_rewrite"
 
 
+def search_hypothesis_with_budget(budget_allocation: dict[str, float]) -> SearchHypothesis:
+    family_states = {
+        family: TransformFamilyState(
+            family=family,
+            state="active",
+            suitability=share,
+            budget_share=share,
+            reason="test allocation",
+        )
+        for family, share in budget_allocation.items()
+    }
+    return SearchHypothesis(
+        family_states=family_states,
+        context_states={},
+        target_slices=["global"],
+        profile=BehaviorProfile(
+            mean_score=0.0,
+            pass_count=0,
+            case_count=1,
+            pass_rate=0.0,
+            failure_labels={"failed": 1},
+            category_metrics={},
+            invalid_output_rate=0.0,
+            mean_cost_usd=0.001,
+            mean_total_tokens=100.0,
+            median_latency_s=1.0,
+            high_cost_case_ids=[],
+            high_latency_case_ids=[],
+            target_slices=["global"],
+            weak_slice_count=1,
+            runtime_error_rate=0.0,
+            length_finish_rate=0.0,
+            parser_fallback_rate=0.0,
+        ),
+        budget_allocation=budget_allocation,
+        rationale="test allocation",
+    )
+
+
 class FakeDiagnosisClient:
     def create_response(self, **kwargs: object) -> object:
         payload = json.loads(str(kwargs["input"]).split("\n\n", 1)[1])
@@ -93,6 +133,23 @@ class BarePatchClient:
         return type("Response", (), {"output_text": json.dumps({"patches": self.patches})})()
 
 
+class RawCandidateClient:
+    def __init__(self, candidates: list[object]) -> None:
+        self.candidates = candidates
+
+    def create_response(self, **_: object) -> object:
+        return type("Response", (), {"output_text": json.dumps({"candidates": self.candidates})})()
+
+
+class CapturingPatchClient:
+    def __init__(self) -> None:
+        self.input_text = ""
+
+    def create_response(self, **kwargs: object) -> object:
+        self.input_text = str(kwargs.get("input", ""))
+        return type("Response", (), {"output_text": json.dumps({"candidates": []})})()
+
+
 def make_summary(patch_hash: str, scores: list[float]) -> PatchSummary:
     evaluations = []
     for index, score in enumerate(scores, start=1):
@@ -118,6 +175,42 @@ def make_summary(patch_hash: str, scores: list[float]) -> PatchSummary:
         patch=AgentPatch(),
         split="dev",
         evaluations=evaluations,
+    )
+
+
+def make_sensitive_failed_summary() -> PatchSummary:
+    case = EvalCase(
+        id="case-secret",
+        split="dev",
+        input="customer ssn 123-45-6789",
+        expected="private expected answer",
+    )
+    return PatchSummary(
+        patch_hash="baseline",
+        patch=AgentPatch(),
+        split="dev",
+        evaluations=[
+            CaseEvaluation(
+                case=case,
+                record=RunRecord(
+                    output="private wrong output",
+                    metrics=OperationalMetrics(
+                        latency_s=1.0,
+                        input_tokens=10,
+                        output_tokens=5,
+                        total_tokens=15,
+                        cost_usd=0.001,
+                    ),
+                    diagnostics=DiagnosticTrace(raw_output_text="private raw transcript"),
+                ),
+                grade=GradeResult(
+                    score=0.0,
+                    passed=False,
+                    labels=["failed"],
+                    notes="private grading note",
+                ),
+            )
+        ],
     )
 
 
@@ -292,6 +385,91 @@ class GeneratedSurfaceTests(unittest.TestCase):
             [True, False, False],
         )
 
+    def test_llm_proposer_enforces_transform_family_budget_allocation(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = FakePatchClient(
+            [
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Answer with grounded evidence.",
+                        }
+                    ],
+                    "rationale": "First prompt candidate.",
+                    "expected_effect": "Improve failed cases.",
+                },
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Use exact wording from the task.",
+                        }
+                    ],
+                    "rationale": "Second prompt candidate.",
+                    "expected_effect": "Improve failed cases differently.",
+                },
+                {
+                    "operations": [
+                        {
+                            "op": "add_output_constraint",
+                            "target": "output_contract",
+                            "value": "Return only the final answer text.",
+                        }
+                    ],
+                    "rationale": "Output contract candidate.",
+                    "expected_effect": "Reduce format drift.",
+                },
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget(
+                {"prompt_rewrite": 0.75, "output_contract_tightening": 0.25}
+            ),
+            proposal_budget=2,
+        )
+
+        self.assertEqual([proposal.transform_family for proposal in proposals], ["prompt_rewrite", "output_contract_tightening"])
+        self.assertEqual(engine.last_stats.raw_count, 3)
+        self.assertEqual(engine.last_stats.valid_count, 2)
+        self.assertEqual(engine.last_stats.returned_count, 2)
+        self.assertEqual(len(engine.last_candidate_rows), 2)
+        self.assertTrue(
+            any(
+                row["transform_family"] == "prompt_rewrite"
+                and "transform family budget exceeded" in row["invalid_reason"]
+                for row in engine.last_invalid_candidate_rows
+            )
+        )
+        self.assertTrue(
+            any(
+                "transform family budget exceeded" in reason
+                for reason in (engine.last_stats.invalid_reasons or {})
+            )
+        )
+
     def test_llm_proposer_accepts_categorical_retrieval_patch(self) -> None:
         spec = AgentSpec(
             name="sample",
@@ -378,6 +556,49 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals, [])
         self.assertEqual(engine.last_stats.raw_count, 0)
 
+    def test_llm_proposer_logs_malformed_raw_candidates(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = RawCandidateClient(
+            [
+                "not an object",
+                {
+                    "transform_family": "prompt_rewrite",
+                    "hypothesis": "missing patch should be logged",
+                    "patch": 1,
+                },
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertEqual(engine.last_stats.raw_count, 2)
+        self.assertEqual(engine.last_stats.valid_count, 0)
+        self.assertEqual(engine.last_stats.invalid_count, 2)
+        self.assertEqual(len(engine.last_invalid_candidate_rows), 2)
+        reasons = engine.last_stats.invalid_reasons or {}
+        self.assertIn("candidate entry is not an object", reasons)
+        self.assertTrue(any(reason.startswith("malformed candidate:") for reason in reasons))
+
     def test_llm_proposer_rejects_inactive_family_candidate(self) -> None:
         spec = AgentSpec(
             name="sample",
@@ -420,6 +641,44 @@ class GeneratedSurfaceTests(unittest.TestCase):
 
         self.assertEqual(proposals, [])
         self.assertIn("inactive transform family", next(iter(engine.last_stats.invalid_reasons or {})))
+
+    def test_llm_proposer_redacts_diagnostic_examples_when_configured(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(sanitize_examples=True),
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        client = CapturingPatchClient()
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = client
+
+        proposals, _ = engine.propose(
+            make_sensitive_failed_summary(),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn('"sanitized": true', client.input_text)
+        self.assertIn("[redacted by sanitize_examples]", client.input_text)
+        self.assertNotIn("123-45-6789", client.input_text)
+        self.assertNotIn("private expected answer", client.input_text)
+        self.assertNotIn("private wrong output", client.input_text)
+        self.assertNotIn("private raw transcript", client.input_text)
+        self.assertNotIn("private grading note", client.input_text)
 
 
 if __name__ == "__main__":

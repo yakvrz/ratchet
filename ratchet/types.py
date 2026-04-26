@@ -225,6 +225,7 @@ class OptimizationConstraints:
     max_latency_ratio: float | None = None
     min_correctness_delta: float | None = None
     max_patch_operations: int = 2
+    sanitize_examples: bool = False
 
     def __post_init__(self) -> None:
         unsupported = sorted(set(self.allowed_edits) - EDIT_KINDS)
@@ -254,6 +255,7 @@ class OptimizationConstraints:
                 else None
             ),
             max_patch_operations=int(payload.get("max_patch_operations", 2)),
+            sanitize_examples=bool(payload.get("sanitize_examples", False)),
         )
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 from typing import Any
 
 from ratchet.types import AgentPatch, AgentSpec, EvalCase
@@ -45,6 +46,22 @@ def write_jsonl(path: str | Path, payloads: list[dict[str, Any]]) -> None:
 def stable_digest(payload: Any) -> str:
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def extract_json_object(text: str) -> dict[str, Any]:
+    decoder = json.JSONDecoder()
+    last_error: Exception | None = None
+    for match in re.finditer(r"\{", text):
+        try:
+            payload, _ = decoder.raw_decode(text[match.start() :])
+        except json.JSONDecodeError as exc:
+            last_error = exc
+            continue
+        if isinstance(payload, dict):
+            return payload
+    if last_error is not None:
+        raise last_error
+    raise ValueError("No JSON object found in model response.")
 
 
 def short_digest(payload: Any) -> str:

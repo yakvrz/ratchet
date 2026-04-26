@@ -36,7 +36,7 @@ IGNORED_FINGERPRINT_DIRS = {
 
 @runtime_checkable
 class AdapterProtocol(Protocol):
-    def agent_spec(self) -> AgentSpec | None:
+    def agent_spec(self) -> AgentSpec:
         ...
 
     def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
@@ -63,6 +63,20 @@ def load_adapter(spec: str) -> AdapterProtocol:
     if missing:
         raise TypeError(f"Adapter {spec} is missing required methods: {', '.join(missing)}")
     return adapter
+
+
+def checked_agent_spec(adapter: AdapterProtocol, *, adapter_spec: str = "adapter") -> AgentSpec:
+    try:
+        spec = adapter.agent_spec()
+    except Exception as exc:
+        raise TypeError(f"Adapter {adapter_spec} agent_spec() failed: {exc}") from exc
+    if spec is None:
+        raise TypeError(f"Adapter {adapter_spec} agent_spec() returned None, expected AgentSpec.")
+    if not isinstance(spec, AgentSpec):
+        raise TypeError(
+            f"Adapter {adapter_spec} agent_spec() returned {type(spec).__name__}, expected AgentSpec."
+        )
+    return spec
 
 
 def adapter_fingerprint(spec: str) -> dict[str, Any]:

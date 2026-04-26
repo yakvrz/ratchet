@@ -5,9 +5,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ratchet.objectives import behavior_flip_summary, compare_summaries
+from ratchet.objectives import GatePredicate, behavior_flip_summary, compare_summaries
 from ratchet.results import PatchSummary, RatchetResult
-from ratchet.types import AgentPatch, EvalCase
+from ratchet.types import AgentPatch, EvalCase, OptimizationObjective
 
 
 LOW_OUTPUT_TOKEN_RATIO = 0.25
@@ -20,6 +20,7 @@ def runtime_reliability_diagnostics(
     flip_summary = behavior_flip_summary(reference, candidate)
     fixed_ids = set(flip_summary["fixed_case_ids"])
     runtime_only = _is_runtime_only_patch(candidate.patch)
+    runtime_involved = _touches_runtime(candidate.patch)
     reference_by_id = _representative_evaluations(reference)
     candidate_by_id = _representative_evaluations(candidate)
     fixed_invalid: list[str] = []
@@ -40,13 +41,14 @@ def runtime_reliability_diagnostics(
             finish_reason = str(evaluation.record.diagnostics.metadata.get("finish_reason") or "")
             if finish_reason:
                 finish_reasons[case_id].append(finish_reason)
-    suspect = bool(runtime_only and fixed_invalid and low_token_fixed)
+    suspect = bool(runtime_involved and fixed_invalid and low_token_fixed)
     return {
         "patch_hash": candidate.patch_hash,
         "runtime_only": runtime_only,
-        "suspicious": suspect,
+        "runtime_involved": runtime_involved,
+        "runtime_finding": suspect,
         "reason": (
-            "Runtime-only candidate fixed invalid outputs even though fixed baseline outputs used far fewer tokens than the configured cap."
+            "Runtime candidate fixed invalid outputs even though fixed baseline outputs used far fewer tokens than the configured cap."
             if suspect
             else "No runtime reliability suspicion detected."
         ),
@@ -94,12 +96,22 @@ def confirmation_result(
     candidate: PatchSummary,
     confirmation_reference: PatchSummary,
     confirmation_candidate: PatchSummary,
+    objective: OptimizationObjective | None = None,
 ) -> dict[str, Any]:
+    objective = objective or OptimizationObjective()
+    predicate = GatePredicate(objective)
     comparison = compare_summaries(confirmation_reference, confirmation_candidate)
     flip_summary = behavior_flip_summary(confirmation_reference, confirmation_candidate)
-    passed = confirmation_candidate.pass_count > confirmation_reference.pass_count and not flip_summary["regressed_case_ids"]
+    confirmation_reason = predicate.confirmation_reason(
+        baseline=confirmation_reference,
+        candidate=confirmation_candidate,
+        regressed_case_ids=list(flip_summary["regressed_case_ids"]),
+        comparison=comparison,
+    )
+    passed = confirmation_reason is None
     return {
         "patch_hash": candidate.patch_hash,
+        "objective": objective.to_dict(),
         "case_ids": list(confirmation_reference.grouped_evaluations),
         "passed": passed,
         "reference_metrics": confirmation_reference.to_dict(),
@@ -107,9 +119,9 @@ def confirmation_result(
         "comparison_to_reference": comparison.to_dict(),
         "behavior_flip_summary": flip_summary,
         "reason": (
-            "Suspicious runtime candidate repeated its improvement on the confirmation subset."
+            "Finalist repeated its dev-gate improvement on the confirmation subset."
             if passed
-            else "Suspicious runtime candidate did not repeat a clean improvement on the confirmation subset."
+            else f"Finalist failed dev-gate confirmation on the confirmation subset: {confirmation_reason}."
         ),
     }
 
@@ -123,6 +135,7 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
         "highest_token_cases": _case_metric_extremes(result, metric="total_tokens", limit=8),
         "patch_profiles": _patch_profiles(result),
         "patch_deltas_vs_baseline": _patch_deltas_vs_baseline(result),
+        "optimizer_calls": _optimizer_call_profile(result.optimizer_call_diagnostics),
         "cache_events": {
             "case_cache_hits": sum(1 for row in progress_rows if row.get("event") == "case_cache_hit"),
             "case_completed": sum(1 for row in progress_rows if row.get("event") == "case_completed"),
@@ -179,6 +192,10 @@ def _is_runtime_only_patch(patch: AgentPatch) -> bool:
         operation.op == "set_runtime_param" and operation.target.startswith("runtime.")
         for operation in patch.operations
     )
+
+
+def _touches_runtime(patch: AgentPatch) -> bool:
+    return any(operation.op == "set_runtime_param" and operation.target.startswith("runtime.") for operation in patch.operations)
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -305,6 +322,36 @@ def _cache_hit_rate(rows: list[dict[str, Any]]) -> float:
     fresh = sum(1 for row in rows if row.get("event") == "case_completed")
     total = hits + fresh
     return round(hits / total, 4) if total else 0.0
+
+
+def _optimizer_call_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    totals = {
+        "call_count": len(rows),
+        "elapsed_s": round(sum(float(row.get("elapsed_s") or 0.0) for row in rows), 3),
+        "input_tokens": sum(int(row.get("input_tokens") or 0) for row in rows),
+        "output_tokens": sum(int(row.get("output_tokens") or 0) for row in rows),
+        "total_tokens": sum(int(row.get("total_tokens") or 0) for row in rows),
+        "cost_usd": sum(float(row.get("cost_usd") or 0.0) for row in rows if row.get("cost_usd") is not None),
+    }
+    by_component: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        component = str(row.get("component") or "unknown")
+        item = by_component.setdefault(
+            component,
+            {"call_count": 0, "elapsed_s": 0.0, "input_tokens": 0, "output_tokens": 0, "total_tokens": 0, "cost_usd": 0.0},
+        )
+        item["call_count"] += 1
+        item["elapsed_s"] = round(float(item["elapsed_s"]) + float(row.get("elapsed_s") or 0.0), 3)
+        item["input_tokens"] += int(row.get("input_tokens") or 0)
+        item["output_tokens"] += int(row.get("output_tokens") or 0)
+        item["total_tokens"] += int(row.get("total_tokens") or 0)
+        if row.get("cost_usd") is not None:
+            item["cost_usd"] += float(row.get("cost_usd") or 0.0)
+    return {
+        "totals": totals,
+        "by_component": by_component,
+        "calls": rows,
+    }
 
 
 def _compact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:

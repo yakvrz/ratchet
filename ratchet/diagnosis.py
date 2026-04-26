@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import json
-import re
+import time
 from typing import Any
 
 from ratchet.evidence import build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.model_client import ResponsesModelClient
+from ratchet.io import extract_json_object
+from ratchet.model_client import ResponsesModelClient, error_response_diagnostics, response_diagnostics
 from ratchet.results import PatchSummary
 from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
 
@@ -23,6 +24,7 @@ class FailureDiagnoser:
         self.model = model
         self.reasoning_effort = reasoning_effort
         self._client: ResponsesModelClient | None = None
+        self.last_call_diagnostics: dict[str, Any] | None = None
 
     def diagnose(
         self,
@@ -67,6 +69,7 @@ class FailureDiagnoser:
             "failed_examples": failed_examples,
         }
         try:
+            started_at = time.perf_counter()
             response = self._client.create_response(
                 model=self.model,
                 reasoning={"effort": self.reasoning_effort},
@@ -127,10 +130,26 @@ class FailureDiagnoser:
                 ),
                 max_output_tokens=5000,
             )
+            self.last_call_diagnostics = {
+                "component": "diagnoser",
+                **response_diagnostics(
+                    response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
         except Exception as exc:
+            self.last_call_diagnostics = {
+                "component": "diagnoser",
+                **error_response_diagnostics(
+                    exc,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
             raise OptimizerModelError(f"Optimizer diagnoser failed: {exc}") from exc
         try:
-            payload = self._extract_json_object(response.output_text)
+            payload = extract_json_object(response.output_text)
         except Exception as exc:
             raise OptimizerModelError(f"Optimizer diagnoser returned invalid JSON: {exc}") from exc
         case_ids = {str(item["case_id"]) for item in failed_examples}
@@ -157,19 +176,3 @@ class FailureDiagnoser:
                 )
             )
         return diagnoses
-
-    @staticmethod
-    def _extract_json_object(text: str) -> dict[str, Any]:
-        decoder = json.JSONDecoder()
-        last_error: Exception | None = None
-        for match in re.finditer(r"\{", text):
-            try:
-                payload, _ = decoder.raw_decode(text[match.start() :])
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                continue
-            if isinstance(payload, dict):
-                return payload
-        if last_error is not None:
-            raise last_error
-        raise ValueError("No JSON object found in diagnoser response.")

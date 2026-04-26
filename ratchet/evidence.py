@@ -115,9 +115,24 @@ def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) 
     confusion_case_ids: dict[tuple[str, str], list[str]] = defaultdict(list)
     actual_counts: Counter[str] = Counter()
     invalid_case_ids: list[str] = []
+    length_finish_case_ids: list[str] = []
+    parser_fallback_case_ids: list[str] = []
+    low_output_token_length_case_ids: list[str] = []
+    finish_reason_counts: Counter[str] = Counter()
 
     for case_id, evaluations, mean_score, _, case_passed in summary._case_rows():
         evaluation = next((item for item in evaluations if not item.grade.passed), evaluations[0])
+        metadata = evaluation.record.diagnostics.metadata
+        finish_reason = str(metadata.get("finish_reason") or "")
+        if finish_reason:
+            finish_reason_counts[finish_reason] += 1
+        if finish_reason == "length":
+            length_finish_case_ids.append(case_id)
+            cap = _safe_int(metadata.get("requested_output_cap"))
+            if cap and evaluation.record.metrics.output_tokens <= max(1, int(cap * 0.25)):
+                low_output_token_length_case_ids.append(case_id)
+        if metadata.get("parser_fallback"):
+            parser_fallback_case_ids.append(case_id)
         expected_label = _label_from_case(evaluation.case, label_field=label_field)
         actual_label = _actual_label(evaluation.record.output, evaluation.grade.labels, label_field=label_field)
         if expected_label:
@@ -184,6 +199,12 @@ def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) 
         "confusions": confusions,
         "overpredicted_labels": overpredicted,
         "invalid_output_case_ids": invalid_case_ids[:max_case_ids],
+        "runtime_reliability": {
+            "finish_reason_counts": dict(sorted(finish_reason_counts.items())),
+            "length_finish_case_ids": length_finish_case_ids[:max_case_ids],
+            "parser_fallback_case_ids": parser_fallback_case_ids[:max_case_ids],
+            "low_output_token_length_case_ids": low_output_token_length_case_ids[:max_case_ids],
+        },
         "category_metrics": summary.category_metrics,
     }
 
@@ -242,3 +263,10 @@ def _actual_label(output: Any, grade_labels: list[str], *, label_field: str | No
         if label.startswith("actual:"):
             return label.split(":", 1)[1]
     return None
+
+
+def _safe_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

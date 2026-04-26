@@ -6,7 +6,8 @@ import json
 import tempfile
 from typing import Any
 
-from ratchet.adapters import AdapterProtocol
+from ratchet.adapters import AdapterProtocol, checked_agent_spec
+from ratchet.model_client import ResponsesModelClient, validate_optimizer_model_access
 from ratchet.surface import SurfaceGenerator
 from ratchet.types import AgentPatch, EditableTarget, EvalCase, GradeResult, OptimizationObjective, PatchOperation, RunRecord
 from ratchet.validation import PatchValidator
@@ -20,6 +21,7 @@ class CheckSummary:
     sample_cases: list[dict[str, Any]]
     stability: dict[str, Any]
     materialization: dict[str, Any]
+    optimizer_model_access: dict[str, Any]
     exported_path: str
 
     def to_dict(self) -> dict[str, Any]:
@@ -100,8 +102,11 @@ def run_preflight_check(
     cases: tuple[EvalCase, ...],
     objective: OptimizationObjective,
     sample_limit: int = 2,
+    optimizer_model: str | None = None,
+    optimizer_env_path: str = ".env",
+    optimizer_client: ResponsesModelClient | None = None,
 ) -> CheckSummary:
-    spec = adapter.agent_spec()
+    spec = checked_agent_spec(adapter, adapter_spec=adapter_spec)
     surface = SurfaceGenerator().generate(spec, objective)
     sample_cases = select_check_cases(cases, sample_limit=sample_limit)
     sample_rows: list[dict[str, Any]] = []
@@ -120,6 +125,15 @@ def run_preflight_check(
 
     stability = _stability_summary(adapter, sample_cases)
     materialization = _materialization_audit(adapter, spec, surface, objective)
+    optimizer_model_access = (
+        validate_optimizer_model_access(
+            env_path=optimizer_env_path,
+            model=optimizer_model,
+            client=optimizer_client,
+        )
+        if optimizer_model is not None
+        else {"checked": False, "reason": "optimizer_model was not provided"}
+    )
 
     with tempfile.TemporaryDirectory() as tmp:
         export_dir = Path(tmp) / "export"
@@ -132,6 +146,7 @@ def run_preflight_check(
         sample_cases=sample_rows,
         stability=stability,
         materialization=materialization,
+        optimizer_model_access=optimizer_model_access,
         exported_path="validated in temporary directory",
     )
 

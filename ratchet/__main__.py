@@ -8,7 +8,8 @@ import sys
 from typing import Any
 
 from ratchet.adapters import adapter_fingerprint, load_adapter
-from ratchet.config import RatchetRunConfig, ensure_search_path, resolve_run_config
+from ratchet.config import RatchetConfigError, RatchetRunConfig, ensure_search_path, resolve_run_config
+from ratchet.errors import OptimizerModelError
 from ratchet.io import file_sha256, load_eval_cases
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.preflight import run_preflight_check
@@ -40,6 +41,7 @@ def run_optimizer(
     max_case_retries: int | None = 2,
     case_timeout_s: int | None = 180,
     fail_fast: bool | None = False,
+    sanitize_examples: bool | None = None,
     config: RatchetRunConfig | None = None,
 ) -> Path:
     config = config or resolve_run_config(
@@ -59,6 +61,7 @@ def run_optimizer(
         max_case_retries=max_case_retries,
         case_timeout_s=case_timeout_s,
         fail_fast=fail_fast,
+        sanitize_examples=sanitize_examples,
     )
     adapter, cases = load_runtime(config)
     optimizer = RatchetOptimizer(
@@ -193,6 +196,8 @@ def run_check(
         cases=cases,
         objective=config.objective,
         sample_limit=sample_limit,
+        optimizer_model=config.optimizer_model if os.environ.get("RATCHET_CHECK_OPTIMIZER_MODEL") == "1" else None,
+        optimizer_env_path=config.env_file,
     )
     print("Ratchet check passed.")
     print(json.dumps(summary.to_dict(), indent=2, sort_keys=True))
@@ -229,6 +234,7 @@ def _apply_run_overrides(
         max_case_retries=getattr(args, "max_case_retries", None),
         case_timeout_s=getattr(args, "case_timeout_s", None),
         fail_fast=True if getattr(args, "fail_fast", False) else None,
+        sanitize_examples=True if getattr(args, "sanitize_examples", False) else None,
     )
 
 
@@ -258,6 +264,11 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Stop the run immediately after the first case that returns an error trace",
     )
+    parser.add_argument(
+        "--sanitize-examples",
+        action="store_true",
+        help="Redact raw dev example text before sending diagnostic examples to the optimizer model",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -281,27 +292,37 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "init":
-        root = init_scaffold(out_dir=args.out, template=args.template)
-        print(f"Scaffold created at {root}")
-        return
+    try:
+        if args.command == "init":
+            root = init_scaffold(out_dir=args.out, template=args.template)
+            print(f"Scaffold created at {root}")
+            return 0
 
-    if args.command in {"optimize", "run"}:
-        config = _apply_run_overrides(args)
-        run_optimizer(config=config)
-        return
+        if args.command in {"optimize", "run"}:
+            config = _apply_run_overrides(args)
+            run_optimizer(config=config)
+            return 0
 
-    if args.command == "check":
-        config = _resolve_check_config(args)
-        run_check(config=config, sample_limit=args.sample_limit)
-        return
+        if args.command == "check":
+            config = _resolve_check_config(args)
+            run_check(config=config, sample_limit=args.sample_limit)
+            return 0
 
-    raise ValueError(f"Unsupported command: {args.command}")
+        raise ValueError(f"Unsupported command: {args.command}")
+    except RatchetConfigError as exc:
+        print(f"Ratchet config error: {exc}", file=sys.stderr)
+        return 2
+    except OptimizerModelError as exc:
+        print(f"Ratchet optimizer model error: {exc}", file=sys.stderr)
+        return 4
+    except (TypeError, ValueError) as exc:
+        print(f"Ratchet preflight error: {exc}", file=sys.stderr)
+        return 3
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

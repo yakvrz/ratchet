@@ -10,6 +10,7 @@ import unittest
 
 from ratchet.scaffold import init_scaffold
 from ratchet.preflight import run_preflight_check
+from ratchet.config import RatchetConfigError, load_run_config, resolve_run_config
 from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
@@ -150,6 +151,21 @@ class IgnoringExportAdapter:
         (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), sort_keys=True))
 
 
+class NoneAgentSpecAdapter(IgnoringExportAdapter):
+    def agent_spec(self) -> None:
+        return None
+
+
+class WrongAgentSpecAdapter(IgnoringExportAdapter):
+    def agent_spec(self) -> str:
+        return "not an AgentSpec"
+
+
+class RaisingAgentSpecAdapter(IgnoringExportAdapter):
+    def agent_spec(self) -> AgentSpec:
+        raise RuntimeError("spec unavailable")
+
+
 class CliConfigIntegrationTests(unittest.TestCase):
     def run_cli(self, *args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
@@ -199,6 +215,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
             )
             with self.assertRaises(subprocess.CalledProcessError) as context:
                 self.run_cli("check", "--config", str(root / "ratchet.toml"))
+            self.assertEqual(context.exception.returncode, 3)
             self.assertIn("run_case returned dict", context.exception.stderr)
 
     def test_check_fails_when_export_does_not_materialize_generated_targets(self) -> None:
@@ -210,6 +227,48 @@ class CliConfigIntegrationTests(unittest.TestCase):
             run_preflight_check(
                 adapter_spec="tests.test_cli_config:adapter",
                 adapter=IgnoringExportAdapter(),
+                cases=cases,
+                objective=OptimizationObjective(),
+                sample_limit=2,
+            )
+
+    def test_check_rejects_none_agent_spec(self) -> None:
+        cases = (
+            EvalCase(id="dev-1", split="dev", input="x", expected="x"),
+            EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
+        )
+        with self.assertRaisesRegex(TypeError, "agent_spec\\(\\) returned None"):
+            run_preflight_check(
+                adapter_spec="tests.test_cli_config:none_spec",
+                adapter=NoneAgentSpecAdapter(),
+                cases=cases,
+                objective=OptimizationObjective(),
+                sample_limit=2,
+            )
+
+    def test_check_rejects_wrong_type_agent_spec(self) -> None:
+        cases = (
+            EvalCase(id="dev-1", split="dev", input="x", expected="x"),
+            EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
+        )
+        with self.assertRaisesRegex(TypeError, "returned str, expected AgentSpec"):
+            run_preflight_check(
+                adapter_spec="tests.test_cli_config:wrong_spec",
+                adapter=WrongAgentSpecAdapter(),
+                cases=cases,
+                objective=OptimizationObjective(),
+                sample_limit=2,
+            )
+
+    def test_check_wraps_raising_agent_spec(self) -> None:
+        cases = (
+            EvalCase(id="dev-1", split="dev", input="x", expected="x"),
+            EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
+        )
+        with self.assertRaisesRegex(TypeError, "agent_spec\\(\\) failed: spec unavailable"):
+            run_preflight_check(
+                adapter_spec="tests.test_cli_config:raising_spec",
+                adapter=RaisingAgentSpecAdapter(),
                 cases=cases,
                 objective=OptimizationObjective(),
                 sample_limit=2,
@@ -235,6 +294,141 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertIn("<h2>What Changed</h2>", summary)
             self.assertIn('src="plots/scorecard.svg"', summary)
             self.assertIn("## Selected Patch", report)
+
+    def test_sanitize_examples_can_be_configured_and_overridden(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    sanitize_examples = true
+                    """
+                ).strip()
+            )
+            loaded = load_run_config(config_path)
+            self.assertTrue(loaded.objective.constraints.sanitize_examples)
+            overridden = resolve_run_config(
+                config_path=config_path,
+                adapter=None,
+                evals_path=None,
+                out_dir=None,
+                env_file=None,
+                dev_budget=None,
+                holdout_budget=None,
+                objective_mode=None,
+                allowed_models=None,
+                allowed_edits=None,
+                optimizer_model=None,
+                optimizer_reasoning=None,
+                samples_per_case=None,
+                max_case_retries=None,
+                case_timeout_s=None,
+                fail_fast=None,
+                sanitize_examples=False,
+            )
+            self.assertFalse(overridden.objective.constraints.sanitize_examples)
+
+    def test_config_rejects_unknown_top_level_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    dev_bugget = 50
+                    """
+                ).strip()
+            )
+
+            with self.assertRaisesRegex(RatchetConfigError, "dev_bugget"):
+                load_run_config(config_path)
+
+    def test_cli_config_error_uses_distinct_exit_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    dev_bugget = 50
+                    """
+                ).strip()
+            )
+
+            completed = subprocess.run(
+                [sys.executable, "-m", "ratchet", "check", "--config", str(config_path)],
+                cwd=str(Path(__file__).resolve().parents[1]),
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertEqual(completed.returncode, 2)
+            self.assertIn("Ratchet config error", completed.stderr)
+
+    def test_config_rejects_missing_required_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    """
+                ).strip()
+            )
+
+            with self.assertRaisesRegex(RatchetConfigError, "adapter"):
+                load_run_config(config_path)
+
+    def test_config_wraps_malformed_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = Path(tmp) / "ratchet.toml"
+            config_path.write_text("[ratchet\nadapter =")
+
+            with self.assertRaisesRegex(RatchetConfigError, "Invalid TOML"):
+                load_run_config(config_path)
+
+    def test_config_rejects_unknown_nested_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+
+                    [ratchet.objective]
+                    mode = "correctness"
+
+                    [ratchet.objective.constraints]
+                    allowed_edits = ["instruction"]
+                    typo_ratio = 2.0
+                    """
+                ).strip()
+            )
+
+            with self.assertRaisesRegex(RatchetConfigError, "typo_ratio"):
+                load_run_config(config_path)
 
     def test_optimize_with_zero_dev_budget_runs_scaffolded_python_cli_agent_baseline(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import contextlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import json
 from pathlib import Path
 import signal
+import threading
 import time
 from typing import Any, Callable, Iterable
 
-from ratchet.adapters import AdapterProtocol
+from ratchet.adapters import AdapterProtocol, checked_agent_spec
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
@@ -19,6 +21,7 @@ from ratchet.objectives import (
     final_gate_status,
     objective_sort_key,
     pareto_frontier,
+    select_recommended_patch,
 )
 from ratchet.patches import compose_patches
 from ratchet.profiling import (
@@ -58,6 +61,7 @@ from ratchet.types import (
     FailureDiagnosis,
     GradeResult,
     OperationalMetrics,
+    PatchOperation,
     OptimizationObjective,
     RunRecord,
 )
@@ -65,7 +69,18 @@ from ratchet.types import (
 
 SEARCH_FRONTIER_WIDTH = 2
 PROPOSAL_RETRY_BUDGET = 1
+FINALIST_CONFIRMATION_SAMPLES = 2
+FRONTIER_PARENT_STALL_LIMIT = 2
 ProgressCallback = Callable[[dict[str, Any]], None]
+
+
+@dataclass
+class FrontierParentState:
+    visits: int = 0
+    consecutive_stalls: int = 0
+    accepted_child_count: int = 0
+    last_selected_iteration: int = 0
+    exhausted: bool = False
 
 
 @contextlib.contextmanager
@@ -73,6 +88,8 @@ def case_timeout(timeout_s: int) -> Iterable[None]:
     if timeout_s <= 0 or not hasattr(signal, "SIGALRM"):
         yield
         return
+    if threading.current_thread() is not threading.main_thread():
+        raise RuntimeError("case_timeout with SIGALRM requires the main thread; set case_timeout_s=0 in worker threads.")
     previous_handler = signal.getsignal(signal.SIGALRM)
 
     def _handle_timeout(signum: int, frame: Any) -> None:
@@ -111,7 +128,7 @@ class RatchetOptimizer:
         self.dev_budget = dev_budget
         self.holdout_budget = holdout_budget
         self.objective = objective or OptimizationObjective()
-        self.agent_spec = adapter.agent_spec()
+        self.agent_spec = checked_agent_spec(adapter)
         self.surface_generator = SurfaceGenerator()
         self.diagnoser = FailureDiagnoser(
             env_path=env_path,
@@ -141,6 +158,7 @@ class RatchetOptimizer:
         self.progress_callback = progress_callback
         self._progress_started_at: float | None = None
         self._progress_path: Path | None = None
+        self.optimizer_call_diagnostics: list[dict[str, Any]] = []
 
     def run(self, cases: tuple[EvalCase, ...]) -> RatchetResult:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -148,6 +166,7 @@ class RatchetOptimizer:
         self._progress_started_at = time.perf_counter()
         self._progress_path = self.out_dir / "progress.jsonl"
         self._progress_path.write_text("")
+        self.optimizer_call_diagnostics = []
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
         self._emit_progress(
@@ -172,7 +191,10 @@ class RatchetOptimizer:
 
         accepted_dev_patches: list[PatchSummary] = []
         accepted_dev_hashes: set[str] = set()
-        frontier: list[PatchSummary] = [baseline_dev]
+        parent_pool_by_hash: dict[str, PatchSummary] = {baseline_dev.patch_hash: baseline_dev}
+        frontier_states: dict[str, FrontierParentState] = {
+            baseline_dev.patch_hash: FrontierParentState(),
+        }
         decision_log: list[dict[str, Any]] = []
         diagnoses_log: list[dict[str, Any]] = []
         proposals_log: list[dict[str, Any]] = []
@@ -183,11 +205,16 @@ class RatchetOptimizer:
         dev_evaluations = 0
         iteration = 0
 
-        while dev_evaluations < self.dev_budget and frontier:
+        while dev_evaluations < self.dev_budget and _has_selectable_frontier_parent(frontier_states):
             iteration += 1
-            parent_summaries = sorted(frontier, key=lambda summary: objective_sort_key(summary, self.objective))[
-                : SEARCH_FRONTIER_WIDTH
-            ]
+            parent_summaries = _select_frontier_parents(
+                parent_pool_by_hash.values(),
+                frontier_states=frontier_states,
+                objective=self.objective,
+                width=SEARCH_FRONTIER_WIDTH,
+            )
+            if not parent_summaries:
+                break
             self._emit_progress(
                 "iteration_started",
                 iteration=iteration,
@@ -204,6 +231,9 @@ class RatchetOptimizer:
                 remaining_parents = len(parent_summaries) - parent_index
                 remaining_budget = self.dev_budget - dev_evaluations
                 proposal_budget = max(1, (remaining_budget + remaining_parents - 1) // remaining_parents)
+                parent_state = frontier_states.setdefault(current_dev.patch_hash, FrontierParentState())
+                parent_state.visits += 1
+                parent_state.last_selected_iteration = iteration
                 current_spec = self.agent_spec.apply_patch(current_dev.patch) if self.agent_spec else None
                 surface = self.surface_generator.generate(current_spec, self.objective)
                 generated_surface_rows = [target.to_dict() for target in surface]
@@ -221,12 +251,22 @@ class RatchetOptimizer:
                     failure_count=current_dev.case_count - current_dev.pass_count,
                 )
                 diagnoses, diagnosis_analysis = self.diagnoser.diagnose(current_dev, surface, self.objective)
+                if self.diagnoser.last_call_diagnostics is not None:
+                    self.optimizer_call_diagnostics.append(
+                        {
+                            "iteration": iteration,
+                            "parent_rank": parent_index + 1,
+                            "parent_patch_hash": current_dev.patch_hash,
+                            **self.diagnoser.last_call_diagnostics,
+                        }
+                    )
                 self._emit_progress(
                     "diagnosis_completed",
                     iteration=iteration,
                     parent_rank=parent_index + 1,
                     diagnosis_count=len(diagnoses),
                     analysis=diagnosis_analysis,
+                    call_diagnostics=self.diagnoser.last_call_diagnostics or {},
                 )
                 search_hypothesis = build_search_hypothesis(
                     summary=current_dev,
@@ -306,6 +346,7 @@ class RatchetOptimizer:
                     proposal_budget=proposal_budget,
                 )
                 dev_evaluations += evaluations_used
+                parent_evaluations_used = evaluations_used
                 if not accepted_rows and evaluations_used > 0 and dev_evaluations < self.dev_budget:
                     self._emit_progress(
                         "retry_started",
@@ -367,6 +408,7 @@ class RatchetOptimizer:
                         retry_reason="no_accepted_candidates_from_parent",
                     )
                     dev_evaluations += retry_evaluations_used
+                    parent_evaluations_used += retry_evaluations_used
                     accepted_rows.extend(retry_rows)
 
                 accepted_rows.sort(key=lambda item: objective_sort_key(item[1], self.objective))
@@ -374,7 +416,16 @@ class RatchetOptimizer:
                     if accepted_summary.patch_hash not in accepted_dev_hashes:
                         accepted_dev_hashes.add(accepted_summary.patch_hash)
                         accepted_dev_patches.append(accepted_summary)
+                    parent_pool_by_hash.setdefault(accepted_summary.patch_hash, accepted_summary)
+                    frontier_states.setdefault(accepted_summary.patch_hash, FrontierParentState())
                     next_frontier_by_hash.setdefault(accepted_summary.patch_hash, accepted_summary)
+                if accepted_rows:
+                    parent_state.consecutive_stalls = 0
+                    parent_state.accepted_child_count += len(accepted_rows)
+                else:
+                    parent_state.consecutive_stalls += 1
+                    if parent_evaluations_used == 0 or parent_state.consecutive_stalls >= FRONTIER_PARENT_STALL_LIMIT:
+                        parent_state.exhausted = True
                 if accepted_rows:
                     chosen_proposal, chosen_dev, _ = accepted_rows[0]
                     decision_log.append(
@@ -393,12 +444,14 @@ class RatchetOptimizer:
 
             if search_complete:
                 break
-            if not next_frontier_by_hash:
+            if not next_frontier_by_hash and not _has_selectable_frontier_parent(frontier_states):
                 break
-            frontier = sorted(
-                next_frontier_by_hash.values(),
-                key=lambda summary: objective_sort_key(summary, self.objective),
-            )[: SEARCH_FRONTIER_WIDTH]
+            frontier = _select_frontier_parents(
+                parent_pool_by_hash.values(),
+                frontier_states=frontier_states,
+                objective=self.objective,
+                width=SEARCH_FRONTIER_WIDTH,
+            )
             decision_log.append(
                 {
                     "type": "frontier_update",
@@ -412,6 +465,17 @@ class RatchetOptimizer:
                             key=lambda summary: objective_sort_key(summary, self.objective),
                         )
                     ],
+                    "parent_pool_patch_hashes": [
+                        summary.patch_hash
+                        for summary in sorted(
+                            parent_pool_by_hash.values(),
+                            key=lambda summary: objective_sort_key(summary, self.objective),
+                        )
+                    ],
+                    "frontier_parent_states": {
+                        patch_hash_value: _frontier_state_dict(state)
+                        for patch_hash_value, state in sorted(frontier_states.items())
+                    },
                 }
             )
             self._emit_progress(
@@ -419,6 +483,7 @@ class RatchetOptimizer:
                 iteration=iteration,
                 frontier_patch_hashes=[summary.patch_hash for summary in frontier],
                 accepted_count=len(next_frontier_by_hash),
+                selectable_parent_count=sum(1 for state in frontier_states.values() if not state.exhausted),
             )
 
         best_dev_patch = min(
@@ -429,6 +494,18 @@ class RatchetOptimizer:
             accepted_dev_patches,
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
+        simplification_results: list[dict[str, Any]] = []
+        if finalist_dev_patches:
+            finalist_dev_patches = self._augment_finalists_with_simplifications(
+                finalist_dev_patches=finalist_dev_patches,
+                accepted_dev_patches=accepted_dev_patches,
+                accepted_dev_hashes=accepted_dev_hashes,
+                evaluated_patch_hashes=evaluated_patch_hashes,
+                baseline_dev=baseline_dev,
+                dev_cases=dev_cases,
+                decision_log=decision_log,
+                simplification_results=simplification_results,
+            )
 
         holdout_patches: list[PatchSummary] = []
         finalist_statuses: list[dict[str, Any]] = []
@@ -451,59 +528,62 @@ class RatchetOptimizer:
         for dev_summary in finalist_dev_patches:
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
-            if runtime_diagnostic.get("suspicious"):
-                confirmation_cases = confirmation_case_subset(baseline_dev, dev_summary, dev_cases)
-                self._emit_progress(
-                    "confirmation_started",
-                    patch_hash=dev_summary.patch_hash,
-                    case_count=len(confirmation_cases),
-                    reason=runtime_diagnostic.get("reason"),
-                )
-                sample_index = 1000 + len(confirmation_results)
-                confirmation_baseline = self.evaluate_patch(
-                    baseline_patch,
-                    confirmation_cases,
-                    sample_indices=(sample_index,),
-                )
-                confirmation_candidate = self.evaluate_patch(
-                    dev_summary.patch,
-                    confirmation_cases,
-                    sample_indices=(sample_index,),
-                )
-                confirmation = confirmation_result(
-                    reference=baseline_dev,
-                    candidate=dev_summary,
-                    confirmation_reference=confirmation_baseline,
-                    confirmation_candidate=confirmation_candidate,
-                )
-                confirmation_results.append(confirmation)
-                decision_log.append(
-                    {
-                        "type": "runtime_confirmation",
-                        "patch_hash": dev_summary.patch_hash,
-                        "runtime_reliability_diagnostics": runtime_diagnostic,
-                        "confirmation": confirmation,
-                    }
-                )
-                self._emit_progress(
-                    "confirmation_completed",
-                    patch_hash=dev_summary.patch_hash,
-                    passed=confirmation.get("passed"),
-                    reason=confirmation.get("reason"),
-                )
-                if not confirmation.get("passed"):
-                    finalist_statuses.append(
+            confirmation_cases = confirmation_case_subset(baseline_dev, dev_summary, dev_cases)
+            self._emit_progress(
+                "confirmation_started",
+                patch_hash=dev_summary.patch_hash,
+                case_count=len(confirmation_cases),
+                sample_count=FINALIST_CONFIRMATION_SAMPLES,
+                reason=runtime_diagnostic.get("reason"),
+            )
+            sample_start = 1000 + len(confirmation_results) * 100
+            sample_indices = tuple(range(sample_start, sample_start + FINALIST_CONFIRMATION_SAMPLES))
+            confirmation_baseline = self.evaluate_patch(
+                baseline_patch,
+                confirmation_cases,
+                sample_indices=sample_indices,
+            )
+            confirmation_candidate = self.evaluate_patch(
+                dev_summary.patch,
+                confirmation_cases,
+                sample_indices=sample_indices,
+            )
+            confirmation = confirmation_result(
+                reference=baseline_dev,
+                candidate=dev_summary,
+                confirmation_reference=confirmation_baseline,
+                confirmation_candidate=confirmation_candidate,
+                objective=self.objective,
+            )
+            confirmation_results.append(confirmation)
+            decision_log.append(
+                {
+                    "type": "finalist_confirmation",
+                    "patch_hash": dev_summary.patch_hash,
+                    "runtime_reliability_diagnostics": runtime_diagnostic,
+                    "confirmation": confirmation,
+                }
+            )
+            self._emit_progress(
+                "confirmation_completed",
+                patch_hash=dev_summary.patch_hash,
+                passed=confirmation.get("passed"),
+                reason=confirmation.get("reason"),
+            )
+            if not confirmation.get("passed"):
+                finalist_statuses.append(
                         {
                             "patch_hash": dev_summary.patch_hash,
                             "status": "failed",
                             "stage": "confirmation",
                             "reason": confirmation.get("reason"),
+                            "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
                             "dev_metrics": dev_summary.to_dict(),
-                            "runtime_reliability_diagnostics": runtime_diagnostic,
-                            "confirmation": confirmation,
-                        }
-                    )
-                    continue
+                        "runtime_reliability_diagnostics": runtime_diagnostic,
+                        "confirmation": confirmation,
+                    }
+                )
+                continue
             self._emit_progress(
                 "holdout_candidate_started",
                 patch_hash=dev_summary.patch_hash,
@@ -524,6 +604,7 @@ class RatchetOptimizer:
                 "status": gate.status,
                 "stage": "holdout",
                 "reason": gate.reason,
+                "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
                 "comparison_to_baseline": comparison.to_dict(),
                 "behavior_flip_summary": flip_summary,
                 "passed_final_gate": passed_gate,
@@ -556,14 +637,23 @@ class RatchetOptimizer:
                 promotable.append((holdout_summary, comparison))
 
         if promotable:
-            promotable.sort(key=lambda item: objective_sort_key(item[0], self.objective))
-            selected_holdout = promotable[0][0]
+            promotable_summaries = [summary for summary, _ in promotable]
+            selected_holdout, frontier_recommendation = select_recommended_patch(
+                promotable_summaries,
+                self.objective,
+            )
             promoted = True
-            selection_reason = f"Promoted best holdout patch for {self.objective.mode} objective."
+            selection_reason = str(frontier_recommendation.get("reason") or f"Promoted validated patch for {self.objective.mode} objective.")
         else:
             selected_holdout = baseline_holdout
             promoted = False
             selection_reason = "No finalist cleared the holdout objective gate; kept original baseline."
+            frontier_recommendation = {
+                "recommended_patch_hash": selected_holdout.patch_hash,
+                "highest_quality_patch_hash": selected_holdout.patch_hash,
+                "reason": selection_reason,
+                "validated_candidate_count": 0,
+            }
 
         selected_patch = selected_holdout.patch
         selected_patch_hash = selected_holdout.patch_hash
@@ -574,6 +664,7 @@ class RatchetOptimizer:
                 "promoted": promoted,
                 "reason": selection_reason,
                 "best_dev_patch_hash": best_dev_patch.patch_hash,
+                "frontier_recommendation": frontier_recommendation,
             }
         )
         self._emit_progress(
@@ -587,6 +678,7 @@ class RatchetOptimizer:
 
         transform_summaries = summarize_transform_results(proposals_log)
         transform_context_summaries = summarize_transform_context_results(proposals_log)
+        transform_final_statuses = _transform_final_status_summaries(finalist_statuses)
         cost_tradeoffs = quality_cost_tradeoffs(proposals_log)
         outcome_analysis = build_outcome_analysis(
             objective=self.objective,
@@ -606,9 +698,13 @@ class RatchetOptimizer:
             generated_surface=generated_surface_rows,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
+            transform_final_statuses=transform_final_statuses,
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
             confirmation_results=confirmation_results,
+            simplification_results=simplification_results,
+            frontier_recommendation=frontier_recommendation,
+            optimizer_call_diagnostics=self.optimizer_call_diagnostics,
             quality_cost_tradeoffs=cost_tradeoffs,
             outcome_analysis=outcome_analysis,
         )
@@ -633,8 +729,11 @@ class RatchetOptimizer:
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
             confirmation_results=confirmation_results,
+            simplification_results=simplification_results,
+            frontier_recommendation=frontier_recommendation,
             run_profile={},
             quality_cost_tradeoffs=cost_tradeoffs,
+            optimizer_call_diagnostics=self.optimizer_call_diagnostics,
             selection_reason=selection_reason,
             outcome_analysis=outcome_analysis,
             manifest=manifest,
@@ -643,6 +742,81 @@ class RatchetOptimizer:
         result.manifest["run_profile"] = result.run_profile
         self.write_outputs(result)
         return result
+
+    def _augment_finalists_with_simplifications(
+        self,
+        *,
+        finalist_dev_patches: list[PatchSummary],
+        accepted_dev_patches: list[PatchSummary],
+        accepted_dev_hashes: set[str],
+        evaluated_patch_hashes: set[str],
+        baseline_dev: PatchSummary,
+        dev_cases: tuple[EvalCase, ...],
+        decision_log: list[dict[str, Any]],
+        simplification_results: list[dict[str, Any]],
+    ) -> list[PatchSummary]:
+        known_by_hash = {summary.patch_hash: summary for summary in [baseline_dev, *accepted_dev_patches]}
+        augmented_by_hash = {summary.patch_hash: summary for summary in finalist_dev_patches}
+        for parent in list(finalist_dev_patches):
+            for variant in _simplification_variants(parent.patch):
+                digest = patch_hash(variant)
+                if digest == parent.patch_hash:
+                    continue
+                summary = known_by_hash.get(digest)
+                reused = summary is not None
+                if summary is None:
+                    if digest in evaluated_patch_hashes:
+                        continue
+                    self._emit_progress(
+                        "simplification_started",
+                        parent_patch_hash=parent.patch_hash,
+                        patch_hash=digest,
+                        simplification=variant.metadata.get("simplification"),
+                    )
+                    summary = self.evaluate_patch(variant, dev_cases)
+                    evaluated_patch_hashes.add(digest)
+                    known_by_hash[digest] = summary
+                comparison_to_baseline = compare_summaries(baseline_dev, summary)
+                comparison_to_parent = compare_summaries(parent, summary)
+                rejection_reason = patch_rejection_reason(
+                    baseline=baseline_dev,
+                    reference=baseline_dev,
+                    patch_summary=summary,
+                    objective=self.objective,
+                )
+                accepted = rejection_reason is None
+                row = {
+                    "type": "simplification_evaluation",
+                    "parent_patch_hash": parent.patch_hash,
+                    "patch_hash": digest,
+                    "patch": variant.to_dict(),
+                    "simplification": variant.metadata.get("simplification"),
+                    "reused_existing_summary": reused,
+                    "accepted": accepted,
+                    "rejection_reason": rejection_reason,
+                    "metrics": summary.to_dict(),
+                    "comparison_to_baseline": comparison_to_baseline.to_dict(),
+                    "comparison_to_parent": comparison_to_parent.to_dict(),
+                }
+                simplification_results.append(row)
+                decision_log.append(row)
+                self._emit_progress(
+                    "simplification_completed",
+                    parent_patch_hash=parent.patch_hash,
+                    variant_patch_hash=digest,
+                    accepted=accepted,
+                    rejection_reason=rejection_reason,
+                    **_summary_progress_fields(summary),
+                )
+                if accepted:
+                    augmented_by_hash.setdefault(digest, summary)
+                    if digest not in accepted_dev_hashes:
+                        accepted_dev_hashes.add(digest)
+                        accepted_dev_patches.append(summary)
+        return sorted(
+            augmented_by_hash.values(),
+            key=lambda summary: objective_sort_key(summary, self.objective),
+        )[: self.holdout_budget]
 
     def _propose_and_evaluate_parent(
         self,
@@ -694,6 +868,17 @@ class RatchetOptimizer:
             proposal_example_cases=proposal_example_cases,
             proposal_budget=proposal_budget,
         )
+        if self.proposer.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "proposal_retry": proposal_retry,
+                    "parent_rank": parent_index + 1,
+                    "parent_patch_hash": current_dev.patch_hash,
+                    **self.proposer.last_call_diagnostics,
+                }
+            )
         self._emit_progress(
             "proposal_completed",
             iteration=iteration,
@@ -705,6 +890,7 @@ class RatchetOptimizer:
             returned_count=self.proposer.last_stats.returned_count,
             invalid_count=self.proposer.last_stats.invalid_count,
             duplicate_count=self.proposer.last_stats.duplicate_count,
+            call_diagnostics=self.proposer.last_call_diagnostics or {},
         )
         decision_log.append(
             {
@@ -1070,10 +1256,14 @@ class RatchetOptimizer:
         generated_surface: list[dict[str, Any]],
         transform_summaries: dict[str, dict[str, Any]],
         transform_context_summaries: dict[str, dict[str, Any]],
+        transform_final_statuses: dict[str, dict[str, Any]],
         outcome_analysis: dict[str, Any],
         finalist_statuses: list[dict[str, Any]],
         runtime_reliability_diagnostics: list[dict[str, Any]],
         confirmation_results: list[dict[str, Any]],
+        simplification_results: list[dict[str, Any]],
+        frontier_recommendation: dict[str, Any],
+        optimizer_call_diagnostics: list[dict[str, Any]],
         quality_cost_tradeoffs: list[dict[str, Any]],
     ) -> dict[str, Any]:
         ended_at = datetime.now(timezone.utc)
@@ -1097,9 +1287,13 @@ class RatchetOptimizer:
             "generated_surface_count": len(generated_surface),
             "transform_summaries": transform_summaries,
             "transform_context_summaries": transform_context_summaries,
+            "transform_final_statuses": transform_final_statuses,
             "finalist_statuses": finalist_statuses,
             "runtime_reliability_diagnostics": runtime_reliability_diagnostics,
             "confirmation_results": confirmation_results,
+            "simplification_results": simplification_results,
+            "frontier_recommendation": frontier_recommendation,
+            "optimizer_call_diagnostics": optimizer_call_diagnostics,
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "samples_per_case": self.samples_per_case,
             "selected_patch_hash": selected_patch_hash,
@@ -1153,6 +1347,151 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
     if candidate.pass_count < reference.pass_count:
         return "smoke rejected candidate because pass count regressed"
     return None
+
+
+def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:
+    variants: list[AgentPatch] = []
+    operations = list(patch.operations)
+    if len(operations) > 1:
+        for index, operation in enumerate(operations):
+            simplified = [item for item_index, item in enumerate(operations) if item_index != index]
+            variants.append(
+                AgentPatch(
+                    operations=simplified,
+                    rationale=f"Simplification removing operation {index + 1} ({operation.op} on {operation.target}).",
+                    expected_effect="Preserve measured gain with less policy complexity.",
+                    metadata={
+                        **patch.metadata,
+                        "simplification": {
+                            "type": "remove_operation",
+                            "removed_index": index,
+                            "removed_op": operation.op,
+                            "removed_target": operation.target,
+                        },
+                    },
+                )
+            )
+    for op_index, operation in enumerate(operations):
+        if operation.op != "add_few_shot" or not isinstance(operation.value, list) or len(operation.value) <= 1:
+            continue
+        for keep_count in sorted({1, max(1, len(operation.value) // 2)}):
+            if keep_count >= len(operation.value):
+                continue
+            reduced_operations = list(operations)
+            reduced_operations[op_index] = PatchOperation(
+                op=operation.op,
+                target=operation.target,
+                value=operation.value[:keep_count],
+                rationale=operation.rationale,
+            )
+            variants.append(
+                AgentPatch(
+                    operations=reduced_operations,
+                    rationale=f"Simplification reducing few-shot examples from {len(operation.value)} to {keep_count}.",
+                    expected_effect="Preserve measured gain with fewer prompt tokens.",
+                    metadata={
+                        **patch.metadata,
+                        "simplification": {
+                            "type": "reduce_few_shot",
+                            "operation_index": op_index,
+                            "original_count": len(operation.value),
+                            "kept_count": keep_count,
+                        },
+                    },
+                )
+            )
+    unique: dict[str, AgentPatch] = {}
+    for variant in variants:
+        if variant.operations:
+            unique.setdefault(patch_hash(variant), variant)
+    return list(unique.values())
+
+
+def _transform_lineage_families(patch_hash_value: str, proposals: list[dict[str, Any]]) -> list[str]:
+    row_by_patch = {
+        str(row.get("patch_hash")): row
+        for row in proposals
+        if row.get("accepted") is not None and row.get("patch_hash")
+    }
+    families: list[str] = []
+    seen: set[str] = set()
+    cursor = patch_hash_value
+    while cursor and cursor not in seen:
+        seen.add(cursor)
+        row = row_by_patch.get(cursor)
+        if row is None:
+            break
+        family = row.get("transform_family")
+        if isinstance(family, str) and family and family not in families:
+            families.append(family)
+        parent = row.get("parent_patch_hash")
+        cursor = str(parent) if isinstance(parent, str) else ""
+    return list(reversed(families))
+
+
+def _transform_final_status_summaries(finalist_statuses: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in finalist_statuses:
+        families = row.get("dev_transform_families") or ["unknown"]
+        for family in families:
+            family_name = str(family)
+            summary = summaries.setdefault(
+                family_name,
+                {"validated": 0, "directional": 0, "failed": 0, "finalist_count": 0, "patch_hashes": []},
+            )
+            status = str(row.get("status") or "failed")
+            if status not in {"validated", "directional", "failed"}:
+                status = "failed"
+            summary[status] += 1
+            summary["finalist_count"] += 1
+            if row.get("patch_hash"):
+                summary["patch_hashes"].append(row.get("patch_hash"))
+    return summaries
+
+
+def _has_selectable_frontier_parent(frontier_states: dict[str, FrontierParentState]) -> bool:
+    return any(not state.exhausted for state in frontier_states.values())
+
+
+def _select_frontier_parents(
+    summaries: Iterable[PatchSummary],
+    *,
+    frontier_states: dict[str, FrontierParentState],
+    objective: OptimizationObjective,
+    width: int,
+) -> list[PatchSummary]:
+    selectable = [
+        summary
+        for summary in summaries
+        if not frontier_states.setdefault(summary.patch_hash, FrontierParentState()).exhausted
+    ]
+    ranked = sorted(
+        selectable,
+        key=lambda summary: _frontier_parent_sort_key(summary, frontier_states[summary.patch_hash], objective),
+    )
+    return ranked[: max(0, width)]
+
+
+def _frontier_parent_sort_key(
+    summary: PatchSummary,
+    state: FrontierParentState,
+    objective: OptimizationObjective,
+) -> tuple[Any, ...]:
+    return (
+        state.consecutive_stalls,
+        state.visits,
+        objective_sort_key(summary, objective),
+    )
+
+
+def _frontier_state_dict(state: FrontierParentState) -> dict[str, Any]:
+    return {
+        "visits": state.visits,
+        "consecutive_stalls": state.consecutive_stalls,
+        "accepted_child_count": state.accepted_child_count,
+        "last_selected_iteration": state.last_selected_iteration,
+        "exhausted": state.exhausted,
+    }
 
 
 def _summary_progress_fields(summary: PatchSummary) -> dict[str, Any]:

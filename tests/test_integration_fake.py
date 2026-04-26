@@ -311,7 +311,13 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         fake_adapter.reset()
 
-    def write_evals(self, directory: Path, *, expected_prefix: str = "") -> Path:
+    def write_evals(
+        self,
+        directory: Path,
+        *,
+        expected_prefix: str = "",
+        significance_cases: bool = False,
+    ) -> Path:
         evals_path = directory / "fake_evals.jsonl"
         prefix = f"{expected_prefix}-" if expected_prefix else ""
         rows = [
@@ -320,6 +326,15 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             {"id": "hold-1", "split": "holdout", "input": "policy", "expected": f"{prefix}policy", "metadata": {"needs_tool": False}},
             {"id": "hold-2", "split": "holdout", "input": "math", "expected": f"{prefix}math", "metadata": {"needs_tool": True}},
         ]
+        if significance_cases:
+            rows.extend(
+                [
+                    {"id": "dev-3", "split": "dev", "input": "policy-alt", "expected": f"{prefix}policy", "metadata": {"needs_tool": False}},
+                    {"id": "dev-4", "split": "dev", "input": "math-alt", "expected": f"{prefix}math", "metadata": {"needs_tool": True}},
+                    {"id": "hold-3", "split": "holdout", "input": "policy-alt", "expected": f"{prefix}policy", "metadata": {"needs_tool": False}},
+                    {"id": "hold-4", "split": "holdout", "input": "math-alt", "expected": f"{prefix}math", "metadata": {"needs_tool": True}},
+                ]
+            )
         evals_path.write_text("\n".join(json.dumps(row) for row in rows))
         return evals_path
 
@@ -367,7 +382,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
     def test_llm_proposer_drives_optimization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            evals_path = self.write_evals(root)
+            evals_path = self.write_evals(root, significance_cases=True)
             cases = load_eval_cases(evals_path)
             adapter = load_adapter("tests.fixtures.fake_adapter:adapter")
             progress_rows: list[dict[str, object]] = []
@@ -390,15 +405,20 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             events = [str(row["event"]) for row in progress_rows]
             self.assertIn("candidate_evaluation_started", events)
             self.assertIn("candidate_evaluated", events)
+            self.assertIn("confirmation_started", events)
             self.assertLess(
                 events.index("candidate_evaluation_started"),
                 events.index("candidate_evaluated"),
             )
+            self.assertTrue(result.confirmation_results)
+            self.assertTrue(result.optimizer_call_diagnostics)
+            self.assertGreaterEqual(result.run_profile["optimizer_calls"]["totals"]["call_count"], 1)
+            self.assertIn("frontier_recommendation", result.manifest)
 
     def test_runtime_error_is_persisted_and_resume_retries_failed_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            evals_path = self.write_evals(root)
+            evals_path = self.write_evals(root, significance_cases=True)
             out_dir = root / "run"
             fake_adapter.always_fail_case_id = "dev-1"
             run_optimizer(
@@ -634,8 +654,12 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
         cases = (
             EvalCase(id="dev-alpha", split="dev", input="alpha", expected="alpha"),
             EvalCase(id="dev-beta", split="dev", input="beta", expected="beta"),
+            EvalCase(id="dev-alpha-2", split="dev", input="alpha", expected="alpha"),
+            EvalCase(id="dev-beta-2", split="dev", input="beta", expected="beta"),
             EvalCase(id="hold-alpha", split="holdout", input="alpha", expected="alpha"),
             EvalCase(id="hold-beta", split="holdout", input="beta", expected="beta"),
+            EvalCase(id="hold-alpha-2", split="holdout", input="alpha", expected="alpha"),
+            EvalCase(id="hold-beta-2", split="holdout", input="beta", expected="beta"),
         )
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -666,6 +690,24 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                     and event.get("iteration") == 2
                     and event.get("parent_rank") == 2
                     for event in decision_log
+                )
+            )
+            frontier_updates = [
+                event for event in decision_log if event.get("type") == "frontier_update"
+            ]
+            self.assertTrue(
+                any(
+                    any(
+                        dict(state).get("exhausted")
+                        for state in dict(event.get("frontier_parent_states") or {}).values()
+                    )
+                    for event in frontier_updates
+                )
+            )
+            self.assertTrue(
+                any(
+                    result.baseline_dev.patch_hash in event.get("parent_pool_patch_hashes", [])
+                    for event in frontier_updates
                 )
             )
 

@@ -65,6 +65,10 @@ def _value_schema_error(value: Any, schema: dict[str, Any]) -> str | None:
                     return f"object value is missing required key {key!r}"
         properties = schema.get("properties")
         if isinstance(properties, dict):
+            if schema.get("additionalProperties") is False:
+                extra_keys = sorted(set(value) - set(properties))
+                if extra_keys:
+                    return f"object value has unsupported key {extra_keys[0]!r}"
             for key, item_schema in properties.items():
                 if key in value and isinstance(item_schema, dict):
                     item_error = _value_schema_error(value[key], item_schema)

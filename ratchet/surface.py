@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ratchet.io import stable_digest
 from ratchet.types import AgentSpec, EditableTarget, OptimizationObjective
 
 
@@ -34,7 +35,27 @@ def _infer_value_schema(
 
 
 class SurfaceGenerator:
+    def __init__(self) -> None:
+        self._cache: dict[str, tuple[EditableTarget, ...]] = {}
+
     def generate(
+        self,
+        spec: AgentSpec | None,
+        objective: OptimizationObjective,
+    ) -> list[EditableTarget]:
+        key = stable_digest(
+            {
+                "agent_spec": spec.to_dict() if spec is not None else None,
+                "objective": objective.to_dict(),
+            }
+        )
+        cached = self._cache.get(key)
+        if cached is None:
+            cached = tuple(self._generate_uncached(spec, objective))
+            self._cache[key] = cached
+        return list(cached)
+
+    def _generate_uncached(
         self,
         spec: AgentSpec | None,
         objective: OptimizationObjective,
@@ -191,7 +212,7 @@ class SurfaceGenerator:
                                 "output": {"type": "object"},
                                 "purpose": {"type": "string", "maxLength": 240},
                             },
-                            "additionalProperties": True,
+                            "additionalProperties": False,
                         },
                     },
                 )

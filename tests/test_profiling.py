@@ -5,6 +5,7 @@ import unittest
 from ratchet.evidence import ProposalExample, ProposalExampleBank
 from ratchet.profiling import quality_cost_tradeoffs, runtime_reliability_diagnostics
 from ratchet.proposals import _materialize_candidate_references
+from ratchet.optimizer import _simplification_variants
 from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.transforms import CandidateProposal
 from ratchet.types import (
@@ -79,7 +80,8 @@ class ProfilingTests(unittest.TestCase):
 
         diagnostics = runtime_reliability_diagnostics(baseline, candidate)
 
-        self.assertTrue(diagnostics["suspicious"])
+        self.assertTrue(diagnostics["runtime_finding"])
+        self.assertNotIn("suspicious", diagnostics)
         self.assertEqual(diagnostics["fixed_invalid_output_case_ids"], ["case-1"])
         self.assertEqual(diagnostics["low_token_fixed_case_ids"], ["case-1"])
 
@@ -206,6 +208,36 @@ class ProfilingTests(unittest.TestCase):
         )
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["patch_hash"], "patch-1")
+
+    def test_simplification_variants_remove_ops_and_reduce_few_shot(self) -> None:
+        patch = AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_few_shot",
+                    target="few_shot",
+                    value=[
+                        {"source_case_id": "a"},
+                        {"source_case_id": "b"},
+                        {"source_case_id": "c"},
+                    ],
+                ),
+                PatchOperation(op="set_runtime_param", target="runtime.output_cap", value=2048),
+            ]
+        )
+
+        variants = _simplification_variants(patch)
+        simplification_types = {variant.metadata["simplification"]["type"] for variant in variants}
+
+        self.assertIn("remove_operation", simplification_types)
+        self.assertIn("reduce_few_shot", simplification_types)
+        self.assertTrue(
+            any(
+                operation.op == "add_few_shot" and len(operation.value) == 1
+                for variant in variants
+                for operation in variant.operations
+                if isinstance(operation.value, list)
+            )
+        )
 
 
 if __name__ == "__main__":

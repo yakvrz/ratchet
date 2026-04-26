@@ -52,6 +52,8 @@ class BehaviorProfile:
     target_slices: list[str]
     weak_slice_count: int
     runtime_error_rate: float
+    length_finish_rate: float
+    parser_fallback_rate: float
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -313,6 +315,8 @@ class SearchHypothesis:
                 "median_latency_s": self.profile.median_latency_s,
                 "weak_slice_count": self.profile.weak_slice_count,
                 "runtime_error_rate": self.profile.runtime_error_rate,
+                "length_finish_rate": self.profile.length_finish_rate,
+                "parser_fallback_rate": self.profile.parser_fallback_rate,
             },
             "budget_allocation": dict(sorted(self.budget_allocation.items())),
             "rationale": self.rationale,
@@ -593,6 +597,13 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "verifier_retry": 1.0,
         "model_substitution": 1.0,
     },
+    "runtime_truncation": {
+        "runtime_tuning": 1.0,
+        "output_contract_tightening": 1.0,
+        "prompt_rewrite": 0.4,
+        "model_substitution": 0.2,
+        "targeted_few_shot": -0.4,
+    },
 }
 
 
@@ -607,6 +618,7 @@ SIGNAL_REASONS = {
     "high_latency_cases": "high-latency cases observed",
     "weak_slices": "weak or failing slices available",
     "runtime_errors": "runtime errors observed",
+    "runtime_truncation": "finish_reason=length or parser fallback observed",
 }
 
 
@@ -631,9 +643,17 @@ def build_behavior_profile(summary: PatchSummary) -> BehaviorProfile:
     high_latency_threshold = _high_metric_threshold(latencies)
     invalid_count = 0
     runtime_error_count = 0
+    length_finish_count = 0
+    parser_fallback_count = 0
     for _, evaluations, _, _, case_passed in case_rows:
         if any(evaluation.record.metrics.error for evaluation in evaluations):
             runtime_error_count += 1
+        representative = next((item for item in evaluations if not item.grade.passed), evaluations[0])
+        metadata = representative.record.diagnostics.metadata
+        if str(metadata.get("finish_reason") or "") == "length":
+            length_finish_count += 1
+        if metadata.get("parser_fallback"):
+            parser_fallback_count += 1
         if case_passed:
             continue
         labels = [label for evaluation in evaluations if not evaluation.grade.passed for label in evaluation.grade.labels]
@@ -664,6 +684,8 @@ def build_behavior_profile(summary: PatchSummary) -> BehaviorProfile:
             if int(metrics.get("count", 0)) > int(metrics.get("pass_count", 0))
         ),
         runtime_error_rate=(runtime_error_count / summary.case_count if summary.case_count else 0.0),
+        length_finish_rate=(length_finish_count / summary.case_count if summary.case_count else 0.0),
+        parser_fallback_rate=(parser_fallback_count / summary.case_count if summary.case_count else 0.0),
     )
 
 
@@ -1037,6 +1059,11 @@ def _evidence_signals(
         signals["weak_slices"] = min(0.1 + profile.weak_slice_count * 0.05, 0.25)
     if profile.runtime_error_rate > 0:
         signals["runtime_errors"] = 0.2
+    if profile.length_finish_rate > 0 or profile.parser_fallback_rate > 0:
+        signals["runtime_truncation"] = min(
+            0.2 + (profile.length_finish_rate + profile.parser_fallback_rate) * 0.3,
+            0.5,
+        )
     return signals
 
 
