@@ -67,9 +67,9 @@ def exact_text_grade(
         expected_values.append(str(case.expected))
     expected_values.extend(str(alias) for alias in aliases)
     normalized_prediction = normalize_text(output_text(output, field=field))
-    for candidate in expected_values:
-        normalized_candidate = normalize_text(candidate)
-        if normalized_candidate == normalized_prediction or normalized_candidate in normalized_prediction:
+    for expected_value in expected_values:
+        normalized_expected_value = normalize_text(expected_value)
+        if normalized_expected_value == normalized_prediction or normalized_expected_value in normalized_prediction:
             return GradeResult(score=1.0, passed=True, labels=[])
     return GradeResult(
         score=0.0,

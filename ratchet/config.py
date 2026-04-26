@@ -1,10 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 import sys
 import tomllib
 from typing import Any
+
+from ratchet.types import OptimizationConstraints, OptimizationObjective
 
 
 @dataclass(frozen=True)
@@ -14,10 +16,11 @@ class RatchetRunConfig:
     out: Path
     env_file: str = ".env"
     dev_budget: int = 20
-    holdout_top_k: int = 5
-    harnesser_model: str = "gpt-5.4"
-    harnesser_reasoning: str = "medium"
-    harnesser_enabled: bool = True
+    holdout_budget: int = 5
+    objective: OptimizationObjective = field(default_factory=OptimizationObjective)
+    optimizer_model: str = "gpt-5.4"
+    optimizer_reasoning: str = "medium"
+    samples_per_case: int = 1
     max_case_retries: int = 2
     case_timeout_s: int = 180
     fail_fast: bool = False
@@ -36,10 +39,11 @@ class RatchetRunConfig:
             "out": str(self.out),
             "env_file": self.env_file,
             "dev_budget": self.dev_budget,
-            "holdout_top_k": self.holdout_top_k,
-            "harnesser_model": self.harnesser_model,
-            "harnesser_reasoning": self.harnesser_reasoning,
-            "harnesser_enabled": self.harnesser_enabled,
+            "holdout_budget": self.holdout_budget,
+            "objective": self.objective.to_dict(),
+            "optimizer_model": self.optimizer_model,
+            "optimizer_reasoning": self.optimizer_reasoning,
+            "samples_per_case": self.samples_per_case,
             "max_case_retries": self.max_case_retries,
             "case_timeout_s": self.case_timeout_s,
             "fail_fast": self.fail_fast,
@@ -60,6 +64,19 @@ def _as_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
     return bool(payload[key])
 
 
+def _objective_from_payload(payload: dict[str, Any]) -> OptimizationObjective:
+    raw_objective = dict(payload.get("objective", {}))
+    if "mode" not in raw_objective and "mode" in payload:
+        raw_objective["mode"] = payload["mode"]
+    constraints = dict(raw_objective.get("constraints", {}))
+    if "allowed_models" in payload:
+        constraints["allowed_models"] = payload["allowed_models"]
+    if "allowed_edits" in payload:
+        constraints["allowed_edits"] = payload["allowed_edits"]
+    raw_objective["constraints"] = constraints
+    return OptimizationObjective.from_dict(raw_objective)
+
+
 def load_run_config(path: str | Path) -> RatchetRunConfig:
     config_path = Path(path).resolve()
     payload = tomllib.loads(config_path.read_text())
@@ -72,10 +89,11 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         out=_resolve_path(str(payload["out"]), root),
         env_file=str(_resolve_path(str(payload.get("env_file", ".env")), root)),
         dev_budget=int(payload.get("dev_budget", 20)),
-        holdout_top_k=int(payload.get("holdout_top_k", 5)),
-        harnesser_model=str(payload.get("harnesser_model", "gpt-5.4")),
-        harnesser_reasoning=str(payload.get("harnesser_reasoning", "medium")),
-        harnesser_enabled=_as_bool(payload, "harnesser_enabled", True),
+        holdout_budget=int(payload.get("holdout_budget", payload.get("holdout_top_k", 5))),
+        objective=_objective_from_payload(payload),
+        optimizer_model=str(payload.get("optimizer_model", "gpt-5.4")),
+        optimizer_reasoning=str(payload.get("optimizer_reasoning", "medium")),
+        samples_per_case=int(payload.get("samples_per_case", 1)),
         max_case_retries=int(payload.get("max_case_retries", 2)),
         case_timeout_s=int(payload.get("case_timeout_s", 180)),
         fail_fast=_as_bool(payload, "fail_fast", False),
@@ -91,10 +109,13 @@ def resolve_run_config(
     out_dir: str | Path | None,
     env_file: str | None,
     dev_budget: int | None,
-    holdout_top_k: int | None,
-    harnesser_model: str | None,
-    harnesser_reasoning: str | None,
-    harnesser_enabled: bool | None,
+    holdout_budget: int | None,
+    objective_mode: str | None,
+    allowed_models: list[str] | None,
+    allowed_edits: list[str] | None,
+    optimizer_model: str | None,
+    optimizer_reasoning: str | None,
+    samples_per_case: int | None,
     max_case_retries: int | None,
     case_timeout_s: int | None,
     fail_fast: bool | None,
@@ -109,16 +130,28 @@ def resolve_run_config(
             evals=Path(evals_path).resolve(),
             out=Path(out_dir).resolve(),
         )
+
+    constraints_payload = base.objective.constraints.to_dict()
+    if allowed_models is not None:
+        constraints_payload["allowed_models"] = allowed_models
+    if allowed_edits is not None:
+        constraints_payload["allowed_edits"] = allowed_edits
+    objective = OptimizationObjective(
+        mode=objective_mode or base.objective.mode,
+        constraints=OptimizationConstraints.from_dict(constraints_payload),
+        tie_breakers=list(base.objective.tie_breakers),
+    )
     return RatchetRunConfig(
         adapter=adapter or base.adapter,
         evals=Path(evals_path).resolve() if evals_path is not None else base.evals,
         out=Path(out_dir).resolve() if out_dir is not None else base.out,
         env_file=env_file or base.env_file,
         dev_budget=dev_budget if dev_budget is not None else base.dev_budget,
-        holdout_top_k=holdout_top_k if holdout_top_k is not None else base.holdout_top_k,
-        harnesser_model=harnesser_model or base.harnesser_model,
-        harnesser_reasoning=harnesser_reasoning or base.harnesser_reasoning,
-        harnesser_enabled=harnesser_enabled if harnesser_enabled is not None else base.harnesser_enabled,
+        holdout_budget=holdout_budget if holdout_budget is not None else base.holdout_budget,
+        objective=objective,
+        optimizer_model=optimizer_model or base.optimizer_model,
+        optimizer_reasoning=optimizer_reasoning or base.optimizer_reasoning,
+        samples_per_case=samples_per_case if samples_per_case is not None else base.samples_per_case,
         max_case_retries=max_case_retries if max_case_retries is not None else base.max_case_retries,
         case_timeout_s=case_timeout_s if case_timeout_s is not None else base.case_timeout_s,
         fail_fast=fail_fast if fail_fast is not None else base.fail_fast,

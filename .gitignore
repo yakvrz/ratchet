@@ -3,6 +3,7 @@
 $tmpdir/
 build/
 dist/
+results/
 *.egg-info/
 *.py[cod]
 .coverage

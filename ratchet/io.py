@@ -5,25 +5,23 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ratchet.types import (
-    CodeArtifactSpec,
-    ComponentSpec,
-    EnumKnobSpec,
-    EvalCase,
-    SearchSpace,
-    TextArtifactSpec,
-)
+from ratchet.types import AgentPatch, AgentSpec, EvalCase
 
 
 def load_eval_cases(path: str | Path) -> tuple[EvalCase, ...]:
     eval_path = Path(path)
     cases: list[EvalCase] = []
+    seen_ids: set[str] = set()
     for raw_line in eval_path.read_text().splitlines():
         line = raw_line.strip()
         if not line:
             continue
         payload = json.loads(line)
-        cases.append(EvalCase.from_dict(payload))
+        case = EvalCase.from_dict(payload)
+        if case.id in seen_ids:
+            raise ValueError(f"Eval file contains duplicate case id: {case.id}")
+        seen_ids.add(case.id)
+        cases.append(case)
     return tuple(cases)
 
 
@@ -33,87 +31,36 @@ def write_json(path: str | Path, payload: Any) -> None:
 
 def append_jsonl(path: str | Path, payload: dict[str, Any]) -> None:
     with Path(path).open("a") as handle:
-        handle.write(json.dumps(payload, sort_keys=True))
+        handle.write(json.dumps(payload, sort_keys=True, default=str))
         handle.write("\n")
 
 
 def write_jsonl(path: str | Path, payloads: list[dict[str, Any]]) -> None:
     Path(path).write_text(
-        "\n".join(json.dumps(payload, sort_keys=True) for payload in payloads)
+        "\n".join(json.dumps(payload, sort_keys=True, default=str) for payload in payloads)
         + ("\n" if payloads else "")
     )
 
 
-def depends_on_satisfied(
-    candidate: dict[str, str],
-    spec: EnumKnobSpec | TextArtifactSpec | ComponentSpec | CodeArtifactSpec,
-) -> bool:
-    for dependency_name, allowed_values in spec.depends_on.items():
-        if candidate.get(dependency_name) not in allowed_values:
-            return False
-    return True
+def stable_digest(payload: Any) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    return sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def normalize_candidate(candidate: dict[str, str], search_space: SearchSpace) -> dict[str, str]:
-    normalized = {
-        spec.name: spec.default
-        for spec in [
-            *search_space.enum_knobs,
-            *search_space.text_artifacts,
-            *search_space.components,
-            *search_space.code_artifacts,
-        ]
-    }
-    normalized.update({str(key): str(value) for key, value in candidate.items()})
-
-    spec_by_name = {spec.name: spec for spec in search_space.all_specs()}
-    unknown = sorted(set(normalized) - set(spec_by_name))
-    if unknown:
-        raise ValueError(f"Unknown candidate keys: {', '.join(unknown)}")
-
-    for spec in search_space.enum_knobs:
-        value = normalized[spec.name]
-        if value not in spec.values:
-            raise ValueError(f"Candidate value {value!r} is invalid for enum knob {spec.name}")
-
-    for spec in search_space.components:
-        value = normalized[spec.name]
-        if value not in spec.values:
-            raise ValueError(f"Candidate value {value!r} is invalid for component {spec.name}")
-
-    for spec in search_space.text_artifacts:
-        value = normalized[spec.name]
-        if len(value) > spec.max_chars:
-            raise ValueError(
-                f"Candidate value for text artifact {spec.name} exceeds max_chars {spec.max_chars}"
-            )
-
-    for spec in search_space.code_artifacts:
-        value = normalized[spec.name]
-        if len(value) > spec.max_chars:
-            raise ValueError(
-                f"Candidate value for code artifact {spec.name} exceeds max_chars {spec.max_chars}"
-            )
-        if len(value.splitlines()) > spec.max_lines:
-            raise ValueError(
-                f"Candidate value for code artifact {spec.name} exceeds max_lines {spec.max_lines}"
-            )
-
-    changed = True
-    while changed:
-        changed = False
-        for spec in search_space.all_specs():
-            if depends_on_satisfied(normalized, spec):
-                continue
-            if normalized[spec.name] != spec.default:
-                normalized[spec.name] = spec.default
-                changed = True
-    return normalized
+def short_digest(payload: Any) -> str:
+    return stable_digest(payload)[:12]
 
 
-def candidate_hash(candidate: dict[str, str]) -> str:
-    payload = json.dumps(candidate, sort_keys=True, separators=(",", ":"))
-    return sha256(payload.encode("utf-8")).hexdigest()[:12]
+def patch_hash(patch: AgentPatch | None) -> str:
+    return short_digest((patch or AgentPatch.empty()).to_dict())
+
+
+def agent_spec_hash(spec: AgentSpec | None) -> str:
+    return short_digest(spec.to_dict() if spec is not None else {"agent_spec": None})
+
+
+def case_digest(case: EvalCase) -> str:
+    return stable_digest(case.to_dict())
 
 
 def file_sha256(path: str | Path) -> str:

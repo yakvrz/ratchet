@@ -1,0 +1,12 @@
+[ratchet]
+adapter = "ratchet_adapter:adapter"
+evals = "evals.jsonl"
+out = "../../results/kashi-agent/full"
+env_file = "../../.env"
+dev_budget = 20
+holdout_budget = 5
+optimizer_model = "gpt-5.4"
+optimizer_reasoning = "medium"
+max_case_retries = 1
+case_timeout_s = 180
+fail_fast = false

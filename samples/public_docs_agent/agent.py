@@ -7,20 +7,24 @@ import time
 from typing import Any
 
 from ratchet.grading import extract_json_payload
-from ratchet.harness import estimate_cost_usd
-from ratchet.openai_client import OpenAIResponsesClient
+from ratchet.model_client import ResponsesModelClient
+from ratchet.pricing import estimate_cost_usd
 from ratchet.types import DiagnosticTrace, EvalCase, OperationalMetrics, RunRecord
-from docs_corpus import PUBLIC_DOCS, tokenize
+try:
+    from docs_corpus import PUBLIC_DOCS, tokenize
+except ModuleNotFoundError:
+    from .docs_corpus import PUBLIC_DOCS, tokenize
 
 
 @dataclass(frozen=True)
-class DocsHarnessConfig:
+class DocsAgentConfig:
     model: str
     reasoning_effort: str
     prompt_output_rule: str
     prompt_grounding_rule: str
     prompt_tool_rule: str
     prompt_fallback_rule: str
+    prompt_few_shot: str
     docs_search_enabled: str
     docs_search_description: str
     knowledge_mode: str
@@ -29,20 +33,21 @@ class DocsHarnessConfig:
     max_tool_rounds: int
 
     @classmethod
-    def from_candidate(cls, candidate: dict[str, str]) -> "DocsHarnessConfig":
+    def from_agent_config(cls, agent_config: dict[str, str]) -> "DocsAgentConfig":
         return cls(
-            model=candidate["model"],
-            reasoning_effort=candidate["reasoning_effort"],
-            prompt_output_rule=candidate["prompt_output_rule"],
-            prompt_grounding_rule=candidate["prompt_grounding_rule"],
-            prompt_tool_rule=candidate["prompt_tool_rule"],
-            prompt_fallback_rule=candidate["prompt_fallback_rule"],
-            docs_search_enabled=candidate["docs_search_enabled"],
-            docs_search_description=candidate["docs_search_description"],
-            knowledge_mode=candidate["knowledge_mode"],
-            retrieval_top_k=int(candidate["retrieval_top_k"]),
-            output_cap=int(candidate["output_cap"]),
-            max_tool_rounds=int(candidate.get("max_tool_rounds", "4")),
+            model=agent_config["model"],
+            reasoning_effort=agent_config["reasoning_effort"],
+            prompt_output_rule=agent_config["prompt_output_rule"],
+            prompt_grounding_rule=agent_config["prompt_grounding_rule"],
+            prompt_tool_rule=agent_config["prompt_tool_rule"],
+            prompt_fallback_rule=agent_config["prompt_fallback_rule"],
+            prompt_few_shot=agent_config.get("prompt_few_shot", ""),
+            docs_search_enabled=agent_config["docs_search_enabled"],
+            docs_search_description=agent_config["docs_search_description"],
+            knowledge_mode=agent_config["knowledge_mode"],
+            retrieval_top_k=int(agent_config["retrieval_top_k"]),
+            output_cap=int(agent_config["output_cap"]),
+            max_tool_rounds=int(agent_config.get("max_tool_rounds", "4")),
         )
 
     @property
@@ -55,6 +60,7 @@ class DocsHarnessConfig:
             self.prompt_output_rule,
             self.prompt_grounding_rule,
             self.prompt_fallback_rule,
+            self.prompt_few_shot,
         ]
         if self.use_docs_search:
             lines.append(self.prompt_tool_rule)
@@ -102,11 +108,11 @@ def search_docs(query: str, mode: str, top_k: int) -> str:
 
 
 class PublicDocsAgentRunner:
-    def __init__(self, env_path: str | None = None, client: OpenAIResponsesClient | None = None) -> None:
+    def __init__(self, env_path: str | None = None, client: ResponsesModelClient | None = None) -> None:
         resolved_env = env_path or os.environ.get("RATCHET_ENV_FILE", ".env")
-        self.client = client or OpenAIResponsesClient(env_path=resolved_env)
+        self.client = client or ResponsesModelClient(env_path=resolved_env)
 
-    def _build_tools(self, config: DocsHarnessConfig) -> list[dict[str, Any]]:
+    def _build_tools(self, config: DocsAgentConfig) -> list[dict[str, Any]]:
         if not config.use_docs_search:
             return []
         return [
@@ -123,8 +129,8 @@ class PublicDocsAgentRunner:
             }
         ]
 
-    def run_case(self, candidate: dict[str, str], case: EvalCase) -> RunRecord:
-        config = DocsHarnessConfig.from_candidate(candidate)
+    def run_case(self, agent_config: dict[str, str], case: EvalCase) -> RunRecord:
+        config = DocsAgentConfig.from_agent_config(agent_config)
         tools = self._build_tools(config)
         tool_calls: list[str] = []
         response_ids: list[str] = []
@@ -143,7 +149,8 @@ class PublicDocsAgentRunner:
             tools=tools,
         )
 
-        for _ in range(config.max_tool_rounds + 1):
+        tool_rounds = 0
+        while True:
             response_ids.append(response.id)
             output_item_types.append([item.type for item in response.output])
             total_input_tokens += response.usage.input_tokens
@@ -151,6 +158,9 @@ class PublicDocsAgentRunner:
             function_calls = [item for item in response.output if item.type == "function_call"]
             if not function_calls:
                 break
+            if tool_rounds >= config.max_tool_rounds:
+                raise RuntimeError("docs_search tool round budget exhausted before a final answer.")
+            tool_rounds += 1
             tool_outputs: list[dict[str, str]] = []
             for function_call in function_calls:
                 arguments = json.loads(function_call.arguments)

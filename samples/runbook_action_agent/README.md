@@ -12,13 +12,11 @@ Run it:
 
 ```bash
 python3 -m ratchet check --config samples/runbook_action_agent/ratchet.toml
-python3 -m ratchet run --config samples/runbook_action_agent/ratchet.toml
+python3 -m ratchet optimize --config samples/runbook_action_agent/ratchet.toml
 ```
 
-Like the flagship sample, this adapter exposes bounded source-level hook artifacts in addition to prompts, tools, components, and enum settings.
+Like the flagship sample, this adapter exposes minimal integration plus a descriptive `AgentSpec`; Ratchet generates the editable surface and patches.
 
-For local/reference runs without API budget, set `RATCHET_OFFLINE_MODE=1` before `check` or `run`.
-
-For the alpha proof summary and expected promoted outcome, see `ALPHA_WHITEPAPER.md`.
+For local/reference runs without API budget, set `RATCHET_OFFLINE_MODE=1` before `check` or `optimize`.
 
 To regenerate local artifacts, run the benchmark above after setting `OPENAI_API_KEY` in `.env`.

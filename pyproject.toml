@@ -1,7 +1,7 @@
 [project]
 name = "ratchet"
 version = "0.1.0a1"
-description = "Alpha release of Ratchet, an evaluation-backed optimizer for Python agent harnesses."
+description = "Evaluation-backed optimizer for Python agents."
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

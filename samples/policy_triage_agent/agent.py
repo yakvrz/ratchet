@@ -8,11 +8,14 @@ import time
 from typing import Any
 
 from ratchet.grading import extract_json_payload
-from ratchet.harness import estimate_cost_usd
-from ratchet.openai_client import OpenAIResponsesClient
+from ratchet.model_client import ResponsesModelClient
+from ratchet.pricing import estimate_cost_usd
 from ratchet.types import DiagnosticTrace, EvalCase, OperationalMetrics, RunRecord
 
-from docs_corpus import POLICY_DOCS, tokenize
+try:
+    from docs_corpus import POLICY_DOCS, tokenize
+except ModuleNotFoundError:
+    from .docs_corpus import POLICY_DOCS, tokenize
 
 
 @dataclass(frozen=True)
@@ -23,6 +26,7 @@ class PolicyTriageConfig:
     prompt_grounding_rule: str
     prompt_tool_rule: str
     prompt_fallback_rule: str
+    prompt_few_shot: str
     decision_validator_enabled: str
     decision_validator_rule: str
     policy_search_enabled: str
@@ -33,22 +37,23 @@ class PolicyTriageConfig:
     max_tool_rounds: int
 
     @classmethod
-    def from_candidate(cls, candidate: dict[str, str]) -> "PolicyTriageConfig":
+    def from_agent_config(cls, agent_config: dict[str, str]) -> "PolicyTriageConfig":
         return cls(
-            model=candidate["model"],
-            reasoning_effort=candidate["reasoning_effort"],
-            prompt_output_rule=candidate["prompt_output_rule"],
-            prompt_grounding_rule=candidate["prompt_grounding_rule"],
-            prompt_tool_rule=candidate["prompt_tool_rule"],
-            prompt_fallback_rule=candidate["prompt_fallback_rule"],
-            decision_validator_enabled=candidate["decision_validator_enabled"],
-            decision_validator_rule=candidate["decision_validator_rule"],
-            policy_search_enabled=candidate["policy_search_enabled"],
-            policy_search_description=candidate["policy_search_description"],
-            knowledge_mode=candidate["knowledge_mode"],
-            retrieval_top_k=int(candidate["retrieval_top_k"]),
-            output_cap=int(candidate["output_cap"]),
-            max_tool_rounds=int(candidate.get("max_tool_rounds", "1")),
+            model=agent_config["model"],
+            reasoning_effort=agent_config["reasoning_effort"],
+            prompt_output_rule=agent_config["prompt_output_rule"],
+            prompt_grounding_rule=agent_config["prompt_grounding_rule"],
+            prompt_tool_rule=agent_config["prompt_tool_rule"],
+            prompt_fallback_rule=agent_config["prompt_fallback_rule"],
+            prompt_few_shot=agent_config.get("prompt_few_shot", ""),
+            decision_validator_enabled=agent_config["decision_validator_enabled"],
+            decision_validator_rule=agent_config["decision_validator_rule"],
+            policy_search_enabled=agent_config["policy_search_enabled"],
+            policy_search_description=agent_config["policy_search_description"],
+            knowledge_mode=agent_config["knowledge_mode"],
+            retrieval_top_k=int(agent_config["retrieval_top_k"]),
+            output_cap=int(agent_config["output_cap"]),
+            max_tool_rounds=int(agent_config.get("max_tool_rounds", "1")),
         )
 
     @property
@@ -65,11 +70,12 @@ class PolicyTriageConfig:
             self.prompt_output_rule,
             self.prompt_grounding_rule,
             self.prompt_fallback_rule,
+            self.prompt_few_shot,
         ]
         if self.use_policy_search:
             lines.append(self.prompt_tool_rule)
         if self.use_validator:
-            lines.append("The harness may apply a post-answer validation rule before returning the final decision.")
+            lines.append("The agent may apply a post-answer validation rule before returning the final decision.")
         return " ".join(line for line in lines if line)
 
     def text_config(self) -> dict[str, Any]:
@@ -113,9 +119,9 @@ def search_policy(query: str, mode: str, top_k: int) -> str:
 
 
 class PolicyTriageRunner:
-    def __init__(self, env_path: str | None = None, client: OpenAIResponsesClient | None = None) -> None:
+    def __init__(self, env_path: str | None = None, client: ResponsesModelClient | None = None) -> None:
         resolved_env = env_path or os.environ.get("RATCHET_ENV_FILE", ".env")
-        self.client = client or OpenAIResponsesClient(env_path=resolved_env)
+        self.client = client or ResponsesModelClient(env_path=resolved_env)
 
     def _build_tools(self, config: PolicyTriageConfig) -> list[dict[str, Any]]:
         if not config.use_policy_search:
@@ -136,17 +142,19 @@ class PolicyTriageRunner:
 
     def run_case(
         self,
-        candidate: dict[str, str],
+        agent_config: dict[str, str],
         case: EvalCase,
         hooks: dict[str, Any] | None = None,
     ) -> RunRecord:
         if os.environ.get("RATCHET_OFFLINE_MODE") == "1":
-            return self._run_case_offline(candidate, case, hooks=hooks)
-        config = PolicyTriageConfig.from_candidate(candidate)
+            return self._run_case_offline(agent_config, case, hooks=hooks)
+        config = PolicyTriageConfig.from_agent_config(agent_config)
         hooks = hooks or {}
         tools = self._build_tools(config)
         tool_calls: list[str] = []
         retrieved_cards: list[dict[str, str]] = []
+        response_ids: list[str] = []
+        output_item_types: list[list[str]] = []
         total_input_tokens = 0
         total_output_tokens = 0
         started_at = time.perf_counter()
@@ -161,12 +169,18 @@ class PolicyTriageRunner:
             tools=tools,
         )
 
-        for _ in range(config.max_tool_rounds + 1):
+        tool_rounds = 0
+        while True:
+            response_ids.append(response.id)
+            output_item_types.append([item.type for item in response.output])
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
             function_calls = [item for item in response.output if item.type == "function_call"]
             if not function_calls:
                 break
+            if tool_rounds >= config.max_tool_rounds:
+                raise RuntimeError("policy_search tool round budget exhausted before a final answer.")
+            tool_rounds += 1
             tool_outputs: list[dict[str, str]] = []
             for function_call in function_calls:
                 arguments = json.loads(function_call.arguments)
@@ -180,7 +194,7 @@ class PolicyTriageRunner:
                             query,
                             {
                                 "case_input": case.input,
-                                "candidate": candidate,
+                                "agent_config": agent_config,
                                 "tool_name": function_call.name,
                             },
                         )
@@ -203,7 +217,7 @@ class PolicyTriageRunner:
                                 list(retrieved_cards),
                                 {
                                     "case_input": case.input,
-                                    "candidate": candidate,
+                                    "agent_config": agent_config,
                                     "query": query,
                                 },
                             )
@@ -245,7 +259,7 @@ class PolicyTriageRunner:
                 output,
                 {
                     "case_input": case.input,
-                    "candidate": candidate,
+                    "agent_config": agent_config,
                     "retrieved_cards": list(retrieved_cards),
                     "validator_rule": config.decision_validator_rule,
                 },
@@ -268,6 +282,8 @@ class PolicyTriageRunner:
                 raw_output_text=raw_output_text,
                 metadata={
                     "model": config.model,
+                    "response_ids": response_ids,
+                    "output_item_types": output_item_types,
                     "retrieved_doc_ids": [card.get("doc_id", "") for card in retrieved_cards],
                 },
             ),
@@ -275,11 +291,11 @@ class PolicyTriageRunner:
 
     def _run_case_offline(
         self,
-        candidate: dict[str, str],
+        agent_config: dict[str, str],
         case: EvalCase,
         hooks: dict[str, Any] | None = None,
     ) -> RunRecord:
-        config = PolicyTriageConfig.from_candidate(candidate)
+        config = PolicyTriageConfig.from_agent_config(agent_config)
         hooks = hooks or {}
         started_at = time.perf_counter()
         tool_calls: list[str] = []
@@ -291,7 +307,7 @@ class PolicyTriageRunner:
                 query = str(
                     hooks["pre_tool_query_hook"](
                         query,
-                        {"case_input": case.input, "candidate": candidate, "tool_name": "policy_search"},
+                        {"case_input": case.input, "agent_config": agent_config, "tool_name": "policy_search"},
                     )
                 )
             search_output = search_policy(query=query, mode=config.knowledge_mode, top_k=config.retrieval_top_k)
@@ -299,7 +315,7 @@ class PolicyTriageRunner:
             if "post_tool_context_hook" in hooks:
                 hook_result = hooks["post_tool_context_hook"](
                     list(retrieved_cards),
-                    {"case_input": case.input, "candidate": candidate, "query": query},
+                    {"case_input": case.input, "agent_config": agent_config, "query": query},
                 )
                 if isinstance(hook_result, list):
                     retrieved_cards = [
@@ -318,7 +334,7 @@ class PolicyTriageRunner:
                 output,
                 {
                     "case_input": case.input,
-                    "candidate": candidate,
+                    "agent_config": agent_config,
                     "retrieved_cards": list(retrieved_cards),
                     "validator_rule": config.decision_validator_rule,
                 },

@@ -12,13 +12,11 @@ Run it:
 
 ```bash
 python3 -m ratchet check --config samples/policy_triage_agent/ratchet.toml
-python3 -m ratchet run --config samples/policy_triage_agent/ratchet.toml
+python3 -m ratchet optimize --config samples/policy_triage_agent/ratchet.toml
 ```
 
-Like the flagship sample, this adapter exposes bounded hook artifacts, but the expected outcome here is usually that Ratchet keeps the baseline unless it finds a clearly safe improvement.
+Like the flagship sample, this adapter exposes only minimal integration plus a descriptive `AgentSpec`. The expected outcome here is usually that Ratchet keeps the baseline unless it finds a clearly safe improvement.
 
-For local/reference runs without API budget, set `RATCHET_OFFLINE_MODE=1` before `check` or `run`.
-
-For the alpha proof summary and expected baseline-kept outcome, see `ALPHA_WHITEPAPER.md`.
+For local/reference runs without API budget, set `RATCHET_OFFLINE_MODE=1` before `check` or `optimize`.
 
 To regenerate local artifacts, run the benchmark above after setting `OPENAI_API_KEY` in `.env`.

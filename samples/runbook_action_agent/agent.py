@@ -6,26 +6,29 @@ import time
 from typing import Any
 
 from ratchet.grading import extract_json_payload
-from ratchet.harness import estimate_cost_usd
-from ratchet.openai_client import OpenAIResponsesClient
+from ratchet.model_client import ResponsesModelClient
+from ratchet.pricing import estimate_cost_usd
 from ratchet.types import DiagnosticTrace, EvalCase, OperationalMetrics, RunRecord
 
-from docs_corpus import RUNBOOK_DOCS, tokenize
+try:
+    from docs_corpus import RUNBOOK_DOCS, tokenize
+except ModuleNotFoundError:
+    from .docs_corpus import RUNBOOK_DOCS, tokenize
 
 
 class RunbookActionRunner:
-    def __init__(self, env_path: str | None = None, client: OpenAIResponsesClient | None = None) -> None:
+    def __init__(self, env_path: str | None = None, client: ResponsesModelClient | None = None) -> None:
         resolved_env = env_path or os.environ.get("RATCHET_ENV_FILE", ".env")
-        self.client = client or OpenAIResponsesClient(env_path=resolved_env)
+        self.client = client or ResponsesModelClient(env_path=resolved_env)
 
-    def _build_tools(self, candidate: dict[str, str]) -> list[dict[str, Any]]:
-        if candidate["runbook_search_enabled"] != "on":
+    def _build_tools(self, agent_config: dict[str, str]) -> list[dict[str, Any]]:
+        if agent_config["runbook_search_enabled"] != "on":
             return []
         return [
             {
                 "type": "function",
                 "name": "runbook_search",
-                "description": candidate["runbook_search_description"],
+                "description": agent_config["runbook_search_description"],
                 "parameters": {
                     "type": "object",
                     "properties": {"query": {"type": "string"}},
@@ -35,18 +38,19 @@ class RunbookActionRunner:
             }
         ]
 
-    def _system_prompt(self, candidate: dict[str, str]) -> str:
+    def _system_prompt(self, agent_config: dict[str, str]) -> str:
         lines = [
             "You choose the next runbook action from a frozen incident-response snapshot.",
-            candidate["prompt_output_rule"],
-            candidate["prompt_grounding_rule"],
-            candidate["prompt_fallback_rule"],
+            agent_config["prompt_output_rule"],
+            agent_config["prompt_grounding_rule"],
+            agent_config["prompt_fallback_rule"],
+            agent_config.get("prompt_few_shot", ""),
         ]
-        if candidate["runbook_search_enabled"] == "on":
-            lines.append(candidate["prompt_tool_rule"])
-        if candidate["answer_validator_enabled"] == "on":
-            lines.append("If an answer is not directly supported by retrieved runbook evidence, the harness may replace it with unknown.")
-        if candidate["knowledge_mode"] == "distilled":
+        if agent_config["runbook_search_enabled"] == "on":
+            lines.append(agent_config["prompt_tool_rule"])
+        if agent_config["answer_validator_enabled"] == "on":
+            lines.append("If an answer is not directly supported by retrieved runbook evidence, the agent may replace it with unknown.")
+        if agent_config["knowledge_mode"] == "distilled":
             lines.append("The search tool returns short distilled runbook cards.")
         else:
             lines.append("The search tool returns fuller runbook snippets.")
@@ -70,36 +74,45 @@ class RunbookActionRunner:
 
     def run_case(
         self,
-        candidate: dict[str, str],
+        agent_config: dict[str, str],
         case: EvalCase,
         hooks: dict[str, Any] | None = None,
     ) -> RunRecord:
         if os.environ.get("RATCHET_OFFLINE_MODE") == "1":
-            return self._run_case_offline(candidate, case, hooks=hooks)
+            return self._run_case_offline(agent_config, case, hooks=hooks)
         hooks = hooks or {}
-        tools = self._build_tools(candidate)
+        tools = self._build_tools(agent_config)
         tool_calls: list[str] = []
         retrieved_cards: list[dict[str, str]] = []
+        response_ids: list[str] = []
+        output_item_types: list[list[str]] = []
         total_input_tokens = 0
         total_output_tokens = 0
         started_at = time.perf_counter()
 
         response = self.client.create_response(
-            model=candidate["model"],
-            reasoning={"effort": candidate["reasoning_effort"]},
-            instructions=self._system_prompt(candidate),
+            model=agent_config["model"],
+            reasoning={"effort": agent_config["reasoning_effort"]},
+            instructions=self._system_prompt(agent_config),
             input=case.input,
-            max_output_tokens=int(candidate["output_cap"]),
+            max_output_tokens=int(agent_config["output_cap"]),
             text=self._text_config(),
             tools=tools,
         )
 
-        for _ in range(int(candidate.get("max_tool_rounds", "4")) + 1):
+        max_tool_rounds = int(agent_config.get("max_tool_rounds", "4"))
+        tool_rounds = 0
+        while True:
+            response_ids.append(response.id)
+            output_item_types.append([item.type for item in response.output])
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
             function_calls = [item for item in response.output if item.type == "function_call"]
             if not function_calls:
                 break
+            if tool_rounds >= max_tool_rounds:
+                raise RuntimeError("runbook_search tool round budget exhausted before a final answer.")
+            tool_rounds += 1
             tool_outputs: list[dict[str, str]] = []
             for function_call in function_calls:
                 arguments = json.loads(function_call.arguments)
@@ -111,13 +124,13 @@ class RunbookActionRunner:
                     query = str(
                         hooks["pre_tool_query_hook"](
                             query,
-                            {"case_input": case.input, "candidate": candidate, "tool_name": function_call.name},
+                            {"case_input": case.input, "agent_config": agent_config, "tool_name": function_call.name},
                         )
                     )
                 search_output = search_runbooks(
                     query=query,
-                    mode=candidate["knowledge_mode"],
-                    top_k=int(candidate["retrieval_top_k"]),
+                    mode=agent_config["knowledge_mode"],
+                    top_k=int(agent_config["retrieval_top_k"]),
                 )
                 try:
                     cards = json.loads(search_output)
@@ -134,7 +147,7 @@ class RunbookActionRunner:
                         if "post_tool_context_hook" in hooks:
                             hook_result = hooks["post_tool_context_hook"](
                                 list(retrieved_cards),
-                                {"case_input": case.input, "candidate": candidate, "query": query},
+                                {"case_input": case.input, "agent_config": agent_config, "query": query},
                             )
                             if isinstance(hook_result, list):
                                 retrieved_cards = [
@@ -157,11 +170,11 @@ class RunbookActionRunner:
                     }
                 )
             response = self.client.create_response(
-                model=candidate["model"],
-                reasoning={"effort": candidate["reasoning_effort"]},
+                model=agent_config["model"],
+                reasoning={"effort": agent_config["reasoning_effort"]},
                 previous_response_id=response.id,
                 input=tool_outputs,
-                max_output_tokens=int(candidate["output_cap"]),
+                max_output_tokens=int(agent_config["output_cap"]),
                 text=self._text_config(),
                 tools=tools,
             )
@@ -169,15 +182,15 @@ class RunbookActionRunner:
         raw_output_text = response.output_text.strip()
         payload = extract_json_payload(raw_output_text)
         output: Any = payload if payload is not None else {"answer": "unknown", "invalid_output": raw_output_text}
-        if candidate["answer_validator_enabled"] == "on" and "post_answer_validator_hook" in hooks:
+        if agent_config["answer_validator_enabled"] == "on" and "post_answer_validator_hook" in hooks:
             hook_output = hooks["post_answer_validator_hook"](
                 output,
                 {
                     "case_input": case.input,
-                    "candidate": candidate,
+                    "agent_config": agent_config,
                     "retrieved_cards": list(retrieved_cards),
                     "option_literals": list(case.metadata.get("options", [])),
-                    "validator_rule": candidate["answer_validator_rule"],
+                    "validator_rule": agent_config["answer_validator_rule"],
                 },
             )
             if hook_output is not None:
@@ -191,13 +204,15 @@ class RunbookActionRunner:
                 input_tokens=total_input_tokens,
                 output_tokens=total_output_tokens,
                 total_tokens=total_input_tokens + total_output_tokens,
-                cost_usd=estimate_cost_usd(candidate["model"], total_input_tokens, total_output_tokens),
+                cost_usd=estimate_cost_usd(agent_config["model"], total_input_tokens, total_output_tokens),
             ),
             diagnostics=DiagnosticTrace(
                 tool_calls=tool_calls,
                 raw_output_text=raw_output_text,
                 metadata={
-                    "model": candidate["model"],
+                    "model": agent_config["model"],
+                    "response_ids": response_ids,
+                    "output_item_types": output_item_types,
                     "retrieved_doc_ids": [card.get("doc_id", "") for card in retrieved_cards],
                 },
             ),
@@ -205,7 +220,7 @@ class RunbookActionRunner:
 
     def _run_case_offline(
         self,
-        candidate: dict[str, str],
+        agent_config: dict[str, str],
         case: EvalCase,
         hooks: dict[str, Any] | None = None,
     ) -> RunRecord:
@@ -213,26 +228,26 @@ class RunbookActionRunner:
         started_at = time.perf_counter()
         tool_calls: list[str] = []
         retrieved_cards: list[dict[str, str]] = []
-        if candidate["runbook_search_enabled"] == "on":
+        if agent_config["runbook_search_enabled"] == "on":
             tool_calls.append("runbook_search")
             query = case.input
             if "pre_tool_query_hook" in hooks:
                 query = str(
                     hooks["pre_tool_query_hook"](
                         query,
-                        {"case_input": case.input, "candidate": candidate, "tool_name": "runbook_search"},
+                        {"case_input": case.input, "agent_config": agent_config, "tool_name": "runbook_search"},
                     )
                 )
             search_output = search_runbooks(
                 query=query,
-                mode=candidate["knowledge_mode"],
-                top_k=int(candidate["retrieval_top_k"]),
+                mode=agent_config["knowledge_mode"],
+                top_k=int(agent_config["retrieval_top_k"]),
             )
             retrieved_cards = json.loads(search_output)
             if "post_tool_context_hook" in hooks:
                 hook_result = hooks["post_tool_context_hook"](
                     list(retrieved_cards),
-                    {"case_input": case.input, "candidate": candidate, "query": query},
+                    {"case_input": case.input, "agent_config": agent_config, "query": query},
                 )
                 if isinstance(hook_result, list):
                     retrieved_cards = [
@@ -245,22 +260,22 @@ class RunbookActionRunner:
                         if isinstance(card, dict)
                     ]
 
-        output = self._offline_answer(case, candidate, retrieved_cards)
-        if candidate["answer_validator_enabled"] == "on" and "post_answer_validator_hook" in hooks:
+        output = self._offline_answer(case, agent_config, retrieved_cards)
+        if agent_config["answer_validator_enabled"] == "on" and "post_answer_validator_hook" in hooks:
             hook_output = hooks["post_answer_validator_hook"](
                 output,
                 {
                     "case_input": case.input,
-                    "candidate": candidate,
+                    "agent_config": agent_config,
                     "retrieved_cards": list(retrieved_cards),
                     "option_literals": list(case.metadata.get("options", [])),
-                    "validator_rule": candidate["answer_validator_rule"],
+                    "validator_rule": agent_config["answer_validator_rule"],
                 },
             )
             if hook_output is not None:
                 output = hook_output
 
-        total_tokens = self._offline_total_tokens(candidate, retrieved_cards)
+        total_tokens = self._offline_total_tokens(agent_config, retrieved_cards)
         latency_s = time.perf_counter() - started_at
         return RunRecord(
             output=output,
@@ -269,32 +284,32 @@ class RunbookActionRunner:
                 input_tokens=total_tokens // 2,
                 output_tokens=total_tokens - (total_tokens // 2),
                 total_tokens=total_tokens,
-                cost_usd=estimate_cost_usd(candidate["model"], total_tokens // 2, total_tokens - (total_tokens // 2)),
+                cost_usd=estimate_cost_usd(agent_config["model"], total_tokens // 2, total_tokens - (total_tokens // 2)),
             ),
             diagnostics=DiagnosticTrace(
                 tool_calls=tool_calls,
                 raw_output_text=json.dumps(output, sort_keys=True),
                 metadata={
                     "mode": "offline",
-                    "model": candidate["model"],
+                    "model": agent_config["model"],
                     "retrieved_doc_ids": [card.get("doc_id", "") for card in retrieved_cards],
                 },
             ),
         )
 
     @staticmethod
-    def _offline_total_tokens(candidate: dict[str, str], retrieved_cards: list[dict[str, str]]) -> int:
+    def _offline_total_tokens(agent_config: dict[str, str], retrieved_cards: list[dict[str, str]]) -> int:
         base = 240
-        model_delta = 90 if candidate["model"] == "gpt-5.4" else 20
-        reasoning_delta = 45 if candidate["reasoning_effort"] == "low" else 0
+        model_delta = 90 if agent_config["model"] == "gpt-5.4" else 20
+        reasoning_delta = 45 if agent_config["reasoning_effort"] == "low" else 0
         retrieval_delta = 28 * len(retrieved_cards)
-        output_delta = max(int(candidate["output_cap"]) // 2, 20)
+        output_delta = max(int(agent_config["output_cap"]) // 2, 20)
         return base + model_delta + reasoning_delta + retrieval_delta + output_delta
 
     @staticmethod
     def _offline_answer(
         case: EvalCase,
-        candidate: dict[str, str],
+        agent_config: dict[str, str],
         retrieved_cards: list[dict[str, str]],
     ) -> dict[str, str]:
         options = [str(option) for option in case.metadata.get("options", [])]
@@ -305,7 +320,7 @@ class RunbookActionRunner:
         grounded = [option for option in options if option.lower() != "unknown" and option.lower() in haystack]
         if grounded:
             return {"answer": grounded[0]}
-        if "best action" in candidate["prompt_fallback_rule"].lower():
+        if "best action" in agent_config["prompt_fallback_rule"].lower():
             for option in options:
                 if option.lower() != "unknown":
                     return {"answer": option}

@@ -1,25 +1,19 @@
-# Ratchet Alpha
+# Ratchet
 
-Ratchet is a Python-first optimizer for agent harnesses.
+Ratchet is a Python-first optimizer for agents.
 
-Bring your Python agent and evals, declare the knobs Ratchet is allowed to change, and Ratchet will either:
+Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, diagnoses failures, generates proposed `AgentPatch` changes, validates them against dev and holdout splits, and either promotes a patch or keeps the original baseline.
 
-- promote a holdout-validated candidate that is quality-non-inferior and more efficient, or
-- keep your baseline unchanged.
+The adapter is intentionally minimal. It runs the agent, grades outputs, optionally exposes a descriptive `AgentSpec`, and exports the selected patch. Ratchet owns search-surface generation, patch proposal, objective handling, and promotion.
 
-Ratchet does not rewrite arbitrary source code. It diagnoses failures, proposes bounded harness changes, and validates those changes against the current eval set. The editable surface comes from the adapter: prompt artifacts, tool descriptions, tool availability, retrieval settings, model choice, output caps, bounded source-level hook logic, and similar harness controls.
-
-Ratchet uses a separate optimizing model for diagnosis and proposal generation. By default, the optimized harness may search over smaller or cheaper agent models, while the optimizing side runs on `gpt-5.4` with `medium` reasoning effort unless you override `harnesser_model` / `harnesser_reasoning`.
-
-For the alpha release overview and proof summary, see [ALPHA_WHITEPAPER.md](ALPHA_WHITEPAPER.md).
-
-## Alpha scope
+## Scope
 
 - Python agents only
 - evals are required
-- grading is adapter-defined over externally visible outputs
-- optimization is over declared knobs and bounded declared artifacts
-- arbitrary repo-wide code rewriting is out of scope
+- grading is adapter-owned over externally visible outputs
+- optimization is patch-based over a Ratchet-generated surface
+- supported objective modes: correctness, cost, and latency
+- arbitrary repo-wide source mutation is out of scope
 
 ## Quickstart
 
@@ -38,53 +32,58 @@ python3 -m ratchet check --config my-agent-ratchet/ratchet.toml
 Run the optimizer:
 
 ```bash
-python3 -m ratchet run --config my-agent-ratchet/ratchet.toml
+python3 -m ratchet optimize --config my-agent-ratchet/ratchet.toml
 ```
 
 You can still run with explicit flags instead of a config file:
 
 ```bash
-python3 -m ratchet run \
+python3 -m ratchet optimize \
   --adapter package.module:adapter \
   --evals path/to/evals.jsonl \
-  --out results/run
+  --out results/run \
+  --mode correctness
 ```
 
-## Adapter contract
+## Adapter Contract
 
 An adapter object must implement:
 
-- `baseline() -> dict[str, str]`
-- `search_space() -> SearchSpace`
-- `run_case(candidate: dict[str, str], case: EvalCase) -> RunRecord`
+- `agent_spec() -> AgentSpec | None`
+- `run_case(case: EvalCase, patch: AgentPatch | None = None) -> RunRecord`
 - `grade(case: EvalCase, output: object) -> GradeResult`
-- `export(candidate: dict[str, str], out_dir: Path) -> None`
+- `export(patch: AgentPatch, out_dir: Path) -> None`
 
 Public serializable types:
 
-- `EnumKnobSpec`
-- `TextArtifactSpec`
-- `CodeArtifactSpec`
-- `SearchSpace`
+- `AgentSpec`
+- `AgentTool`
+- `EditableTarget`
+- `AgentPatch`
+- `PatchOperation`
+- `OptimizationObjective`
+- `OptimizationConstraints`
 - `EvalCase`
 - `OperationalMetrics`
 - `DiagnosticTrace`
 - `RunRecord`
 - `GradeResult`
 - `FailureDiagnosis`
-- `PatchProposal`
 
-Helper graders are available in `ratchet.grading`:
+Helper utilities:
 
 - `exact_text_grade(...)`
 - `numeric_tolerance_grade(...)`
 - `json_field_grade(...)`
+- `estimate_cost_usd(...)` is available in `ratchet.pricing`
 
 ## Contract Model
 
-- The current eval set scores the agent's external contract: inputs, externally visible outputs, and success criteria.
-- Ratchet mutates the internal harness contract: prompt text, tool availability, tool descriptions, retrieval policy, model choice, bounded source-level hook logic, and similar artifacts.
-- Diagnostic traces are used for diagnosis, proposal generation, and debugging only. Graders should depend on external outputs, not internal tool traces.
+- The eval set scores the agent's external contract: inputs, externally visible outputs, and success criteria.
+- The adapter describes the current agent and scorer; it does not choose the optimization strategy.
+- Ratchet generates editable targets from `AgentSpec`, traces, failures, objective mode, and constraints.
+- The scorer, including any LLM judge used by an eval, is frozen and outside the optimization surface.
+- `patch=None` always means the original user-provided agent.
 
 ## Config
 
@@ -95,54 +94,64 @@ Helper graders are available in `ratchet.grading`:
 - `out`
 - `env_file`
 - `dev_budget`
-- `holdout_top_k`
-- `harnesser_model`
-- `harnesser_reasoning`
-- `harnesser_enabled`
+- `holdout_budget`
+- `optimizer_model`
+- `optimizer_reasoning`
+- `samples_per_case`
 - `max_case_retries`
 - `case_timeout_s`
 - `fail_fast`
 
+Objective config:
+
+```toml
+[ratchet.objective]
+mode = "correctness" # correctness | cost | latency
+
+[ratchet.objective.constraints]
+allowed_edits = ["instruction", "tool", "retrieval", "runtime", "model", "output"]
+allowed_models = ["gpt-4o-2024-08-06", "gpt-5.4-mini"]
+max_cost_ratio = 1.0
+max_latency_ratio = 1.1
+min_correctness_delta = 0.0 # optional; defaults to strict improvement for correctness and non-inferiority for cost/latency
+```
+
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
+Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and patch case with separate cache entries and aggregates case outcomes by majority vote / mean score.
 
 ## Commands
 
 - `python3 -m ratchet init --template python_function|python_cli --out <dir>`
 - `python3 -m ratchet check --config ratchet.toml`
-- `python3 -m ratchet run --config ratchet.toml`
-- `python3 -m ratchet paired-demo`
+- `python3 -m ratchet optimize --config ratchet.toml`
+
+`run` remains as an alias for `optimize`.
 
 ## Outputs
 
 Each run writes:
 
-- `case_results.jsonl`: resumable per-case cache
-- `candidate_metrics.json`: baseline, accepted dev incumbents, holdout validations, and promotable frontier
+- `case_results.jsonl`: resumable per-case cache keyed by patch, case digest, eval digest, adapter fingerprint, objective, and baseline `AgentSpec`
+- `patch_metrics.json`: true baseline, best dev patch, selected holdout patch, accepted dev patches, holdout validations, typed generated surface, and Pareto frontier
 - `decision_log.json`: diagnosis/proposal iterations, holdout validation, and final selection
+- `outcome_analysis.json`: explicit reason for promotion or baseline retention
 - `diagnoses.jsonl`: structured diagnosis buckets per iteration
-- `proposals.jsonl`: proposed structural patches with acceptance/rejection outcomes
-- `optimized_candidate.json`: selected candidate and promotion status
+- `proposals.jsonl`: proposed patches with acceptance/rejection outcomes
+- `selected_patch.json`: selected patch and promotion status
 - `run_manifest.json`: config, timestamps, cache stats, retries, and runtime-error counts
-- `report.md`: human-readable report with behavior history, diagnosis breakdown, proposal outcomes, and the gate decision
-- `exported_candidate/`: adapter-materialized artifact bundle
+- `summary.html`: user-facing run summary
+- `plots/`: SVG plots embedded by `summary.html`
+- `report.md`: human-readable report
+- `exported_patch/`: adapter-materialized patch bundle
 
-## Included examples
+## Samples
 
-Built-in regression fixtures:
+- `samples/python_api_grounding_agent/`
+- `samples/policy_triage_agent/`
+- `samples/runbook_action_agent/`
+- `samples/public_docs_agent/`
+- `samples/kashi_agent/`
 
-- `examples/northstar/`
+For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
-External proof suite:
-
-- `samples/python_api_grounding_agent/`: flagship grounded-QA benchmark and the strongest current promoted result
-- `samples/policy_triage_agent/`: structured-decision benchmark used as an honest baseline-kept proof
-- `samples/runbook_action_agent/`: procedural tool-using benchmark that exercises diagnosis-driven behavior fixes and strict holdout rejection
-- `samples/public_docs_agent/`: secondary smoke / efficiency benchmark
-
-The flagship Python API grounding sample is intentionally outside the `ratchet/` core package. It is a standalone Python harness plus a thin adapter, and it exercises both grounded lookup and `unknown` behavior rather than only easy symbol retrieval.
-
-Proof artifacts are reproducible from the included sample configs. The alpha whitepaper is the canonical release summary; rerun the sample benchmarks locally to regenerate fresh result bundles under `results/`.
-
-For live runs, copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
-
-Ratchet's optimizing agent is separate from the optimized harness. By default the diagnoser/proposer loop runs on `gpt-5.4` with `medium` reasoning, while the searched harness may move to smaller or cheaper models.
+Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` for the diagnosis/proposal loop; the agent may move to allowed models through generated `change_model` patches.

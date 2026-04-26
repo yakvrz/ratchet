@@ -4,265 +4,283 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
-DependencyMap = dict[str, list[str]]
+PATCH_OPS = {
+    "add_instruction",
+    "revise_instruction",
+    "add_output_constraint",
+    "revise_tool_description",
+    "revise_tool_policy",
+    "set_retrieval_param",
+    "set_runtime_param",
+    "change_model",
+    "add_few_shot",
+    "add_verifier_retry",
+}
+
+EDIT_KINDS = {
+    "instruction",
+    "output",
+    "tool",
+    "retrieval",
+    "runtime",
+    "model",
+    "few_shot",
+    "verifier",
+}
 
 
 @dataclass(frozen=True)
-class EnumKnobSpec:
+class AgentTool:
     name: str
-    kind: str
-    values: list[str]
-    default: str
-    depends_on: DependencyMap = field(default_factory=dict)
     description: str = ""
+    policy: str = ""
+    enabled: bool = True
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"model", "reasoning", "tool", "kb", "param"}:
-            raise ValueError(f"Unsupported enum knob kind: {self.kind}")
-        if not self.values:
-            raise ValueError(f"Enum knob {self.name} must define at least one value.")
-        if self.default not in self.values:
-            raise ValueError(f"Enum knob {self.name} default {self.default!r} is not in values.")
-        for dependency_name, allowed_values in self.depends_on.items():
-            if not dependency_name:
-                raise ValueError("Dependency names must be non-empty.")
-            if not allowed_values:
-                raise ValueError(
-                    f"Dependency {dependency_name} for enum knob {self.name} must list values."
-                )
+        if not self.name:
+            raise ValueError("AgentTool name must be non-empty.")
 
     def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["type"] = "enum"
-        return payload
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EnumKnobSpec":
-        depends_on = {
-            key: [str(value) for value in values]
-            for key, values in payload.get("depends_on", {}).items()
-        }
+    def from_dict(cls, payload: dict[str, Any]) -> "AgentTool":
         return cls(
             name=str(payload["name"]),
-            kind=str(payload["kind"]),
-            values=[str(value) for value in payload["values"]],
-            default=str(payload["default"]),
-            depends_on=depends_on,
             description=str(payload.get("description", "")),
+            policy=str(payload.get("policy", "")),
+            enabled=bool(payload.get("enabled", True)),
+            metadata=dict(payload.get("metadata", {})),
         )
 
 
 @dataclass(frozen=True)
-class TextArtifactSpec:
+class AgentSpec:
     name: str
-    kind: str
-    default: str
-    max_chars: int
-    depends_on: DependencyMap = field(default_factory=dict)
-    description: str = ""
+    model: str
+    instructions: dict[str, str] = field(default_factory=dict)
+    tools: dict[str, AgentTool] = field(default_factory=dict)
+    retrieval: dict[str, Any] = field(default_factory=dict)
+    output_contract: str = ""
+    runtime: dict[str, Any] = field(default_factory=dict)
+    model_options: list[str] = field(default_factory=list)
+    few_shot: list[dict[str, Any]] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if self.kind not in {"prompt", "tool", "component"}:
-            raise ValueError(f"Unsupported text artifact kind: {self.kind}")
-        if self.max_chars <= 0:
-            raise ValueError(f"Text artifact {self.name} max_chars must be positive.")
-        if len(self.default) > self.max_chars:
-            raise ValueError(
-                f"Text artifact {self.name} default exceeds max_chars ({self.max_chars})."
-            )
-        for dependency_name, allowed_values in self.depends_on.items():
-            if not dependency_name:
-                raise ValueError("Dependency names must be non-empty.")
-            if not allowed_values:
-                raise ValueError(
-                    f"Dependency {dependency_name} for text artifact {self.name} must list values."
-                )
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["type"] = "text"
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TextArtifactSpec":
-        depends_on = {
-            key: [str(value) for value in values]
-            for key, values in payload.get("depends_on", {}).items()
-        }
-        return cls(
-            name=str(payload["name"]),
-            kind=str(payload["kind"]),
-            default=str(payload["default"]),
-            max_chars=int(payload["max_chars"]),
-            depends_on=depends_on,
-            description=str(payload.get("description", "")),
-        )
-
-
-@dataclass(frozen=True)
-class ComponentSpec:
-    name: str
-    kind: str
-    values: list[str]
-    default: str
-    depends_on: DependencyMap = field(default_factory=dict)
-    description: str = ""
-
-    def __post_init__(self) -> None:
-        if not self.kind:
-            raise ValueError("Component kind must be non-empty.")
-        if not self.values:
-            raise ValueError(f"Component {self.name} must define at least one value.")
-        if self.default not in self.values:
-            raise ValueError(f"Component {self.name} default {self.default!r} is not in values.")
-        for dependency_name, allowed_values in self.depends_on.items():
-            if not dependency_name:
-                raise ValueError("Dependency names must be non-empty.")
-            if not allowed_values:
-                raise ValueError(
-                    f"Dependency {dependency_name} for component {self.name} must list values."
-                )
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["type"] = "component"
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ComponentSpec":
-        depends_on = {
-            key: [str(value) for value in values]
-            for key, values in payload.get("depends_on", {}).items()
-        }
-        return cls(
-            name=str(payload["name"]),
-            kind=str(payload["kind"]),
-            values=[str(value) for value in payload["values"]],
-            default=str(payload["default"]),
-            depends_on=depends_on,
-            description=str(payload.get("description", "")),
-        )
-
-
-@dataclass(frozen=True)
-class CodeArtifactSpec:
-    name: str
-    language: str
-    callable_name: str
-    signature: str
-    default: str
-    max_chars: int
-    max_lines: int
-    depends_on: DependencyMap = field(default_factory=dict)
-    description: str = ""
-
-    def __post_init__(self) -> None:
-        if self.language != "python":
-            raise ValueError(f"Unsupported code artifact language: {self.language}")
-        if not self.callable_name:
-            raise ValueError("Code artifact callable_name must be non-empty.")
-        if not self.signature:
-            raise ValueError("Code artifact signature must be non-empty.")
-        if self.max_chars <= 0:
-            raise ValueError(f"Code artifact {self.name} max_chars must be positive.")
-        if self.max_lines <= 0:
-            raise ValueError(f"Code artifact {self.name} max_lines must be positive.")
-        if len(self.default) > self.max_chars:
-            raise ValueError(
-                f"Code artifact {self.name} default exceeds max_chars ({self.max_chars})."
-            )
-        if len(self.default.splitlines()) > self.max_lines:
-            raise ValueError(
-                f"Code artifact {self.name} default exceeds max_lines ({self.max_lines})."
-            )
-        for dependency_name, allowed_values in self.depends_on.items():
-            if not dependency_name:
-                raise ValueError("Dependency names must be non-empty.")
-            if not allowed_values:
-                raise ValueError(
-                    f"Dependency {dependency_name} for code artifact {self.name} must list values."
-                )
-
-    def to_dict(self) -> dict[str, Any]:
-        payload = asdict(self)
-        payload["type"] = "code"
-        return payload
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CodeArtifactSpec":
-        depends_on = {
-            key: [str(value) for value in values]
-            for key, values in payload.get("depends_on", {}).items()
-        }
-        return cls(
-            name=str(payload["name"]),
-            language=str(payload["language"]),
-            callable_name=str(payload["callable_name"]),
-            signature=str(payload["signature"]),
-            default=str(payload["default"]),
-            max_chars=int(payload["max_chars"]),
-            max_lines=int(payload["max_lines"]),
-            depends_on=depends_on,
-            description=str(payload.get("description", "")),
-        )
-
-
-@dataclass(frozen=True)
-class SearchSpace:
-    enum_knobs: list[EnumKnobSpec] = field(default_factory=list)
-    text_artifacts: list[TextArtifactSpec] = field(default_factory=list)
-    components: list[ComponentSpec] = field(default_factory=list)
-    code_artifacts: list[CodeArtifactSpec] = field(default_factory=list)
-
-    def all_specs(self) -> list[EnumKnobSpec | TextArtifactSpec | ComponentSpec | CodeArtifactSpec]:
-        return [*self.enum_knobs, *self.text_artifacts, *self.components, *self.code_artifacts]
-
-    def spec_names(self) -> list[str]:
-        return [spec.name for spec in self.all_specs()]
-
-    def enum_spec(self, name: str) -> EnumKnobSpec | None:
-        for spec in self.enum_knobs:
-            if spec.name == name:
-                return spec
-        return None
-
-    def text_spec(self, name: str) -> TextArtifactSpec | None:
-        for spec in self.text_artifacts:
-            if spec.name == name:
-                return spec
-        return None
-
-    def component_spec(self, name: str) -> ComponentSpec | None:
-        for spec in self.components:
-            if spec.name == name:
-                return spec
-        return None
-
-    def code_spec(self, name: str) -> CodeArtifactSpec | None:
-        for spec in self.code_artifacts:
-            if spec.name == name:
-                return spec
-        return None
+        if not self.name:
+            raise ValueError("AgentSpec name must be non-empty.")
+        if not self.model:
+            raise ValueError("AgentSpec model must be non-empty.")
+        if self.model_options and self.model not in self.model_options:
+            raise ValueError(f"AgentSpec model {self.model!r} is not in model_options.")
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "enum_knobs": [spec.to_dict() for spec in self.enum_knobs],
-            "text_artifacts": [spec.to_dict() for spec in self.text_artifacts],
-            "components": [spec.to_dict() for spec in self.components],
-            "code_artifacts": [spec.to_dict() for spec in self.code_artifacts],
+            "name": self.name,
+            "model": self.model,
+            "instructions": dict(self.instructions),
+            "tools": {name: tool.to_dict() for name, tool in sorted(self.tools.items())},
+            "retrieval": dict(self.retrieval),
+            "output_contract": self.output_contract,
+            "runtime": dict(self.runtime),
+            "model_options": list(self.model_options),
+            "few_shot": [dict(item) for item in self.few_shot],
+            "metadata": dict(self.metadata),
         }
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "SearchSpace":
+    def from_dict(cls, payload: dict[str, Any]) -> "AgentSpec":
         return cls(
-            enum_knobs=[EnumKnobSpec.from_dict(item) for item in payload.get("enum_knobs", [])],
-            text_artifacts=[
-                TextArtifactSpec.from_dict(item) for item in payload.get("text_artifacts", [])
-            ],
-            components=[ComponentSpec.from_dict(item) for item in payload.get("components", [])],
-            code_artifacts=[
-                CodeArtifactSpec.from_dict(item) for item in payload.get("code_artifacts", [])
-            ],
+            name=str(payload["name"]),
+            model=str(payload["model"]),
+            instructions={str(key): str(value) for key, value in payload.get("instructions", {}).items()},
+            tools={
+                str(name): AgentTool.from_dict({**dict(tool), "name": str(name)})
+                if isinstance(tool, dict) and "name" not in tool
+                else AgentTool.from_dict(dict(tool))
+                for name, tool in payload.get("tools", {}).items()
+            },
+            retrieval=dict(payload.get("retrieval", {})),
+            output_contract=str(payload.get("output_contract", "")),
+            runtime=dict(payload.get("runtime", {})),
+            model_options=[str(item) for item in payload.get("model_options", [])],
+            few_shot=[dict(item) for item in payload.get("few_shot", [])],
+            metadata=dict(payload.get("metadata", {})),
+        )
+
+    def apply_patch(self, patch: "AgentPatch | None") -> "AgentSpec":
+        if patch is None or not patch.operations:
+            return self
+        spec = self.to_dict()
+        for operation in patch.operations:
+            _apply_operation(spec, operation)
+        return AgentSpec.from_dict(spec)
+
+
+@dataclass(frozen=True)
+class EditableTarget:
+    name: str
+    kind: str
+    path: str
+    current_value: Any
+    allowed_ops: list[str]
+    description: str = ""
+    choices: list[str] = field(default_factory=list)
+    max_chars: int | None = None
+    value_schema: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.kind not in EDIT_KINDS:
+            raise ValueError(f"Unsupported editable target kind: {self.kind}")
+        if not self.name or not self.path:
+            raise ValueError("EditableTarget name and path must be non-empty.")
+        unsupported = sorted(set(self.allowed_ops) - PATCH_OPS)
+        if unsupported:
+            raise ValueError(f"Unsupported editable target ops: {', '.join(unsupported)}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "EditableTarget":
+        return cls(
+            name=str(payload["name"]),
+            kind=str(payload["kind"]),
+            path=str(payload["path"]),
+            current_value=payload.get("current_value"),
+            allowed_ops=[str(item) for item in payload.get("allowed_ops", [])],
+            description=str(payload.get("description", "")),
+            choices=[str(item) for item in payload.get("choices", [])],
+            max_chars=int(payload["max_chars"]) if payload.get("max_chars") is not None else None,
+            value_schema=dict(payload.get("value_schema", {})),
+        )
+
+
+@dataclass(frozen=True)
+class PatchOperation:
+    op: str
+    target: str
+    value: Any
+    rationale: str = ""
+
+    def __post_init__(self) -> None:
+        if self.op not in PATCH_OPS:
+            raise ValueError(f"Unsupported patch operation: {self.op}")
+        if not self.target:
+            raise ValueError("PatchOperation target must be non-empty.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "PatchOperation":
+        return cls(
+            op=str(payload["op"]),
+            target=str(payload["target"]),
+            value=payload.get("value"),
+            rationale=str(payload.get("rationale", "")),
+        )
+
+
+@dataclass(frozen=True)
+class AgentPatch:
+    operations: list[PatchOperation] = field(default_factory=list)
+    rationale: str = ""
+    expected_effect: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "operations": [operation.to_dict() for operation in self.operations],
+            "rationale": self.rationale,
+            "expected_effect": self.expected_effect,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "AgentPatch":
+        return cls(
+            operations=[PatchOperation.from_dict(item) for item in payload.get("operations", [])],
+            rationale=str(payload.get("rationale", "")),
+            expected_effect=str(payload.get("expected_effect", "")),
+            metadata=dict(payload.get("metadata", {})),
+        )
+
+    @classmethod
+    def empty(cls) -> "AgentPatch":
+        return cls()
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.operations
+
+
+@dataclass(frozen=True)
+class OptimizationConstraints:
+    allowed_edits: list[str] = field(default_factory=lambda: sorted(EDIT_KINDS))
+    allowed_models: list[str] = field(default_factory=list)
+    max_cost_ratio: float | None = None
+    max_latency_ratio: float | None = None
+    min_correctness_delta: float | None = None
+    max_patch_operations: int = 2
+
+    def __post_init__(self) -> None:
+        unsupported = sorted(set(self.allowed_edits) - EDIT_KINDS)
+        if unsupported:
+            raise ValueError(f"Unsupported allowed edit kinds: {', '.join(unsupported)}")
+        if self.max_patch_operations <= 0:
+            raise ValueError("max_patch_operations must be positive.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "OptimizationConstraints":
+        payload = dict(payload or {})
+        return cls(
+            allowed_edits=[str(item) for item in payload.get("allowed_edits", sorted(EDIT_KINDS))],
+            allowed_models=[str(item) for item in payload.get("allowed_models", [])],
+            max_cost_ratio=(
+                float(payload["max_cost_ratio"]) if payload.get("max_cost_ratio") is not None else None
+            ),
+            max_latency_ratio=(
+                float(payload["max_latency_ratio"]) if payload.get("max_latency_ratio") is not None else None
+            ),
+            min_correctness_delta=(
+                float(payload["min_correctness_delta"])
+                if payload.get("min_correctness_delta") is not None
+                else None
+            ),
+            max_patch_operations=int(payload.get("max_patch_operations", 2)),
+        )
+
+
+@dataclass(frozen=True)
+class OptimizationObjective:
+    mode: str = "correctness"
+    constraints: OptimizationConstraints = field(default_factory=OptimizationConstraints)
+    tie_breakers: list[str] = field(default_factory=lambda: ["lower_cost", "lower_latency", "smaller_patch"])
+
+    def __post_init__(self) -> None:
+        if self.mode not in {"correctness", "cost", "latency"}:
+            raise ValueError(f"Unsupported optimization mode: {self.mode}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "constraints": self.constraints.to_dict(),
+            "tie_breakers": list(self.tie_breakers),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "OptimizationObjective":
+        payload = dict(payload or {})
+        return cls(
+            mode=str(payload.get("mode", "correctness")),
+            constraints=OptimizationConstraints.from_dict(payload.get("constraints")),
+            tie_breakers=[str(item) for item in payload.get("tie_breakers", ["lower_cost", "lower_latency", "smaller_patch"])],
         )
 
 
@@ -385,7 +403,7 @@ class FailureDiagnosis:
     case_ids: list[str]
     category: str
     root_cause: str
-    target_keys: list[str]
+    target_names: list[str]
     evidence: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -396,96 +414,93 @@ class FailureDiagnosis:
         return cls(
             case_ids=[str(item) for item in payload.get("case_ids", [])],
             category=str(payload["category"]),
-            root_cause=str(payload["root_cause"]),
-            target_keys=[str(item) for item in payload.get("target_keys", [])],
+            root_cause=str(payload.get("root_cause", "")),
+            target_names=[str(item) for item in payload.get("target_names", payload.get("target_keys", []))],
             evidence=[dict(item) for item in payload.get("evidence", [])],
         )
 
 
-@dataclass(frozen=True)
-class PatchChange:
-    op: str
-    name: str
-    value: str
+def _apply_operation(spec: dict[str, Any], operation: PatchOperation) -> None:
+    target = operation.target
+    value = operation.value
+    if operation.op == "change_model":
+        model = str(value)
+        options = [str(item) for item in spec.get("model_options", [])]
+        if options and model not in options:
+            raise ValueError(f"Model {model!r} is not in AgentSpec model_options.")
+        spec["model"] = model
+        return
 
-    def __post_init__(self) -> None:
-        if self.op not in {"set_enum", "rewrite_text", "set_component", "rewrite_code"}:
-            raise ValueError(f"Unsupported patch operation: {self.op}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "PatchChange":
-        if "new_text" in payload:
-            value = payload["new_text"]
+    if operation.op in {"add_instruction", "revise_instruction"}:
+        section = _strip_prefix(target, "instructions.")
+        instructions = dict(spec.get("instructions", {}))
+        current = str(instructions.get(section, ""))
+        if operation.op == "add_instruction" and current:
+            text = str(value).strip()
+            instructions[section] = f"{current.rstrip()}\n\n{text}" if text not in current else current
         else:
-            value = payload.get("value")
-        return cls(
-            op=str(payload["op"]),
-            name=str(payload["name"]),
-            value=str(value),
-        )
+            instructions[section] = str(value)
+        spec["instructions"] = instructions
+        return
+
+    if operation.op == "add_output_constraint":
+        current = str(spec.get("output_contract", ""))
+        text = str(value).strip()
+        spec["output_contract"] = f"{current.rstrip()}\n\n{text}" if current and text not in current else text or current
+        return
+
+    if operation.op in {"revise_tool_description", "revise_tool_policy"}:
+        parts = target.split(".")
+        if len(parts) < 3 or parts[0] != "tools":
+            raise ValueError(f"Invalid tool target: {target}")
+        tool_name = parts[1]
+        field_name = "description" if operation.op == "revise_tool_description" else "policy"
+        tools = {name: dict(tool) for name, tool in spec.get("tools", {}).items()}
+        if tool_name not in tools:
+            raise ValueError(f"Unknown tool target: {tool_name}")
+        tools[tool_name][field_name] = str(value)
+        spec["tools"] = tools
+        return
+
+    if operation.op == "set_retrieval_param":
+        key = _strip_prefix(target, "retrieval.")
+        retrieval = dict(spec.get("retrieval", {}))
+        retrieval[key] = value
+        spec["retrieval"] = retrieval
+        return
+
+    if operation.op == "set_runtime_param":
+        if target.startswith("tools.") and target.endswith(".enabled"):
+            parts = target.split(".")
+            if len(parts) != 3:
+                raise ValueError(f"Invalid tool enabled target: {target}")
+            tool_name = parts[1]
+            tools = {name: dict(tool) for name, tool in spec.get("tools", {}).items()}
+            if tool_name not in tools:
+                raise ValueError(f"Unknown tool target: {tool_name}")
+            tools[tool_name]["enabled"] = bool(value)
+            spec["tools"] = tools
+            return
+        key = _strip_prefix(target, "runtime.")
+        runtime = dict(spec.get("runtime", {}))
+        runtime[key] = value
+        spec["runtime"] = runtime
+        return
+
+    if operation.op == "add_few_shot":
+        few_shot = [dict(item) for item in spec.get("few_shot", [])]
+        few_shot.append(dict(value) if isinstance(value, dict) else {"text": str(value)})
+        spec["few_shot"] = few_shot
+        return
+
+    if operation.op == "add_verifier_retry":
+        runtime = dict(spec.get("runtime", {}))
+        runtime["verifier_retry"] = value if value is not None else True
+        spec["runtime"] = runtime
+        return
+
+    raise ValueError(f"Unsupported patch operation: {operation.op}")
 
 
-@dataclass(frozen=True)
-class PatchProposal:
-    proposal_id: str
-    diagnosis_category: str
-    changes: list[PatchChange]
-    rationale: str
-    expected_effect: str
-    estimated_scope: str = "low"
-
-    def __post_init__(self) -> None:
-        if not self.changes:
-            raise ValueError("PatchProposal must include at least one change.")
-        if self.estimated_scope not in {"low", "medium", "high"}:
-            raise ValueError(f"Unsupported proposal scope: {self.estimated_scope}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "proposal_id": self.proposal_id,
-            "diagnosis_category": self.diagnosis_category,
-            "changes": [change.to_dict() for change in self.changes],
-            "rationale": self.rationale,
-            "expected_effect": self.expected_effect,
-            "estimated_scope": self.estimated_scope,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "PatchProposal":
-        return cls(
-            proposal_id=str(payload["proposal_id"]),
-            diagnosis_category=str(payload["diagnosis_category"]),
-            changes=[PatchChange.from_dict(item) for item in payload["changes"]],
-            rationale=str(payload.get("rationale", "")),
-            expected_effect=str(payload.get("expected_effect", "")),
-            estimated_scope=str(payload.get("estimated_scope", "low")),
-        )
-
-
-@dataclass(frozen=True)
-class ArchitectureProposal:
-    proposal_id: str
-    rationale: str
-    expected_effect: str
-    expected_failure_categories: list[str]
-    estimated_blast_radius: str
-    requires_rebaseline: bool = True
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ArchitectureProposal":
-        return cls(
-            proposal_id=str(payload["proposal_id"]),
-            rationale=str(payload.get("rationale", "")),
-            expected_effect=str(payload.get("expected_effect", "")),
-            expected_failure_categories=[
-                str(category) for category in payload.get("expected_failure_categories", [])
-            ],
-            estimated_blast_radius=str(payload.get("estimated_blast_radius", "unknown")),
-            requires_rebaseline=bool(payload.get("requires_rebaseline", True)),
-        )
+def _strip_prefix(value: str, prefix: str) -> str:
+    return value[len(prefix) :] if value.startswith(prefix) else value

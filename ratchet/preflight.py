@@ -7,33 +7,23 @@ import tempfile
 from typing import Any
 
 from ratchet.adapters import AdapterProtocol
-from ratchet.code_artifacts import compile_code_artifact
-from ratchet.io import normalize_candidate
-from ratchet.types import EvalCase, GradeResult, RunRecord, SearchSpace
+from ratchet.surface import SurfaceGenerator
+from ratchet.types import AgentPatch, EditableTarget, EvalCase, GradeResult, OptimizationObjective, PatchOperation, RunRecord
+from ratchet.validation import PatchValidator
 
 
 @dataclass(frozen=True)
 class CheckSummary:
     adapter: str
-    baseline_candidate: dict[str, str]
+    agent_spec: dict[str, Any] | None
+    generated_surface: list[dict[str, Any]]
     sample_cases: list[dict[str, Any]]
     stability: dict[str, Any]
+    materialization: dict[str, Any]
     exported_path: str
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def validate_search_space(search_space: SearchSpace) -> None:
-    all_specs = search_space.all_specs()
-    if not all_specs:
-        raise ValueError("Adapter search_space() returned no knobs.")
-    knob_names = [spec.name for spec in all_specs]
-    duplicates = sorted({name for name in knob_names if knob_names.count(name) > 1})
-    if duplicates:
-        raise ValueError(f"Adapter search_space() contains duplicate knob names: {', '.join(duplicates)}")
-    for spec in search_space.code_artifacts:
-        compile_code_artifact(spec, spec.default)
 
 
 def select_check_cases(cases: tuple[EvalCase, ...], sample_limit: int = 2) -> tuple[EvalCase, ...]:
@@ -49,15 +39,14 @@ def select_check_cases(cases: tuple[EvalCase, ...], sample_limit: int = 2) -> tu
         if len(selected) >= sample_limit:
             break
         selected.append(case)
-    return tuple(selected)
+    return tuple(selected[:sample_limit])
 
 
 def _run_checked_case(
     adapter: AdapterProtocol,
-    baseline_candidate: dict[str, str],
     case: EvalCase,
 ) -> tuple[RunRecord, GradeResult]:
-    record = adapter.run_case(baseline_candidate, case)
+    record = adapter.run_case(case, None)
     if not isinstance(record, RunRecord):
         raise TypeError(f"run_case returned {type(record).__name__}, expected RunRecord.")
     try:
@@ -72,15 +61,14 @@ def _run_checked_case(
 
 def _stability_summary(
     adapter: AdapterProtocol,
-    baseline_candidate: dict[str, str],
     sample_cases: tuple[EvalCase, ...],
 ) -> dict[str, Any]:
     first_pass: list[tuple[RunRecord, GradeResult]] = []
     second_pass: list[tuple[RunRecord, GradeResult]] = []
     for case in sample_cases:
-        first_pass.append(_run_checked_case(adapter, baseline_candidate, case))
+        first_pass.append(_run_checked_case(adapter, case))
     for case in sample_cases:
-        second_pass.append(_run_checked_case(adapter, baseline_candidate, case))
+        second_pass.append(_run_checked_case(adapter, case))
 
     pass_flips: list[str] = []
     output_drift: list[str] = []
@@ -109,16 +97,16 @@ def run_preflight_check(
     *,
     adapter_spec: str,
     adapter: AdapterProtocol,
-    search_space: SearchSpace,
     cases: tuple[EvalCase, ...],
+    objective: OptimizationObjective,
     sample_limit: int = 2,
 ) -> CheckSummary:
-    validate_search_space(search_space)
-    baseline_candidate = normalize_candidate(adapter.baseline(), search_space)
+    spec = adapter.agent_spec()
+    surface = SurfaceGenerator().generate(spec, objective)
     sample_cases = select_check_cases(cases, sample_limit=sample_limit)
     sample_rows: list[dict[str, Any]] = []
     for case in sample_cases:
-        record, grade = _run_checked_case(adapter, baseline_candidate, case)
+        record, grade = _run_checked_case(adapter, case)
         sample_rows.append(
             {
                 "case_id": case.id,
@@ -130,16 +118,155 @@ def run_preflight_check(
             }
         )
 
-    stability = _stability_summary(adapter, baseline_candidate, sample_cases)
+    stability = _stability_summary(adapter, sample_cases)
+    materialization = _materialization_audit(adapter, spec, surface, objective)
 
     with tempfile.TemporaryDirectory() as tmp:
         export_dir = Path(tmp) / "export"
-        adapter.export(baseline_candidate, export_dir)
+        adapter.export(AgentPatch.empty(), export_dir)
 
     return CheckSummary(
         adapter=adapter_spec,
-        baseline_candidate=baseline_candidate,
+        agent_spec=spec.to_dict() if spec else None,
+        generated_surface=[target.to_dict() for target in surface],
         sample_cases=sample_rows,
         stability=stability,
+        materialization=materialization,
         exported_path="validated in temporary directory",
     )
+
+
+def _materialization_audit(
+    adapter: AdapterProtocol,
+    spec: Any,
+    surface: list[EditableTarget],
+    objective: OptimizationObjective,
+) -> dict[str, Any]:
+    if not surface:
+        return {"checked": False, "verified_kinds": [], "skipped_kinds": [], "checks": []}
+    targets_by_kind: dict[str, EditableTarget] = {}
+    for target in surface:
+        targets_by_kind.setdefault(target.kind, target)
+        if _preferred_materialization_target(target):
+            targets_by_kind[target.kind] = target
+    checks: list[dict[str, Any]] = []
+    validator = PatchValidator()
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        for index, (kind, target) in enumerate(sorted(targets_by_kind.items())):
+            patch, expected = _sentinel_patch_for_target(target, index)
+            is_valid, invalid_reason = validator.validate_with_reason(
+                patch,
+                current_spec=spec,
+                surface=surface,
+                objective=objective,
+            )
+            if not is_valid:
+                checks.append(
+                    {
+                        "kind": kind,
+                        "target": target.name,
+                        "verified": False,
+                        "reason": invalid_reason or "sentinel patch was invalid",
+                    }
+                )
+                continue
+            export_dir = root / kind
+            adapter.export(patch, export_dir)
+            exported_text = _exported_review_text(export_dir)
+            verified = expected in exported_text
+            checks.append(
+                {
+                    "kind": kind,
+                    "target": target.name,
+                    "verified": verified,
+                    "expected": expected,
+                    "reason": None if verified else "patched sentinel was not found in exported review artifacts",
+                }
+            )
+    failed = [check for check in checks if not check["verified"]]
+    if failed:
+        failed_rows = ", ".join(f"{check['kind']}:{check['target']}" for check in failed)
+        raise ValueError(f"Materialization audit failed for generated targets: {failed_rows}")
+    return {
+        "checked": True,
+        "verified_kinds": [str(check["kind"]) for check in checks],
+        "skipped_kinds": [],
+        "checks": checks,
+    }
+
+
+def _preferred_materialization_target(target: EditableTarget) -> bool:
+    schema_type = target.value_schema.get("type")
+    return schema_type in {"string", "object"} or target.kind in {"model", "verifier"}
+
+
+def _sentinel_patch_for_target(target: EditableTarget, index: int) -> tuple[AgentPatch, str]:
+    op = _sentinel_op(target)
+    sentinel = f"RATCHET_MATERIALIZATION_SENTINEL_{target.kind}_{index}"
+    schema_type = target.value_schema.get("type")
+    if op == "change_model":
+        value = target.choices[0]
+        expected = f'"model": "{value}"'
+    elif schema_type == "boolean":
+        value = not bool(target.current_value)
+        leaf = target.path.rsplit(".", 1)[-1]
+        expected = f'"{leaf}": {str(value).lower()}'
+    elif schema_type == "integer":
+        value = 912345 + index
+        expected = str(value)
+    elif schema_type == "number":
+        value = 912345.25 + index
+        expected = str(value)
+    elif schema_type == "object":
+        value = {"ratchet_materialization_sentinel": sentinel}
+        expected = sentinel
+    elif schema_type == "array":
+        value = [{"ratchet_materialization_sentinel": sentinel}]
+        expected = sentinel
+    else:
+        value = sentinel
+        expected = sentinel
+    return (
+        AgentPatch(
+            operations=[
+                PatchOperation(
+                    op=op,
+                    target=target.name,
+                    value=value,
+                    rationale="Preflight materialization audit sentinel.",
+                )
+            ],
+            rationale="Preflight materialization audit sentinel.",
+            expected_effect="Verify adapter export materializes generated targets.",
+        ),
+        expected,
+    )
+
+
+def _sentinel_op(target: EditableTarget) -> str:
+    for op in (
+        "change_model",
+        "add_few_shot",
+        "add_instruction",
+        "revise_instruction",
+        "add_output_constraint",
+        "revise_tool_description",
+        "revise_tool_policy",
+        "set_retrieval_param",
+        "set_runtime_param",
+        "add_verifier_retry",
+    ):
+        if op in target.allowed_ops:
+            return op
+    return target.allowed_ops[0]
+
+
+def _exported_review_text(root: Path) -> str:
+    rows: list[str] = []
+    for path in sorted(item for item in root.rglob("*") if item.is_file() and item.name != "patch.json"):
+        try:
+            rows.append(path.read_text())
+        except UnicodeDecodeError:
+            continue
+    return "\n".join(rows)
