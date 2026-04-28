@@ -694,12 +694,21 @@ class RatchetReporter:
     def _simplification_rows(result: RatchetResult) -> list[str]:
         if not result.simplification_results:
             return ["No finalist simplification variants were evaluated."]
-        accepted = [row for row in result.simplification_results if row.get("accepted")]
-        rejected = [row for row in result.simplification_results if not row.get("accepted")]
+        evaluated = [row for row in result.simplification_results if row.get("type") == "simplification_evaluation"]
+        skipped = [row for row in result.simplification_results if row.get("type") == "simplification_skipped"]
+        accepted = [row for row in evaluated if row.get("accepted")]
+        rejected = [row for row in evaluated if not row.get("accepted")]
         rows = [
-            f"- Evaluated {len(result.simplification_results)} simplification variants: {len(accepted)} accepted, {len(rejected)} rejected."
+            f"- Evaluated {len(evaluated)} simplification variants: {len(accepted)} accepted, {len(rejected)} rejected; {len(skipped)} skipped."
         ]
         for item in result.simplification_results[:8]:
+            if item.get("type") == "simplification_skipped":
+                rows.append(
+                    "- "
+                    f"skipped parent `{item.get('parent_patch_hash')}`: "
+                    f"{item.get('reason') or 'simplification skipped'}"
+                )
+                continue
             simplification = item.get("simplification") or {}
             rows.append(
                 "- "

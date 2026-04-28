@@ -373,8 +373,7 @@ class ProposalEngine:
                 "mean_total_tokens": summary.mean_total_tokens,
                 "median_latency_s": summary.median_latency_s,
             },
-            "diagnoses": [_compact_diagnosis(diagnosis) for diagnosis in diagnoses[:4]],
-            "primary_diagnosis": _compact_diagnosis(diagnoses[0]) if diagnoses else None,
+            "diagnoses": [_compact_diagnosis(diagnosis) for diagnosis in diagnoses[:3]],
             "editable_targets": [_compact_editable_target(target) for target in surface],
             "diagnostic_only_examples": {
                 "usage": (
@@ -384,8 +383,8 @@ class ProposalEngine:
                 ),
                 "sanitized": objective.constraints.sanitize_examples,
                 "examples": summary.failed_examples(
-                    limit=3,
-                    max_text_chars=260,
+                    limit=2,
+                    max_text_chars=180,
                     sanitize_text=objective.constraints.sanitize_examples,
                 ),
             },
@@ -393,7 +392,7 @@ class ProposalEngine:
                 _compact_proposal_example_bank(
                     proposal_example_bank,
                     target_labels=_target_labels_for_examples(compact_diagnostics),
-                    max_examples=6,
+                    max_examples=4,
                     max_per_label=1,
                 )
                 if proposal_example_bank is not None
@@ -403,7 +402,7 @@ class ProposalEngine:
                     "examples": [],
                 }
             ),
-            "recent_history": _compact_recent_history(history, limit=4),
+            "recent_history": _compact_recent_history(history, limit=3),
         }
         try:
             started_at = time.perf_counter()
@@ -723,7 +722,7 @@ def _compact_transform_family(row: dict[str, Any]) -> dict[str, Any]:
 def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str, Any]:
     row = search_hypothesis.to_prompt_dict(
         max_contexts_per_family=1,
-        max_constrained_contexts=3,
+        max_constrained_contexts=2,
     )
     return {
         "family_states": {
@@ -739,7 +738,7 @@ def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str,
         "active_families": list(row.get("active_families") or []),
         "active_contexts": [
             _compact_context_prompt_row(context)
-            for context in list(row.get("active_contexts") or [])[:8]
+            for context in list(row.get("active_contexts") or [])[:5]
             if isinstance(context, dict)
         ],
         "constrained_or_paused_contexts": [
@@ -747,10 +746,10 @@ def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str,
             for context in list(row.get("constrained_or_paused_contexts") or [])[:3]
             if isinstance(context, dict)
         ],
-        "target_slices": list(row.get("target_slices") or [])[:8],
+        "target_slices": list(row.get("target_slices") or [])[:6],
         "profile": row.get("profile", {}),
         "budget_allocation": row.get("budget_allocation", {}),
-        "rationale": str(row.get("rationale") or "")[:360],
+        "rationale": str(row.get("rationale") or "")[:240],
     }
 
 
@@ -771,26 +770,26 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
     row = task_theory.to_dict()
     return {
         "bottleneck_class": row.get("bottleneck_class"),
-        "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:8],
+        "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:6],
         "label_confusions": list(row.get("label_confusions") or [])[:4],
-        "weak_slices": list(row.get("weak_slices") or [])[:8],
+        "weak_slices": list(row.get("weak_slices") or [])[:6],
         "runtime_defects": row.get("runtime_defects", {}),
         "output_defects": row.get("output_defects", {}),
         "example_coverage": {
             "example_count": (row.get("example_coverage") or {}).get("example_count"),
             "weak_labels_without_examples": list(
                 (row.get("example_coverage") or {}).get("weak_labels_without_examples") or []
-            )[:12],
+            )[:8],
             "target_label_source_case_ids": {
                 str(label): list(case_ids)[:4]
                 for label, case_ids in ((row.get("example_coverage") or {}).get("target_label_source_case_ids") or {}).items()
                 if isinstance(case_ids, list)
             },
-            "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=20),
+            "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=8),
         },
         "cost_latency_profile": row.get("cost_latency_profile", {}),
         "confidence": row.get("confidence"),
-        "evidence": list(row.get("evidence") or [])[:6],
+        "evidence": list(row.get("evidence") or [])[:4],
         "experiment_opportunity_mechanisms": [
             str(item.get("mechanism_class"))
             for item in list(row.get("experiment_opportunities") or [])[:5]
@@ -1051,7 +1050,7 @@ def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
 def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
     current_value = target.current_value
     if isinstance(current_value, str):
-        compact_value: Any = current_value[:260]
+        compact_value: Any = current_value[:160]
     elif isinstance(current_value, list):
         compact_value = {"type": "list", "count": len(current_value), "sample": current_value[:2]}
     elif isinstance(current_value, dict):
@@ -1064,8 +1063,8 @@ def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
         "path": target.path,
         "current_value": compact_value,
         "allowed_ops": list(target.allowed_ops),
-        "description": target.description[:120],
-        "choices": list(target.choices)[:12],
+        "description": target.description[:90],
+        "choices": list(target.choices)[:8],
         "max_chars": target.max_chars,
         "value_schema": dict(target.value_schema),
     }
@@ -1103,8 +1102,8 @@ def _compact_proposal_example_bank(
         "label_field": bank.label_field,
         "example_count": len(bank.examples),
         "included_example_count": len(selected),
-        "label_counts": dict(bank.label_counts),
-        "metadata_categories": _top_mapping(bank.metadata_categories, limit=20),
+        "label_counts": _top_mapping(bank.label_counts, limit=12),
+        "metadata_categories": _top_mapping(bank.metadata_categories, limit=12),
         "examples": [_compact_proposal_example(example) for example in selected],
     }
 

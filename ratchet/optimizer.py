@@ -85,6 +85,7 @@ MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
+MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 2
 FULL_DEV_STRONG_SIGNAL_SCORE_DELTA = 0.10
 FULL_DEV_STRONG_SIGNAL_PASS_GAIN = 2
 FULL_DEV_COMPOSED_COMPETITIVE_MARGIN = 0.05
@@ -496,6 +497,7 @@ class RatchetOptimizer:
                     parent_index=parent_index,
                     parent_summaries=parent_summaries,
                     proposal_budget=proposal_budget,
+                    dev_evaluations_used=dev_evaluations,
                 )
                 dev_evaluations += evaluations_used
                 parent_evaluations_used = evaluations_used
@@ -586,6 +588,7 @@ class RatchetOptimizer:
                         parent_index=parent_index,
                         parent_summaries=parent_summaries,
                         proposal_budget=min(PROPOSAL_RETRY_BUDGET, self.dev_budget - dev_evaluations),
+                        dev_evaluations_used=dev_evaluations,
                         proposal_retry=True,
                         retry_reason="no_accepted_candidates_from_parent",
                     )
@@ -1188,6 +1191,7 @@ class RatchetOptimizer:
         parent_index: int,
         parent_summaries: list[PatchSummary],
         proposal_budget: int,
+        dev_evaluations_used: int,
         proposal_retry: bool = False,
         retry_reason: str | None = None,
     ) -> tuple[list[tuple[CandidateProposal, PatchSummary, Comparison]], int]:
@@ -1323,6 +1327,7 @@ class RatchetOptimizer:
             reference=current_dev,
             baseline=baseline_dev,
             dev_cases=dev_cases,
+            dev_evaluations_used=dev_evaluations_used,
         )
         evaluations_used = len(evaluation_states)
         for state in evaluation_states:
@@ -1419,13 +1424,18 @@ class RatchetOptimizer:
         reference: PatchSummary,
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
+        dev_evaluations_used: int,
     ) -> None:
         active = list(states)
         for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
             if not active:
                 break
             if stage_name == "full_dev":
-                active = self._select_full_dev_candidates_for_run(active, baseline)
+                active = self._select_full_dev_candidates_for_run(
+                    active,
+                    baseline,
+                    dev_evaluations_used=dev_evaluations_used,
+                )
                 if not active:
                     break
             self._emit_progress(
@@ -1512,8 +1522,15 @@ class RatchetOptimizer:
         self,
         states: list[CandidateEvaluationState],
         baseline: PatchSummary,
+        *,
+        dev_evaluations_used: int,
     ) -> list[CandidateEvaluationState]:
-        selected = _select_full_dev_candidates(states, self.objective)
+        selected = _select_full_dev_candidates(
+            states,
+            self.objective,
+            dev_evaluations_used=dev_evaluations_used,
+            dev_budget=self.dev_budget,
+        )
         if self.max_expensive_full_dev_candidates is None:
             return selected
         kept: list[CandidateEvaluationState] = []
@@ -2006,7 +2023,16 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
 def _select_full_dev_candidates(
     states: list[CandidateEvaluationState],
     objective: OptimizationObjective,
+    *,
+    dev_evaluations_used: int = 0,
+    dev_budget: int | None = None,
 ) -> list[CandidateEvaluationState]:
+    late_budget = dev_budget is not None and dev_budget > 0 and dev_evaluations_used >= dev_budget / 2
+    group_cap = (
+        MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
+        if late_budget
+        else MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
+    )
     by_group: dict[str, list[CandidateEvaluationState]] = {}
     for state in states:
         comparison_group = (
@@ -2030,7 +2056,7 @@ def _select_full_dev_candidates(
         _append_unique_states(
             group_selected,
             role_candidates[:1],
-            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+            limit=group_cap,
         )
 
         best_delta = max((_candidate_score_delta(state) for state in ranked), default=0.0)
@@ -2043,14 +2069,14 @@ def _select_full_dev_candidates(
         _append_unique_states(
             group_selected,
             composed_candidates[:1],
-            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+            limit=group_cap,
         )
 
         strong_signal_candidates = [state for state in ranked if _has_strong_full_dev_signal(state)]
         _append_unique_states(
             group_selected,
             strong_signal_candidates,
-            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+            limit=group_cap,
         )
 
         selected_ids = {id(state) for state in group_selected}
@@ -2060,19 +2086,19 @@ def _select_full_dev_candidates(
             if _is_few_shot_compression_choice(state):
                 state.rejection_reason = (
                     "few_shot_compression_choice: screened out before full_dev by experiment allocation "
-                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"(cap {group_cap} candidates per comparison group; "
                     f"{_small_dev_signal_text(state)})"
                 )
             elif _has_strong_full_dev_signal(state):
                 state.rejection_reason = (
                     "structural_strong_signal: screened out before full_dev by experiment allocation "
-                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"(cap {group_cap} candidates per comparison group; "
                     f"{_small_dev_signal_text(state)})"
                 )
             elif str(state.candidate.candidate_role or "").lower() in {"control", "ablation", "composed"}:
                 state.rejection_reason = (
                     "small_dev_triage: screened out before full_dev by experiment role ranking "
-                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"(cap {group_cap} candidates per comparison group; "
                     f"{_small_dev_signal_text(state)})"
                 )
             else:

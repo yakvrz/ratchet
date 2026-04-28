@@ -545,6 +545,27 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(weak.frontier_status, "screened_out")
         self.assertIn("small_dev_triage", weak.rejection_reason or "")
 
+    def test_full_dev_selection_tightens_group_cap_after_half_budget(self) -> None:
+        atomic = candidate_state(experiment_role_candidate("atomic", role="atomic"), pass_count=10, score_delta=0.08)
+        control = candidate_state(experiment_role_candidate("control", role="control"), pass_count=8, score_delta=0.03)
+        composed = candidate_state(
+            experiment_role_candidate("composed", role="composed"),
+            pass_count=9,
+            score_delta=0.07,
+        )
+
+        selected = _select_full_dev_candidates(
+            [composed, control, atomic],
+            OptimizationObjective(mode="correctness"),
+            dev_evaluations_used=4,
+            dev_budget=8,
+        )
+
+        selected_instances = {state.candidate.transform_instance for state in selected}
+        self.assertEqual(selected_instances, {"atomic", "control"})
+        self.assertEqual(composed.frontier_status, "screened_out")
+        self.assertIn("cap 2 candidates", composed.rejection_reason or "")
+
     def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
         candidate = CandidateProposal.from_dict(
             {
