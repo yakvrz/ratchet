@@ -1,5 +1,5 @@
 {
-  "task_id": "clinc150_sanity",
+  "task_id": "clinc150_assessment",
   "mechanisms_of_interest": [
     "runtime_defect_fix",
     "output_contract_fix",

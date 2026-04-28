@@ -1,15 +1,15 @@
 [ratchet]
 adapter = "ratchet_adapter:adapter"
-evals = "evals.sanity.jsonl"
-out = "results/sanity"
+evals = "evals.assessment.jsonl"
+out = "results/assessment"
 env_file = "../../.env"
-dev_budget = 8
-holdout_budget = 4
+dev_budget = 16
+holdout_budget = 6
 optimizer_model = "gemini-3-flash-preview"
 optimizer_reasoning = "medium"
 samples_per_case = 1
-case_concurrency = 12
-stage_case_concurrency = 16
+case_concurrency = 16
+stage_case_concurrency = 24
 case_timeout_s = 90
 expensive_candidate_cost_ratio = 10.0
 max_expensive_full_dev_candidates = 1

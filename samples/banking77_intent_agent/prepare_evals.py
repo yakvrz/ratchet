@@ -24,12 +24,15 @@ DATA_URLS = {
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a small BANKING77 Ratchet eval split.")
-    parser.add_argument("--out", default="evals.sanity.jsonl")
+    parser = argparse.ArgumentParser(description="Build a BANKING77 Ratchet assessment split.")
+    parser.add_argument("--out", default="evals.assessment.jsonl")
     parser.add_argument("--cache-dir", default=".cache")
-    parser.add_argument("--train-per-label", type=int, default=3)
-    parser.add_argument("--dev-per-label", type=int, default=3)
-    parser.add_argument("--holdout-per-label", type=int, default=2)
+    parser.add_argument("--train-total", type=int, default=96)
+    parser.add_argument("--dev-total", type=int, default=96)
+    parser.add_argument("--holdout-total", type=int, default=96)
+    parser.add_argument("--train-per-label", type=int)
+    parser.add_argument("--dev-per-label", type=int)
+    parser.add_argument("--holdout-per-label", type=int)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -38,20 +41,38 @@ def main() -> None:
     rows = []
     train_by_label = _rows_by_label(_load_csv(cache_dir, "train"))
     test_by_label = _rows_by_label(_load_csv(cache_dir, "test"))
+    train_counts = _counts_by_label(
+        BANKING77_LABELS,
+        total=args.train_total,
+        per_label=args.train_per_label,
+    )
+    dev_counts = _counts_by_label(
+        BANKING77_LABELS,
+        total=args.dev_total,
+        per_label=args.dev_per_label,
+    )
+    holdout_counts = _counts_by_label(
+        BANKING77_LABELS,
+        total=args.holdout_total,
+        per_label=args.holdout_per_label,
+    )
     for label in BANKING77_LABELS:
         train_rows = train_by_label.get(label, [])
         test_rows = test_by_label.get(label, [])
-        train_needed = args.train_per_label + args.dev_per_label
+        train_count = train_counts[label]
+        dev_count = dev_counts[label]
+        holdout_count = holdout_counts[label]
+        train_needed = train_count + dev_count
         if len(train_rows) < train_needed:
             raise ValueError(f"Not enough train examples for label {label!r}.")
-        if len(test_rows) < args.holdout_per_label:
+        if len(test_rows) < holdout_count:
             raise ValueError(f"Not enough test examples for label {label!r}.")
         rows.extend(
             _case_rows(
                 split_name="train",
                 source_split="train",
                 label=label,
-                examples=train_rows[: args.train_per_label],
+                examples=train_rows[:train_count],
             )
         )
         rows.extend(
@@ -59,7 +80,7 @@ def main() -> None:
                 split_name="dev",
                 source_split="train",
                 label=label,
-                examples=train_rows[args.train_per_label : train_needed],
+                examples=train_rows[train_count:train_needed],
             )
         )
         rows.extend(
@@ -67,7 +88,7 @@ def main() -> None:
                 split_name="holdout",
                 source_split="test",
                 label=label,
-                examples=test_rows[: args.holdout_per_label],
+                examples=test_rows[:holdout_count],
             )
         )
     out_path = Path(args.out)
@@ -92,6 +113,20 @@ def _rows_by_label(rows: list[dict[str, str]]) -> dict[str, list[dict[str, str]]
         if label in grouped:
             grouped[label].append(row)
     return grouped
+
+
+def _counts_by_label(labels: list[str], *, total: int, per_label: int | None) -> dict[str, int]:
+    if per_label is not None:
+        if per_label <= 0:
+            raise ValueError("per-label counts must be positive.")
+        return {label: per_label for label in labels}
+    if total < len(labels):
+        raise ValueError(f"Total count {total} is smaller than label count {len(labels)}.")
+    base, remainder = divmod(total, len(labels))
+    return {
+        label: base + (1 if index < remainder else 0)
+        for index, label in enumerate(labels)
+    }
 
 
 def _case_rows(

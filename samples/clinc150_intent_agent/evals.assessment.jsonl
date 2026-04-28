@@ -6,6 +6,7 @@
 {"expected": {"label": "account_blocked"}, "id": "dev-account_blocked-3", "input": "can you confirm my account's blocked and tell me why", "metadata": {"category": "account_blocked", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "account_blocked"}, "id": "holdout-account_blocked-1", "input": "what is up with my account, why is it blocked", "metadata": {"category": "account_blocked", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "account_blocked"}, "id": "holdout-account_blocked-2", "input": "is there a problem with my account, it appears to be blocked", "metadata": {"category": "account_blocked", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "account_blocked"}, "id": "holdout-account_blocked-3", "input": "can you check what the problem with my account is, it seems to b e blocked", "metadata": {"category": "account_blocked", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "application_status"}, "id": "train-application_status-1", "input": "my credit card application status", "metadata": {"category": "application_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "application_status"}, "id": "train-application_status-2", "input": "what status is my card application in", "metadata": {"category": "application_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "application_status"}, "id": "train-application_status-3", "input": "help with credit card application status", "metadata": {"category": "application_status", "source": "clinc150_train"}, "split": "train"}
@@ -14,6 +15,7 @@
 {"expected": {"label": "application_status"}, "id": "dev-application_status-3", "input": "what is the current status of my credit card application", "metadata": {"category": "application_status", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "application_status"}, "id": "holdout-application_status-1", "input": "let me know the credit card application status", "metadata": {"category": "application_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "application_status"}, "id": "holdout-application_status-2", "input": "can you tell me the credit card application status", "metadata": {"category": "application_status", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "application_status"}, "id": "holdout-application_status-3", "input": "check the status of my credit card application for me", "metadata": {"category": "application_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "balance"}, "id": "train-balance-1", "input": "what is my balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "balance"}, "id": "train-balance-2", "input": "check my bank balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "balance"}, "id": "train-balance-3", "input": "what's my bank balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
@@ -22,6 +24,7 @@
 {"expected": {"label": "balance"}, "id": "dev-balance-3", "input": "how much is in my pnc account", "metadata": {"category": "balance", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "balance"}, "id": "holdout-balance-1", "input": "check my checking balance", "metadata": {"category": "balance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "balance"}, "id": "holdout-balance-2", "input": "can you tell me my bank balance", "metadata": {"category": "balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "balance"}, "id": "holdout-balance-3", "input": "will you tell me my bank balance", "metadata": {"category": "balance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "bill_balance"}, "id": "train-bill_balance-1", "input": "can you check the balance on the water bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "bill_balance"}, "id": "train-bill_balance-2", "input": "please give me the full balance on my water bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "bill_balance"}, "id": "train-bill_balance-3", "input": "please find the current balance on my con edison bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
@@ -30,6 +33,7 @@
 {"expected": {"label": "bill_balance"}, "id": "dev-bill_balance-3", "input": "how much is my xfinity cable bill", "metadata": {"category": "bill_balance", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "bill_balance"}, "id": "holdout-bill_balance-1", "input": "tell me my water bill please", "metadata": {"category": "bill_balance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "bill_balance"}, "id": "holdout-bill_balance-2", "input": "what is the electricity bill", "metadata": {"category": "bill_balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_balance"}, "id": "holdout-bill_balance-3", "input": "how much will my monthly bill be", "metadata": {"category": "bill_balance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "bill_due"}, "id": "train-bill_due-1", "input": "when is my bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "bill_due"}, "id": "train-bill_due-2", "input": "when is the bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "bill_due"}, "id": "train-bill_due-3", "input": "when's the ac bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
@@ -38,6 +42,7 @@
 {"expected": {"label": "bill_due"}, "id": "dev-bill_due-3", "input": "when is the electric bill due", "metadata": {"category": "bill_due", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "bill_due"}, "id": "holdout-bill_due-1", "input": "is the bill due", "metadata": {"category": "bill_due", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "bill_due"}, "id": "holdout-bill_due-2", "input": "is the bill due today", "metadata": {"category": "bill_due", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_due"}, "id": "holdout-bill_due-3", "input": "when is my electric bill due by", "metadata": {"category": "bill_due", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "book_flight"}, "id": "train-book_flight-1", "input": "book a flight from la to madrid with southwest", "metadata": {"category": "book_flight", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "book_flight"}, "id": "train-book_flight-2", "input": "book me a flight from o'hare to las vegas on deltacom", "metadata": {"category": "book_flight", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "book_flight"}, "id": "train-book_flight-3", "input": "use delta to book me a flight from dallas to pittsburgh", "metadata": {"category": "book_flight", "source": "clinc150_train"}, "split": "train"}
@@ -46,6 +51,7 @@
 {"expected": {"label": "book_flight"}, "id": "dev-book_flight-3", "input": "i'm seeking a full circle flight from msy to msp for w to june 7", "metadata": {"category": "book_flight", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "book_flight"}, "id": "holdout-book_flight-1", "input": "book a delta flight to arizona from pittsburgh", "metadata": {"category": "book_flight", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "book_flight"}, "id": "holdout-book_flight-2", "input": "book a flight from new york to la for less than 200 dollars", "metadata": {"category": "book_flight", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "book_flight"}, "id": "holdout-book_flight-3", "input": "i need to book a flight on jet blue to boston from new york", "metadata": {"category": "book_flight", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "book_hotel"}, "id": "train-book_hotel-1", "input": "book me a hotel with good ratings in nashville", "metadata": {"category": "book_hotel", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "book_hotel"}, "id": "train-book_hotel-2", "input": "book a hotel in pa, harrisburg for the 10th to 15th", "metadata": {"category": "book_hotel", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "book_hotel"}, "id": "train-book_hotel-3", "input": "book me a hotel in st louis near the arch from march 2nd to 5th", "metadata": {"category": "book_hotel", "source": "clinc150_train"}, "split": "train"}
@@ -54,6 +60,7 @@
 {"expected": {"label": "book_hotel"}, "id": "dev-book_hotel-3", "input": "could you book me a hotel in afghanistan at the zoo for the 10th to the 15th", "metadata": {"category": "book_hotel", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "book_hotel"}, "id": "holdout-book_hotel-1", "input": "book me a hotel in jacksonville near the stadium from january 1st to 3rd", "metadata": {"category": "book_hotel", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "book_hotel"}, "id": "holdout-book_hotel-2", "input": "find me a hotel with good reviews in phoenix", "metadata": {"category": "book_hotel", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "book_hotel"}, "id": "holdout-book_hotel-3", "input": "can you find me a reputable hotel in honolulu", "metadata": {"category": "book_hotel", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "calendar"}, "id": "train-calendar-1", "input": "read my calendar events", "metadata": {"category": "calendar", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "calendar"}, "id": "train-calendar-2", "input": "what is on march 2 calendar", "metadata": {"category": "calendar", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "calendar"}, "id": "train-calendar-3", "input": "check my calendar for saturday", "metadata": {"category": "calendar", "source": "clinc150_train"}, "split": "train"}
@@ -62,6 +69,7 @@
 {"expected": {"label": "calendar"}, "id": "dev-calendar-3", "input": "check what's on my calendar for tuesday", "metadata": {"category": "calendar", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "calendar"}, "id": "holdout-calendar-1", "input": "is event on my calendar", "metadata": {"category": "calendar", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "calendar"}, "id": "holdout-calendar-2", "input": "is bowling on my calendar", "metadata": {"category": "calendar", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "calendar"}, "id": "holdout-calendar-3", "input": "read my calendar for march 7th", "metadata": {"category": "calendar", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "calendar_update"}, "id": "train-calendar_update-1", "input": "clear my calendar for tomorrow", "metadata": {"category": "calendar_update", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "calendar_update"}, "id": "train-calendar_update-2", "input": "clear my calendar on march 1st", "metadata": {"category": "calendar_update", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "calendar_update"}, "id": "train-calendar_update-3", "input": "delete that event from calendar", "metadata": {"category": "calendar_update", "source": "clinc150_train"}, "split": "train"}
@@ -70,6 +78,7 @@
 {"expected": {"label": "calendar_update"}, "id": "dev-calendar_update-3", "input": "can you remove this event from my calendar", "metadata": {"category": "calendar_update", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "calendar_update"}, "id": "holdout-calendar_update-1", "input": "please clear my calendar", "metadata": {"category": "calendar_update", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "calendar_update"}, "id": "holdout-calendar_update-2", "input": "clear my calendar on feb 28", "metadata": {"category": "calendar_update", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "calendar_update"}, "id": "holdout-calendar_update-3", "input": "clear my calendar for may 3rd", "metadata": {"category": "calendar_update", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "card_declined"}, "id": "train-card_declined-1", "input": "why was my card declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "card_declined"}, "id": "train-card_declined-2", "input": "yesterday, my card was declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "card_declined"}, "id": "train-card_declined-3", "input": "tell me why my card got declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
@@ -78,6 +87,7 @@
 {"expected": {"label": "card_declined"}, "id": "dev-card_declined-3", "input": "target declined my card and i don't know why", "metadata": {"category": "card_declined", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "card_declined"}, "id": "holdout-card_declined-1", "input": "my card declined", "metadata": {"category": "card_declined", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "card_declined"}, "id": "holdout-card_declined-2", "input": "my card got declined; why", "metadata": {"category": "card_declined", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "card_declined"}, "id": "holdout-card_declined-3", "input": "do you know why my card got declined", "metadata": {"category": "card_declined", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "credit_limit"}, "id": "train-credit_limit-1", "input": "credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "credit_limit"}, "id": "train-credit_limit-2", "input": "credit limit info", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "credit_limit"}, "id": "train-credit_limit-3", "input": "how is my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
@@ -86,6 +96,7 @@
 {"expected": {"label": "credit_limit"}, "id": "dev-credit_limit-3", "input": "what's the limit for my credit", "metadata": {"category": "credit_limit", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "credit_limit"}, "id": "holdout-credit_limit-1", "input": "tell me my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "credit_limit"}, "id": "holdout-credit_limit-2", "input": "how high is my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit"}, "id": "holdout-credit_limit-3", "input": "what is my visa credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-1", "input": "credit limit change", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-2", "input": "can you change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-3", "input": "change my credit limit, please", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
@@ -94,6 +105,7 @@
 {"expected": {"label": "credit_limit_change"}, "id": "dev-credit_limit_change-3", "input": "can you help me change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "credit_limit_change"}, "id": "holdout-credit_limit_change-1", "input": "can i change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "credit_limit_change"}, "id": "holdout-credit_limit_change-2", "input": "when can i change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit_change"}, "id": "holdout-credit_limit_change-3", "input": "i need to change the credit limit i have", "metadata": {"category": "credit_limit_change", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "damaged_card"}, "id": "train-damaged_card-1", "input": "i can't use my damaged card", "metadata": {"category": "damaged_card", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "damaged_card"}, "id": "train-damaged_card-2", "input": "my card is damaged and unusable", "metadata": {"category": "damaged_card", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "damaged_card"}, "id": "train-damaged_card-3", "input": "report the card has been damaged", "metadata": {"category": "damaged_card", "source": "clinc150_train"}, "split": "train"}
@@ -102,6 +114,7 @@
 {"expected": {"label": "damaged_card"}, "id": "dev-damaged_card-3", "input": "my card was cut by my kid", "metadata": {"category": "damaged_card", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "damaged_card"}, "id": "holdout-damaged_card-1", "input": "my card is damaged", "metadata": {"category": "damaged_card", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "damaged_card"}, "id": "holdout-damaged_card-2", "input": "how do i replace a damaged card", "metadata": {"category": "damaged_card", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "damaged_card"}, "id": "holdout-damaged_card-3", "input": "i want to report a damaged card", "metadata": {"category": "damaged_card", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "directions"}, "id": "train-directions-1", "input": "i want directions to the closest atm", "metadata": {"category": "directions", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "directions"}, "id": "train-directions-2", "input": "i need directions to get to olympia by bus", "metadata": {"category": "directions", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "directions"}, "id": "train-directions-3", "input": "i want to get directions to the closest atm", "metadata": {"category": "directions", "source": "clinc150_train"}, "split": "train"}
@@ -110,6 +123,7 @@
 {"expected": {"label": "directions"}, "id": "dev-directions-3", "input": "where is the nearest walmart", "metadata": {"category": "directions", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "directions"}, "id": "holdout-directions-1", "input": "get me directions to phoenix", "metadata": {"category": "directions", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "directions"}, "id": "holdout-directions-2", "input": "i want directions to phoenix", "metadata": {"category": "directions", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "directions"}, "id": "holdout-directions-3", "input": "give me directions to phoenix", "metadata": {"category": "directions", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "distance"}, "id": "train-distance-1", "input": "what is the distance to austin city limits from my hotel , the holiday inn at austin", "metadata": {"category": "distance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "distance"}, "id": "train-distance-2", "input": "how long is the ride to phoenix", "metadata": {"category": "distance", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "distance"}, "id": "train-distance-3", "input": "where is the closest gas station", "metadata": {"category": "distance", "source": "clinc150_train"}, "split": "train"}
@@ -118,6 +132,7 @@
 {"expected": {"label": "distance"}, "id": "dev-distance-3", "input": "how long is it to ann arbor by bus", "metadata": {"category": "distance", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "distance"}, "id": "holdout-distance-1", "input": "how far am i from orlando", "metadata": {"category": "distance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "distance"}, "id": "holdout-distance-2", "input": "when will i get to orlando", "metadata": {"category": "distance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "distance"}, "id": "holdout-distance-3", "input": "when will i arrive at hy-vee", "metadata": {"category": "distance", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "flight_status"}, "id": "train-flight_status-1", "input": "whats my delta flight's status", "metadata": {"category": "flight_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "flight_status"}, "id": "train-flight_status-2", "input": "give me the status of flight dl123", "metadata": {"category": "flight_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "flight_status"}, "id": "train-flight_status-3", "input": "tell me the status of flight dl123", "metadata": {"category": "flight_status", "source": "clinc150_train"}, "split": "train"}
@@ -126,6 +141,7 @@
 {"expected": {"label": "flight_status"}, "id": "dev-flight_status-3", "input": "could you tell me the status of flight dl123", "metadata": {"category": "flight_status", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "flight_status"}, "id": "holdout-flight_status-1", "input": "what's the status of by delta flight", "metadata": {"category": "flight_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "flight_status"}, "id": "holdout-flight_status-2", "input": "what's the status of my jetblue flight", "metadata": {"category": "flight_status", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "flight_status"}, "id": "holdout-flight_status-3", "input": "what's the status of my southwest flight", "metadata": {"category": "flight_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "freeze_account"}, "id": "train-freeze_account-1", "input": "freeze my account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "freeze_account"}, "id": "train-freeze_account-2", "input": "freeze my bank account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "freeze_account"}, "id": "train-freeze_account-3", "input": "please freeze my account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
@@ -134,6 +150,7 @@
 {"expected": {"label": "freeze_account"}, "id": "dev-freeze_account-3", "input": "can we stop my bank account", "metadata": {"category": "freeze_account", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "freeze_account"}, "id": "holdout-freeze_account-1", "input": "freeze my account for me", "metadata": {"category": "freeze_account", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "freeze_account"}, "id": "holdout-freeze_account-2", "input": "put a freeze on my account", "metadata": {"category": "freeze_account", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "freeze_account"}, "id": "holdout-freeze_account-3", "input": "can you freeze my bank account", "metadata": {"category": "freeze_account", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "lost_luggage"}, "id": "train-lost_luggage-1", "input": "i lost my luggage", "metadata": {"category": "lost_luggage", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "lost_luggage"}, "id": "train-lost_luggage-2", "input": "help, i lost my luggage", "metadata": {"category": "lost_luggage", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "lost_luggage"}, "id": "train-lost_luggage-3", "input": "how to find lost luggage", "metadata": {"category": "lost_luggage", "source": "clinc150_train"}, "split": "train"}
@@ -142,6 +159,7 @@
 {"expected": {"label": "lost_luggage"}, "id": "dev-lost_luggage-3", "input": "what to do if i lost my luggage", "metadata": {"category": "lost_luggage", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "lost_luggage"}, "id": "holdout-lost_luggage-1", "input": "is my luggage lost", "metadata": {"category": "lost_luggage", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "lost_luggage"}, "id": "holdout-lost_luggage-2", "input": "i think my luggage is lost", "metadata": {"category": "lost_luggage", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "lost_luggage"}, "id": "holdout-lost_luggage-3", "input": "it appears my luggage is lost", "metadata": {"category": "lost_luggage", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "order_status"}, "id": "train-order_status-1", "input": "order status", "metadata": {"category": "order_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "order_status"}, "id": "train-order_status-2", "input": "online order: status", "metadata": {"category": "order_status", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "order_status"}, "id": "train-order_status-3", "input": "check the status of my order", "metadata": {"category": "order_status", "source": "clinc150_train"}, "split": "train"}
@@ -150,6 +168,7 @@
 {"expected": {"label": "order_status"}, "id": "dev-order_status-3", "input": "was the order delivered", "metadata": {"category": "order_status", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "order_status"}, "id": "holdout-order_status-1", "input": "give me the status of my order", "metadata": {"category": "order_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "order_status"}, "id": "holdout-order_status-2", "input": "what's the updated status of my order", "metadata": {"category": "order_status", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "order_status"}, "id": "holdout-order_status-3", "input": "i need to track the status of my order", "metadata": {"category": "order_status", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "pay_bill"}, "id": "train-pay_bill-1", "input": "can i pay a bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "pay_bill"}, "id": "train-pay_bill-2", "input": "can i pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "pay_bill"}, "id": "train-pay_bill-3", "input": "please pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
@@ -158,6 +177,7 @@
 {"expected": {"label": "pay_bill"}, "id": "dev-pay_bill-3", "input": "tell me if you can help pay a bill", "metadata": {"category": "pay_bill", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "pay_bill"}, "id": "holdout-pay_bill-1", "input": "pay my light bill", "metadata": {"category": "pay_bill", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "pay_bill"}, "id": "holdout-pay_bill-2", "input": "i want to pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "pay_bill"}, "id": "holdout-pay_bill-3", "input": "can you help me pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "pin_change"}, "id": "train-pin_change-1", "input": "can i change my pin number", "metadata": {"category": "pin_change", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "pin_change"}, "id": "train-pin_change-2", "input": "change my amex pin to 1234", "metadata": {"category": "pin_change", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "pin_change"}, "id": "train-pin_change-3", "input": "help me change my pin number", "metadata": {"category": "pin_change", "source": "clinc150_train"}, "split": "train"}
@@ -166,6 +186,7 @@
 {"expected": {"label": "pin_change"}, "id": "dev-pin_change-3", "input": "i want to change the pin number on my credit union account", "metadata": {"category": "pin_change", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "pin_change"}, "id": "holdout-pin_change-1", "input": "change the pin on my savings account to 1234", "metadata": {"category": "pin_change", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "pin_change"}, "id": "holdout-pin_change-2", "input": "how do i change the account pin number for me", "metadata": {"category": "pin_change", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "pin_change"}, "id": "holdout-pin_change-3", "input": "i want to change my savings account pin to 1234", "metadata": {"category": "pin_change", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_reservation"}, "id": "train-restaurant_reservation-1", "input": "can you make a reservation for me at the restaurant", "metadata": {"category": "restaurant_reservation", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_reservation"}, "id": "train-restaurant_reservation-2", "input": "can you make a reservation at the restaurant for tonight", "metadata": {"category": "restaurant_reservation", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_reservation"}, "id": "train-restaurant_reservation-3", "input": "can you make a reservation at the restaurant for tomorrow", "metadata": {"category": "restaurant_reservation", "source": "clinc150_train"}, "split": "train"}
@@ -174,6 +195,7 @@
 {"expected": {"label": "restaurant_reservation"}, "id": "dev-restaurant_reservation-3", "input": "under the name zebee book a reservation at the xenophobe for 3", "metadata": {"category": "restaurant_reservation", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "restaurant_reservation"}, "id": "holdout-restaurant_reservation-1", "input": "make a reservation for chik-fil-a at 3 o' clock please", "metadata": {"category": "restaurant_reservation", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_reservation"}, "id": "holdout-restaurant_reservation-2", "input": "i want to eat at seven in the restaurant for two people", "metadata": {"category": "restaurant_reservation", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "restaurant_reservation"}, "id": "holdout-restaurant_reservation-3", "input": "i'd like to make a reservation at rooth chris, can you do that", "metadata": {"category": "restaurant_reservation", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_reviews"}, "id": "train-restaurant_reviews-1", "input": "does bjs get good reviews", "metadata": {"category": "restaurant_reviews", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_reviews"}, "id": "train-restaurant_reviews-2", "input": "does ihop have good reviews", "metadata": {"category": "restaurant_reviews", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_reviews"}, "id": "train-restaurant_reviews-3", "input": "tell me the reviews for bjs", "metadata": {"category": "restaurant_reviews", "source": "clinc150_train"}, "split": "train"}
@@ -182,6 +204,7 @@
 {"expected": {"label": "restaurant_reviews"}, "id": "dev-restaurant_reviews-3", "input": "can you inform if boston restaurant has good reviews", "metadata": {"category": "restaurant_reviews", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "restaurant_reviews"}, "id": "holdout-restaurant_reviews-1", "input": "oliver garden reviews", "metadata": {"category": "restaurant_reviews", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_reviews"}, "id": "holdout-restaurant_reviews-2", "input": "are ned's reviews good", "metadata": {"category": "restaurant_reviews", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "restaurant_reviews"}, "id": "holdout-restaurant_reviews-3", "input": "does cielo have good reviews", "metadata": {"category": "restaurant_reviews", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_suggestion"}, "id": "train-restaurant_suggestion-1", "input": "i am hungry and need a restaurant suggestion", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_suggestion"}, "id": "train-restaurant_suggestion-2", "input": "find an indian restaurant", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "restaurant_suggestion"}, "id": "train-restaurant_suggestion-3", "input": "find me an asian restaurant", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_train"}, "split": "train"}
@@ -190,6 +213,7 @@
 {"expected": {"label": "restaurant_suggestion"}, "id": "dev-restaurant_suggestion-3", "input": "where should we eat tonight", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "restaurant_suggestion"}, "id": "holdout-restaurant_suggestion-1", "input": "can you suggest a thai restaurant", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "restaurant_suggestion"}, "id": "holdout-restaurant_suggestion-2", "input": "give me restaurant reccomendations", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "restaurant_suggestion"}, "id": "holdout-restaurant_suggestion-3", "input": "can you suggest a french restaurant", "metadata": {"category": "restaurant_suggestion", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "report_fraud"}, "id": "train-report_fraud-1", "input": "report fraud on my card", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "report_fraud"}, "id": "train-report_fraud-2", "input": "please file a fraud report", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "report_fraud"}, "id": "train-report_fraud-3", "input": "can you report credit card fraud for me", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
@@ -198,6 +222,7 @@
 {"expected": {"label": "report_fraud"}, "id": "dev-report_fraud-3", "input": "i want to report fraud on my american express", "metadata": {"category": "report_fraud", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "report_fraud"}, "id": "holdout-report_fraud-1", "input": "who do i contact to report fraud on my visa", "metadata": {"category": "report_fraud", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "report_fraud"}, "id": "holdout-report_fraud-2", "input": "i need to report fraudulent activity on my usaa card", "metadata": {"category": "report_fraud", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "report_fraud"}, "id": "holdout-report_fraud-3", "input": "i would like to report fraudulent activity on my chase card", "metadata": {"category": "report_fraud", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "report_lost_card"}, "id": "train-report_lost_card-1", "input": "report lost card", "metadata": {"category": "report_lost_card", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "report_lost_card"}, "id": "train-report_lost_card-2", "input": "report my card as lost", "metadata": {"category": "report_lost_card", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "report_lost_card"}, "id": "train-report_lost_card-3", "input": "report a lost card here", "metadata": {"category": "report_lost_card", "source": "clinc150_train"}, "split": "train"}
@@ -206,6 +231,7 @@
 {"expected": {"label": "report_lost_card"}, "id": "dev-report_lost_card-3", "input": "if i lost my card how do i report it", "metadata": {"category": "report_lost_card", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "report_lost_card"}, "id": "holdout-report_lost_card-1", "input": "my report card was lost help!", "metadata": {"category": "report_lost_card", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "report_lost_card"}, "id": "holdout-report_lost_card-2", "input": "lost report card, need new one", "metadata": {"category": "report_lost_card", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "report_lost_card"}, "id": "holdout-report_lost_card-3", "input": "set up a report for a lost card", "metadata": {"category": "report_lost_card", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "shopping_list"}, "id": "train-shopping_list-1", "input": "show shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "shopping_list"}, "id": "train-shopping_list-2", "input": "display shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "shopping_list"}, "id": "train-shopping_list-3", "input": "read off shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_train"}, "split": "train"}
@@ -214,6 +240,7 @@
 {"expected": {"label": "shopping_list"}, "id": "dev-shopping_list-3", "input": "check my shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "shopping_list"}, "id": "holdout-shopping_list-1", "input": "is milk on my shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "shopping_list"}, "id": "holdout-shopping_list-2", "input": "please read my shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "shopping_list"}, "id": "holdout-shopping_list-3", "input": "what is on the shopping list", "metadata": {"category": "shopping_list", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "shopping_list_update"}, "id": "train-shopping_list_update-1", "input": "update my shopping list, delete canned olives", "metadata": {"category": "shopping_list_update", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "shopping_list_update"}, "id": "train-shopping_list_update-2", "input": "put film on my shopping list", "metadata": {"category": "shopping_list_update", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "shopping_list_update"}, "id": "train-shopping_list_update-3", "input": "put bread on my shopping list", "metadata": {"category": "shopping_list_update", "source": "clinc150_train"}, "split": "train"}
@@ -222,51 +249,40 @@
 {"expected": {"label": "shopping_list_update"}, "id": "dev-shopping_list_update-3", "input": "do i have cheese on my shopping list if not please add it", "metadata": {"category": "shopping_list_update", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "shopping_list_update"}, "id": "holdout-shopping_list_update-1", "input": "add milk to my shopping list", "metadata": {"category": "shopping_list_update", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "shopping_list_update"}, "id": "holdout-shopping_list_update-2", "input": "put milk on my shopping list", "metadata": {"category": "shopping_list_update", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "shopping_list_update"}, "id": "holdout-shopping_list_update-3", "input": "i need milk on my shopping list", "metadata": {"category": "shopping_list_update", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "transactions"}, "id": "train-transactions-1", "input": "show me recent transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "transactions"}, "id": "train-transactions-2", "input": "pull up my grocery transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
-{"expected": {"label": "transactions"}, "id": "train-transactions-3", "input": "retrieve my recent transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "transactions"}, "id": "dev-transactions-1", "input": "show me all new transactions", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "transactions"}, "id": "dev-transactions-2", "input": "i want to see transactions from this month", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
-{"expected": {"label": "transactions"}, "id": "dev-transactions-3", "input": "show me all transactions for current statement", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "transactions"}, "id": "holdout-transactions-1", "input": "show my transactions", "metadata": {"category": "transactions", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "transactions"}, "id": "holdout-transactions-2", "input": "i need to know all my spending transactions", "metadata": {"category": "transactions", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "transfer"}, "id": "train-transfer-1", "input": "money transfer request", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "transfer"}, "id": "train-transfer-2", "input": "please transfer my funds", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
-{"expected": {"label": "transfer"}, "id": "train-transfer-3", "input": "transfer between two accounts", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "transfer"}, "id": "dev-transfer-1", "input": "transfer funds to the other account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "transfer"}, "id": "dev-transfer-2", "input": "please transfer half of my funds to an alternate account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
-{"expected": {"label": "transfer"}, "id": "dev-transfer-3", "input": "transfer 50 dollars from my checking account to my money market account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "transfer"}, "id": "holdout-transfer-1", "input": "how much money can i transfer today", "metadata": {"category": "transfer", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "transfer"}, "id": "holdout-transfer-2", "input": "i need to make a transfer of my money", "metadata": {"category": "transfer", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "travel_alert"}, "id": "train-travel_alert-1", "input": "argentina travel alert yes or no", "metadata": {"category": "travel_alert", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "travel_alert"}, "id": "train-travel_alert-2", "input": "is there a travel alert for spain", "metadata": {"category": "travel_alert", "source": "clinc150_train"}, "split": "train"}
-{"expected": {"label": "travel_alert"}, "id": "train-travel_alert-3", "input": "does argentina have a travel alert", "metadata": {"category": "travel_alert", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "travel_alert"}, "id": "dev-travel_alert-1", "input": "is france safe to travel to", "metadata": {"category": "travel_alert", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "travel_alert"}, "id": "dev-travel_alert-2", "input": "is it safe to travel to mexico", "metadata": {"category": "travel_alert", "source": "clinc150_val"}, "split": "dev"}
-{"expected": {"label": "travel_alert"}, "id": "dev-travel_alert-3", "input": "are there any travel alerts for brazil", "metadata": {"category": "travel_alert", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "travel_alert"}, "id": "holdout-travel_alert-1", "input": "travel alert in cuba", "metadata": {"category": "travel_alert", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "travel_alert"}, "id": "holdout-travel_alert-2", "input": "is there a travel alert in spain", "metadata": {"category": "travel_alert", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "travel_notification"}, "id": "train-travel_notification-1", "input": "let my bank know i will be on travel to fes", "metadata": {"category": "travel_notification", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "travel_notification"}, "id": "train-travel_notification-2", "input": "inform my bank i will travel to brazil from june 1st to july 1st", "metadata": {"category": "travel_notification", "source": "clinc150_train"}, "split": "train"}
-{"expected": {"label": "travel_notification"}, "id": "train-travel_notification-3", "input": "tell my bank i'm going to france", "metadata": {"category": "travel_notification", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "travel_notification"}, "id": "dev-travel_notification-1", "input": "let my bank know that i am going to tokyo", "metadata": {"category": "travel_notification", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "travel_notification"}, "id": "dev-travel_notification-2", "input": "my bank needs to be aware of my trip to spain", "metadata": {"category": "travel_notification", "source": "clinc150_val"}, "split": "dev"}
-{"expected": {"label": "travel_notification"}, "id": "dev-travel_notification-3", "input": "tell my bank i'll be in cuba beginning the 2nd", "metadata": {"category": "travel_notification", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "travel_notification"}, "id": "holdout-travel_notification-1", "input": "send a notification to my bank of my travel dates from february 19th to 26th to peru", "metadata": {"category": "travel_notification", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "travel_notification"}, "id": "holdout-travel_notification-2", "input": "must call my bank about my travel plans", "metadata": {"category": "travel_notification", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "weather"}, "id": "train-weather-1", "input": "weather", "metadata": {"category": "weather", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "weather"}, "id": "train-weather-2", "input": "how's the weather", "metadata": {"category": "weather", "source": "clinc150_train"}, "split": "train"}
-{"expected": {"label": "weather"}, "id": "train-weather-3", "input": "costa mesa weather", "metadata": {"category": "weather", "source": "clinc150_train"}, "split": "train"}
 {"expected": {"label": "weather"}, "id": "dev-weather-1", "input": "what's today's weather", "metadata": {"category": "weather", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "weather"}, "id": "dev-weather-2", "input": "weather forecast please", "metadata": {"category": "weather", "source": "clinc150_val"}, "split": "dev"}
-{"expected": {"label": "weather"}, "id": "dev-weather-3", "input": "what's the weather like", "metadata": {"category": "weather", "source": "clinc150_val"}, "split": "dev"}
 {"expected": {"label": "weather"}, "id": "holdout-weather-1", "input": "current weather", "metadata": {"category": "weather", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "weather"}, "id": "holdout-weather-2", "input": "how is the weather", "metadata": {"category": "weather", "source": "clinc150_test"}, "split": "holdout"}
 {"expected": {"label": "oos"}, "id": "train-oos-1", "input": "how much is an overdraft fee for bank", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
 {"expected": {"label": "oos"}, "id": "train-oos-2", "input": "why are exponents preformed before multiplication in the order of operations", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
-{"expected": {"label": "oos"}, "id": "train-oos-3", "input": "what size wipers does this car take", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
 {"expected": {"label": "oos"}, "id": "dev-oos-1", "input": "set a warning for when my bank account starts running low", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
 {"expected": {"label": "oos"}, "id": "dev-oos-2", "input": "a show on broadway", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
-{"expected": {"label": "oos"}, "id": "dev-oos-3", "input": "who has the best record in the nfl", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
 {"expected": {"label": "oos"}, "id": "holdout-oos-1", "input": "how much has the dow changed today", "metadata": {"category": "oos", "source": "clinc150_oos_test"}, "split": "holdout"}
 {"expected": {"label": "oos"}, "id": "holdout-oos-2", "input": "how many prime numbers are there between 0 and 100", "metadata": {"category": "oos", "source": "clinc150_oos_test"}, "split": "holdout"}
