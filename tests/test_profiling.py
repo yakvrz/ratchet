@@ -16,7 +16,7 @@ from ratchet.optimizer import (
     _select_full_dev_candidates,
     _simplification_variants,
 )
-from ratchet.results import CaseEvaluation, PatchSummary
+from ratchet.results import CaseEvaluation, Comparison, PatchSummary
 from ratchet.transforms import CandidateProposal, Intervention, TransformContextKey
 from ratchet.types import (
     AgentPatch,
@@ -108,6 +108,7 @@ def candidate_state(
     *,
     pass_count: int,
     cost_usd: float = 0.001,
+    score_delta: float | None = None,
 ) -> CandidateEvaluationState:
     return CandidateEvaluationState(
         candidate=candidate,
@@ -116,6 +117,20 @@ def candidate_state(
         proposal_patch_hash=f"proposal-{candidate.transform_family}-{pass_count}-{cost_usd}",
         transform_context=TransformContextKey.from_candidate(candidate),
         summary=selection_summary(candidate.patch, pass_count=pass_count, cost_usd=cost_usd),
+        comparison=(
+            Comparison(
+                score_delta=score_delta,
+                score_ci=(score_delta, score_delta),
+                cost_delta=0.0,
+                cost_ci=(0.0, 0.0),
+                token_delta=0.0,
+                token_ci=(0.0, 0.0),
+                latency_delta=0.0,
+                latency_ci=(0.0, 0.0),
+            )
+            if score_delta is not None
+            else None
+        ),
     )
 
 
@@ -163,6 +178,49 @@ def prompt_candidate(name: str, *, comparison_group: str = "prompt-exp") -> Cand
                 )
             ]
         ),
+    )
+
+
+def output_contract_candidate(name: str, *, comparison_group: str = "contract-exp") -> CandidateProposal:
+    return CandidateProposal(
+        transform_family="output_contract_tightening",
+        mechanism_class="output_contract_fix",
+        intervention=Intervention(kind="patch", payload={}),
+        transform_instance=name,
+        comparison_group=comparison_group,
+        patch=AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="add_output_constraint",
+                    target="output_contract",
+                    value=f"Return compact valid JSON only: {name}",
+                )
+            ]
+        ),
+    )
+
+
+def experiment_role_candidate(
+    name: str,
+    *,
+    role: str,
+    comparison_group: str = "experiment-exp",
+) -> CandidateProposal:
+    candidate = prompt_candidate(name, comparison_group=comparison_group)
+    return CandidateProposal(
+        transform_family=candidate.transform_family,
+        intervention=candidate.intervention,
+        transform_instance=candidate.transform_instance,
+        transform_parameters=dict(candidate.transform_parameters),
+        mechanism_class=candidate.mechanism_class,
+        experiment_id=candidate.experiment_id,
+        candidate_role=role,
+        comparison_group=candidate.comparison_group,
+        target_slice=candidate.target_slice,
+        hypothesis=candidate.hypothesis,
+        expected_effects=dict(candidate.expected_effects),
+        evaluation_plan=candidate.evaluation_plan,
+        patch=candidate.patch,
     )
 
 
@@ -423,6 +481,60 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual([state.candidate.transform_instance for state in selected], ["best"])
         self.assertEqual(weak.frontier_status, "screened_out")
         self.assertEqual(good.frontier_status, "screened_out")
+
+    def test_full_dev_selection_preserves_strong_signal_output_contract_candidate(self) -> None:
+        best_absolute = candidate_state(prompt_candidate("best", comparison_group="exp"), pass_count=10, score_delta=0.02)
+        strong_contract = candidate_state(
+            output_contract_candidate("close-json", comparison_group="exp"),
+            pass_count=7,
+            score_delta=0.22,
+        )
+        weak = candidate_state(prompt_candidate("weak", comparison_group="exp"), pass_count=6, score_delta=0.01)
+
+        selected = _select_full_dev_candidates(
+            [weak, strong_contract, best_absolute],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        selected_instances = {state.candidate.transform_instance for state in selected}
+        self.assertEqual(selected_instances, {"best", "close-json"})
+        self.assertEqual(weak.frontier_status, "screened_out")
+        self.assertIn("experiment-aware batch ranking", weak.rejection_reason or "")
+
+    def test_full_dev_selection_preserves_control_or_ablation_role(self) -> None:
+        atomic = candidate_state(experiment_role_candidate("atomic", role="atomic"), pass_count=10)
+        control = candidate_state(experiment_role_candidate("control", role="control"), pass_count=8)
+        weak = candidate_state(experiment_role_candidate("weak", role="atomic"), pass_count=7)
+
+        selected = _select_full_dev_candidates(
+            [weak, control, atomic],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        selected_roles = {state.candidate.candidate_role for state in selected}
+        selected_instances = {state.candidate.transform_instance for state in selected}
+        self.assertIn("control", selected_roles)
+        self.assertEqual(selected_instances, {"atomic", "control"})
+        self.assertEqual(weak.frontier_status, "screened_out")
+
+    def test_full_dev_selection_preserves_competitive_composed_candidate(self) -> None:
+        atomic = candidate_state(experiment_role_candidate("atomic", role="atomic"), pass_count=10, score_delta=0.08)
+        composed = candidate_state(
+            experiment_role_candidate("composed", role="composed"),
+            pass_count=9,
+            score_delta=0.06,
+        )
+        weak = candidate_state(experiment_role_candidate("weak", role="composed"), pass_count=8, score_delta=0.01)
+
+        selected = _select_full_dev_candidates(
+            [weak, composed, atomic],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        selected_instances = {state.candidate.transform_instance for state in selected}
+        self.assertEqual(selected_instances, {"atomic", "composed"})
+        self.assertEqual(weak.frontier_status, "screened_out")
+        self.assertIn("experiment role ranking", weak.rejection_reason or "")
 
     def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
         candidate = CandidateProposal.from_dict(

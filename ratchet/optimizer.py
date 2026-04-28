@@ -81,7 +81,10 @@ MAX_SIMPLIFICATION_PARENT_COUNT = 2
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
+MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
 MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP = 2
+FULL_DEV_STRONG_SIGNAL_SCORE_DELTA = 0.10
+FULL_DEV_COMPOSED_COMPETITIVE_MARGIN = 0.05
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -1936,11 +1939,46 @@ def _select_full_dev_candidates(
     selected: list[CandidateEvaluationState] = []
     for group_states in by_group.values():
         ranked = sorted(group_states, key=lambda state: _candidate_full_dev_sort_key(state, objective))
-        group_selected = ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP]
+        group_selected: list[CandidateEvaluationState] = []
+        _append_unique_states(group_selected, ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP])
+
+        role_candidates = [
+            state
+            for state in ranked
+            if str(state.candidate.candidate_role or "").lower() in {"control", "ablation"}
+        ]
+        _append_unique_states(
+            group_selected,
+            role_candidates[:1],
+            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+        )
+
+        best_delta = max((_candidate_score_delta(state) for state in ranked), default=0.0)
+        composed_candidates = [
+            state
+            for state in ranked
+            if str(state.candidate.candidate_role or "").lower() == "composed"
+            and _candidate_score_delta(state) >= max(0.0, best_delta - FULL_DEV_COMPOSED_COMPETITIVE_MARGIN)
+        ]
+        _append_unique_states(
+            group_selected,
+            composed_candidates[:1],
+            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+        )
+
+        strong_signal_candidates = [state for state in ranked if _has_strong_full_dev_signal(state)]
+        _append_unique_states(
+            group_selected,
+            strong_signal_candidates,
+            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+        )
+
         few_shot_variants = [state for state in ranked if _is_few_shot_variant_state(state)]
-        for state in few_shot_variants[:MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP]:
-            if all(state is not item for item in group_selected):
-                group_selected.append(state)
+        _append_unique_states(
+            group_selected,
+            few_shot_variants[:MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP],
+            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
+        )
         selected_ids = {id(state) for state in group_selected}
         for state in group_states:
             if id(state) in selected_ids:
@@ -1950,12 +1988,35 @@ def _select_full_dev_candidates(
                     "screened out before full_dev by few-shot compression ranking "
                     f"(cap {MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP} variants per comparison group)"
                 )
+            elif _has_strong_full_dev_signal(state):
+                state.rejection_reason = (
+                    "screened out before full_dev by experiment full-dev cap despite strong small-dev signal "
+                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group)"
+                )
+            elif str(state.candidate.candidate_role or "").lower() in {"control", "ablation", "composed"}:
+                state.rejection_reason = (
+                    "screened out before full_dev by experiment role ranking "
+                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group)"
+                )
             else:
-                state.rejection_reason = "screened out before full_dev by batch ranking"
+                state.rejection_reason = "screened out before full_dev by experiment-aware batch ranking"
             state.frontier_status = "screened_out"
             state.accepted = False
         selected.extend(group_selected)
     return sorted(selected, key=lambda state: _candidate_stage_sort_key(state, objective))
+
+
+def _append_unique_states(
+    target: list[CandidateEvaluationState],
+    candidates: Iterable[CandidateEvaluationState],
+    *,
+    limit: int | None = None,
+) -> None:
+    for state in candidates:
+        if limit is not None and len(target) >= limit:
+            return
+        if all(state is not item for item in target):
+            target.append(state)
 
 
 def _candidate_full_dev_sort_key(
@@ -1986,6 +2047,18 @@ def _is_few_shot_variant_state(state: CandidateEvaluationState) -> bool:
     if candidate.patch.metadata.get("few_shot_variant"):
         return True
     return _few_shot_example_count(candidate) > 0
+
+
+def _has_strong_full_dev_signal(state: CandidateEvaluationState) -> bool:
+    if state.candidate.transform_family != "output_contract_tightening":
+        return False
+    return _candidate_score_delta(state) >= FULL_DEV_STRONG_SIGNAL_SCORE_DELTA
+
+
+def _candidate_score_delta(state: CandidateEvaluationState) -> float:
+    if state.comparison is None:
+        return 0.0
+    return float(state.comparison.score_delta)
 
 
 def _finalize_candidate_state(state: CandidateEvaluationState, reference: PatchSummary) -> None:
