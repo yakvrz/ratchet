@@ -213,7 +213,6 @@ mode = "correctness"
 [ratchet.objective.constraints]
 allowed_edits = ["instruction", "model", "runtime", "output"]
 allowed_models = ["primary", "cheaper"]
-max_cost_ratio = 1.0
 max_latency_ratio = 1.1
 """
 

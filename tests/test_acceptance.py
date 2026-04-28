@@ -132,6 +132,23 @@ class AcceptanceGateTests(unittest.TestCase):
         passed, _ = final_gate(baseline, patch_summary, OptimizationObjective(mode="correctness"))
         self.assertTrue(passed)
 
+    def test_correctness_mode_does_not_apply_implicit_cost_guard(self) -> None:
+        baseline = make_summary("baseline", [0.0] * 12, [0.001] * 12, [100] * 12, [1.0] * 12)
+        patch_summary = make_summary("patch_summary", [1.0] * 12, [0.050] * 12, [300] * 12, [1.0] * 12)
+        gate = final_gate_status(baseline, patch_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "validated")
+
+    def test_explicit_correctness_cost_ratio_remains_a_hard_constraint(self) -> None:
+        baseline = make_summary("baseline", [0.0] * 12, [0.001] * 12, [100] * 12, [1.0] * 12)
+        patch_summary = make_summary("patch_summary", [1.0] * 12, [0.050] * 12, [300] * 12, [1.0] * 12)
+        objective = OptimizationObjective(
+            mode="correctness",
+            constraints=OptimizationConstraints(max_cost_ratio=3.0),
+        )
+        gate = final_gate_status(baseline, patch_summary, objective)
+        self.assertEqual(gate.status, "failed")
+        self.assertIn("cost constraint", gate.reason or "")
+
     def test_correctness_dev_acceptance_rejects_pass_count_regression_despite_score_gain(self) -> None:
         baseline = make_summary("baseline", [1.0, 0.0, 0.0], [0.002] * 3, [100] * 3, [1.0] * 3)
         patch_summary = make_summary("patch_summary", [0.9, 0.9, 0.9], [0.002] * 3, [100] * 3, [1.0] * 3)

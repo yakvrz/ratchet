@@ -11,7 +11,6 @@ from ratchet.types import OptimizationObjective
 
 
 NON_INFERIORITY_MARGIN = 0.01
-DEFAULT_COST_GUARD = 3.0
 DEFAULT_LATENCY_GUARD = 3.0
 DEFAULT_COST_MODE_LATENCY_GUARD = 1.15
 SCORE_EQUIVALENCE_FLOOR = 0.05
@@ -183,8 +182,6 @@ class GatePredicate:
                 f"(score delta {score_delta:.4f} < required {required_score_delta:.4f})"
             )
         max_cost_ratio = constraints.max_cost_ratio
-        if max_cost_ratio is None:
-            max_cost_ratio = DEFAULT_COST_GUARD if self.mode == "correctness" else None
         if max_cost_ratio is not None and baseline.mean_cost_usd > 0:
             if candidate.mean_cost_usd > baseline.mean_cost_usd * max_cost_ratio:
                 return (
