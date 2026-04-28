@@ -1,16 +1,43 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Iterator
 
 from openai import APIConnectionError, APITimeoutError, InternalServerError, OpenAI, RateLimitError
 
 from ratchet.pricing import estimate_cost_usd
 
 GEMINI_OPENAI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_MODEL_TIMEOUT_S = 90.0
+DEFAULT_MODEL_MAX_ATTEMPTS = 8
+_REQUEST_TIMEOUT_S: ContextVar[float | None] = ContextVar("ratchet_request_timeout_s", default=None)
+_REQUEST_MAX_ATTEMPTS: ContextVar[int | None] = ContextVar("ratchet_request_max_attempts", default=None)
+
+
+@contextmanager
+def model_request_limits(
+    *,
+    timeout_s: float | int | None = None,
+    max_attempts: int | None = None,
+) -> Iterator[None]:
+    """Temporarily constrain model-client requests made in this context.
+
+    Ratchet's optimizer uses this while evaluating target-agent cases. The
+    optimizer already owns case-level retries, so target-agent model calls
+    should not perform a long nested retry loop inside a single case attempt.
+    """
+    timeout_token = _REQUEST_TIMEOUT_S.set(float(timeout_s) if timeout_s is not None and timeout_s > 0 else None)
+    attempts_token = _REQUEST_MAX_ATTEMPTS.set(max_attempts if max_attempts is not None and max_attempts > 0 else None)
+    try:
+        yield
+    finally:
+        _REQUEST_TIMEOUT_S.reset(timeout_token)
+        _REQUEST_MAX_ATTEMPTS.reset(attempts_token)
 
 
 def load_env_file(path: str = ".env") -> None:
@@ -170,8 +197,11 @@ class ResponsesModelClient:
             if not api_key:
                 raise RuntimeError("OPENAI_API_KEY is missing from the environment or .env")
             self.client = OpenAI(api_key=api_key)
-        kwargs.setdefault("timeout", 90)
-        return _with_retries(lambda: self.client.responses.create(**kwargs))
+        kwargs.setdefault("timeout", _current_request_timeout())
+        return _with_retries(
+            lambda: self.client.responses.create(**kwargs),
+            max_attempts=_current_request_max_attempts(),
+        )
 
     def _create_gemini_chat_response(self, **kwargs: Any) -> CompatResponse:
         if self.gemini_client is None:
@@ -203,9 +233,11 @@ class ResponsesModelClient:
             request["tool_choice"] = "auto"
         if response_format and not include_tools:
             request["response_format"] = response_format
-        if kwargs.get("timeout") is not None:
-            request["timeout"] = kwargs["timeout"]
-        completion = _with_retries(lambda: self.gemini_client.chat.completions.create(**request))
+        request["timeout"] = kwargs.get("timeout") or _current_request_timeout()
+        completion = _with_retries(
+            lambda: self.gemini_client.chat.completions.create(**request),
+            max_attempts=_current_request_max_attempts(),
+        )
         return self._compat_response(completion, messages)
 
     def _gemini_messages(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
@@ -277,10 +309,19 @@ class ResponsesModelClient:
         return response
 
 
-def _with_retries(create: Any) -> Any:
+def _current_request_timeout() -> float:
+    return float(_REQUEST_TIMEOUT_S.get() or DEFAULT_MODEL_TIMEOUT_S)
+
+
+def _current_request_max_attempts() -> int:
+    return int(_REQUEST_MAX_ATTEMPTS.get() or DEFAULT_MODEL_MAX_ATTEMPTS)
+
+
+def _with_retries(create: Any, *, max_attempts: int | None = None) -> Any:
+    attempts = max(1, int(max_attempts or DEFAULT_MODEL_MAX_ATTEMPTS))
     delay_s = 1.0
     last_error: Exception | None = None
-    for _ in range(8):
+    for _ in range(attempts):
         try:
             return create()
         except RateLimitError as error:

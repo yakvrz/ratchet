@@ -16,6 +16,7 @@ from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
 from ratchet.experiments import TaskTheory, build_task_theory
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
+from ratchet.model_client import model_request_limits
 from ratchet.objectives import (
     behavior_flip_summary,
     constraint_rejection_reason,
@@ -1715,7 +1716,10 @@ class RatchetOptimizer:
         for attempt in range(1, total_attempts + 1):
             try:
                 last_phase = "run_case"
-                with case_timeout(self.case_timeout_s):
+                with case_timeout(self.case_timeout_s), model_request_limits(
+                    timeout_s=self.case_timeout_s,
+                    max_attempts=1,
+                ):
                     record = self.adapter.run_case(case, effective_patch)
                 if not isinstance(record, RunRecord):
                     raise TypeError(f"run_case returned {type(record).__name__}, expected RunRecord.")
@@ -1724,7 +1728,10 @@ class RatchetOptimizer:
                 except TypeError as error:
                     raise TypeError("run_case returned a non-JSON-serializable output.") from error
                 last_phase = "grade"
-                with case_timeout(self.case_timeout_s):
+                with case_timeout(self.case_timeout_s), model_request_limits(
+                    timeout_s=self.case_timeout_s,
+                    max_attempts=1,
+                ):
                     grade = self.adapter.grade(case, record.output)
                 if not isinstance(grade, GradeResult):
                     raise TypeError(f"grade returned {type(grade).__name__}, expected GradeResult.")
@@ -1753,7 +1760,7 @@ class RatchetOptimizer:
         assert last_error is not None
         elapsed = time.perf_counter() - started_at
         message = f"{type(last_error).__name__}: {last_error}"
-        if isinstance(last_error, TimeoutError):
+        if _is_timeout_error(last_error):
             with self._stats_lock:
                 self.stats.timeouts += 1
             labels = ["timeout"]
@@ -1970,6 +1977,16 @@ def _is_expensive_summary(
     if candidate is None or baseline.mean_cost_usd <= 0:
         return False
     return candidate.mean_cost_usd > baseline.mean_cost_usd * cost_ratio
+
+
+def _is_timeout_error(error: Exception) -> bool:
+    if isinstance(error, TimeoutError):
+        return True
+    error_type = type(error).__name__.lower()
+    if "timeout" in error_type:
+        return True
+    message = str(error).lower()
+    return "timed out" in message or "timeout" in message
 
 
 def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[str, Any]) -> bool:

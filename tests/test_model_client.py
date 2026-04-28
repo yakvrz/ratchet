@@ -10,6 +10,7 @@ from ratchet.model_client import (
     GEMINI_OPENAI_BASE_URL,
     ResponsesModelClient,
     error_response_diagnostics,
+    model_request_limits,
     validate_optimizer_model_access,
 )
 
@@ -141,6 +142,22 @@ class GeminiCompatClientTests(unittest.TestCase):
             self.assertNotIn("maxItems", schema["properties"]["patches"])
             value_schema = schema["properties"]["patches"]["items"]["properties"]["value"]
             self.assertEqual(value_schema["anyOf"], [{"type": "string"}, {"type": "boolean"}])
+
+    def test_model_request_limits_apply_to_gemini_compat_requests(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            env_path = Path(tmp) / ".env"
+            env_path.write_text("GEMINI_API_KEY=test-gemini-key\n")
+
+            with patch.dict("os.environ", {}, clear=True), patch("ratchet.model_client.OpenAI", FakeOpenAI):
+                client = ResponsesModelClient(env_path=str(env_path))
+                with model_request_limits(timeout_s=7, max_attempts=1):
+                    client.create_response(
+                        model="gemini-2.5-flash",
+                        input="hello",
+                    )
+
+            request = FakeOpenAI.instances[0].chat_completions.requests[0]
+            self.assertEqual(request["timeout"], 7.0)
 
     def test_gemini_tool_calls_are_resumed_as_chat_tool_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
