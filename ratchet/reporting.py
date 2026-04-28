@@ -240,7 +240,7 @@ class RatchetReporter:
             "",
             *self._frontier_status_rows(result),
             "",
-            "## Validated Frontier",
+            "## Holdout Frontier",
             "",
             *self._frontier_variant_rows(result),
             "",
@@ -517,9 +517,19 @@ class RatchetReporter:
         variants = result.frontier_recommendation.get("frontier_variants") or []
         if not variants:
             if result.holdout_patches:
+                statuses = {
+                    str(item.get("patch_hash")): item
+                    for item in result.finalist_statuses
+                    if item.get("patch_hash")
+                }
                 variants = [
                     {
-                        "role": "validated_candidate",
+                        "role": "holdout_candidate"
+                        + (
+                            f" ({statuses.get(item.patch_hash, {}).get('status')})"
+                            if statuses.get(item.patch_hash, {}).get("status")
+                            else ""
+                        ),
                         "patch_hash": item.patch_hash,
                         "pass_count": item.pass_count,
                         "case_count": item.case_count,
@@ -540,7 +550,7 @@ class RatchetReporter:
                     for item in result.holdout_patches
                 ]
             else:
-                return ["No validated frontier candidates were available."]
+                return ["No holdout finalist candidates were available."]
         rows = [
             "| Role | Patch | Holdout | Score | Cost | Tokens | Latency | Ops |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",

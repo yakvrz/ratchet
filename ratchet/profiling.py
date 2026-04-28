@@ -164,7 +164,7 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
 def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for row in proposals:
-        reason = str(row.get("rejection_reason") or "")
+        reason = str(row.get("rejection_reason") or row.get("constraint_warning") or "")
         if row.get("transform_family") != "model_substitution" or "cost constraint rejected" not in reason:
             continue
         rows.append(

@@ -554,6 +554,19 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["patch_hash"], "patch-1")
 
+    def test_cost_rejected_model_substitution_uses_constraint_warning(self) -> None:
+        rows = quality_cost_tradeoffs(
+            [
+                {
+                    "transform_family": "model_substitution",
+                    "patch_hash": "patch-1",
+                    "constraint_warning": "cost constraint rejected patch ($0.02 > 3.00x baseline)",
+                    "metrics": {"pass_count": 10, "case_count": 12, "mean_cost_usd": 0.02},
+                }
+            ]
+        )
+        self.assertEqual(len(rows), 1)
+
     def test_simplification_variants_remove_ops_and_reduce_few_shot(self) -> None:
         patch = AgentPatch(
             operations=[
