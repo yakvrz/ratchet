@@ -528,6 +528,14 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             )
             self.assertTrue(result.optimizer_call_diagnostics)
             self.assertGreaterEqual(result.run_profile["optimizer_calls"]["totals"]["call_count"], 1)
+            self.assertIn("run_cost", result.run_profile)
+            self.assertIn("run_cost", result.manifest)
+            self.assertGreater(result.run_profile["run_cost"]["total_cost_usd"], 0.0)
+            self.assertEqual(
+                result.run_profile["run_cost"]["total_cost_usd"],
+                result.run_profile["run_cost"]["eval_cost_usd"]
+                + result.run_profile["run_cost"]["optimizer_cost_usd"],
+            )
             self.assertIn("frontier_recommendation", result.manifest)
 
     def test_runtime_error_is_persisted_and_resume_retries_failed_pair(self) -> None:

@@ -965,6 +965,7 @@ class RatchetOptimizer:
         )
         result.run_profile.update(build_run_profile(result, self.out_dir))
         result.manifest["run_profile"] = result.run_profile
+        result.manifest["run_cost"] = result.run_profile.get("run_cost", {})
         self.write_outputs(result)
         return result
 

@@ -134,6 +134,8 @@ def confirmation_result(
 
 def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
     progress_rows = _read_jsonl(out_dir / "progress.jsonl")
+    optimizer_calls = _optimizer_call_profile(result.optimizer_call_diagnostics)
+    run_cost = _run_cost_profile(result, optimizer_calls)
     return {
         "elapsed_s": max((float(row.get("elapsed_s", 0.0)) for row in progress_rows), default=0.0),
         "phase_durations_s": _phase_durations(progress_rows),
@@ -142,7 +144,8 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
         "highest_token_cases": _case_metric_extremes(result, metric="total_tokens", limit=8),
         "patch_profiles": _patch_profiles(result),
         "patch_deltas_vs_baseline": _patch_deltas_vs_baseline(result),
-        "optimizer_calls": _optimizer_call_profile(result.optimizer_call_diagnostics),
+        "optimizer_calls": optimizer_calls,
+        "run_cost": run_cost,
         "cache_events": {
             "case_cache_hits": sum(1 for row in progress_rows if row.get("event") == "case_cache_hit"),
             "case_completed": sum(1 for row in progress_rows if row.get("event") == "case_completed"),
@@ -158,6 +161,52 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
             ),
         },
         "cache_hit_rate": _cache_hit_rate(progress_rows),
+    }
+
+
+def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) -> dict[str, Any]:
+    seen_evaluations: set[tuple[str, str, int]] = set()
+    eval_cost = 0.0
+    eval_input_tokens = 0
+    eval_output_tokens = 0
+    eval_total_tokens = 0
+    eval_count = 0
+    for summary in [
+        result.baseline_dev,
+        result.baseline_holdout,
+        *result.accepted_dev_patches,
+        *result.holdout_patches,
+    ]:
+        for evaluation in summary.evaluations:
+            key = (summary.patch_hash, evaluation.case.id, evaluation.sample_index)
+            if key in seen_evaluations:
+                continue
+            seen_evaluations.add(key)
+            metrics = evaluation.record.metrics
+            eval_count += 1
+            eval_cost += float(metrics.cost_usd or 0.0)
+            eval_input_tokens += int(metrics.input_tokens or 0)
+            eval_output_tokens += int(metrics.output_tokens or 0)
+            eval_total_tokens += int(metrics.total_tokens or 0)
+    optimizer_totals = optimizer_calls.get("totals") or {}
+    optimizer_cost = float(optimizer_totals.get("cost_usd") or 0.0)
+    optimizer_input_tokens = int(optimizer_totals.get("input_tokens") or 0)
+    optimizer_output_tokens = int(optimizer_totals.get("output_tokens") or 0)
+    optimizer_total_tokens = int(optimizer_totals.get("total_tokens") or 0)
+    return {
+        "eval_cost_usd": eval_cost,
+        "optimizer_cost_usd": optimizer_cost,
+        "total_cost_usd": eval_cost + optimizer_cost,
+        "eval_case_evaluations": eval_count,
+        "eval_input_tokens": eval_input_tokens,
+        "eval_output_tokens": eval_output_tokens,
+        "eval_tokens": eval_total_tokens,
+        "optimizer_input_tokens": optimizer_input_tokens,
+        "optimizer_output_tokens": optimizer_output_tokens,
+        "optimizer_tokens": optimizer_total_tokens,
+        "total_input_tokens": eval_input_tokens + optimizer_input_tokens,
+        "total_output_tokens": eval_output_tokens + optimizer_output_tokens,
+        "total_tokens": eval_total_tokens + optimizer_total_tokens,
     }
 
 

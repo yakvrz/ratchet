@@ -177,6 +177,7 @@ class RatchetReporter:
                 "simplification_results": result.simplification_results,
                 "frontier_recommendation": result.frontier_recommendation,
                 "run_profile": result.run_profile,
+                "run_cost": (result.run_profile or {}).get("run_cost", {}),
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
             },
@@ -307,6 +308,10 @@ class RatchetReporter:
             "## Run Profile",
             "",
             *self._run_profile_rows(result),
+            "",
+            "## Run Cost",
+            "",
+            *self._run_cost_rows(result),
             "",
             "## Optimizer Overhead",
             "",
@@ -706,6 +711,26 @@ class RatchetReporter:
         if patch_deltas:
             rows.append("- Patch deltas vs baseline: " + RatchetReporter._compact_patch_delta_rows(patch_deltas))
         return rows
+
+    @staticmethod
+    def _run_cost_rows(result: RatchetResult) -> list[str]:
+        cost = ((result.run_profile or {}).get("run_cost") or {})
+        if not cost:
+            return ["No run cost profile was recorded."]
+        return [
+            "- "
+            f"Total cost=${float(cost.get('total_cost_usd') or 0.0):.6f} "
+            f"(eval=${float(cost.get('eval_cost_usd') or 0.0):.6f}, "
+            f"optimizer=${float(cost.get('optimizer_cost_usd') or 0.0):.6f})",
+            "- "
+            f"Total tokens={int(cost.get('total_tokens') or 0)} "
+            f"(eval={int(cost.get('eval_tokens') or 0)}, "
+            f"optimizer={int(cost.get('optimizer_tokens') or 0)})",
+            "- "
+            f"Eval case evaluations={int(cost.get('eval_case_evaluations') or 0)}, "
+            f"input_tokens={int(cost.get('total_input_tokens') or 0)}, "
+            f"output_tokens={int(cost.get('total_output_tokens') or 0)}",
+        ]
 
     @staticmethod
     def _optimizer_overhead_rows(result: RatchetResult) -> list[str]:
