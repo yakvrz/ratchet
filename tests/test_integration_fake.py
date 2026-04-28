@@ -46,7 +46,7 @@ def candidate(
         "hypothesis": str(patch.get("rationale", "")),
         "expected_effects": {"summary": patch.get("expected_effect", "")},
         "evaluation_plan": "full_dev",
-        "patch": patch,
+        "intervention": {"kind": "patch", "payload": {"patch": patch}},
     }
 
 

@@ -7,7 +7,7 @@ from ratchet.profiling import quality_cost_tradeoffs, runtime_reliability_diagno
 from ratchet.proposals import _few_shot_count_variants, _materialize_candidate_references
 from ratchet.optimizer import _prefer_simple_few_shot_strategy, _simplification_variants
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.transforms import CandidateProposal
+from ratchet.transforms import CandidateProposal, Intervention
 from ratchet.types import (
     AgentPatch,
     DiagnosticTrace,
@@ -104,6 +104,7 @@ class ProfilingTests(unittest.TestCase):
         )
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["train-1"]}),
             transform_parameters={"source_case_ids": ["train-1"]},
             hypothesis="Add a representative identity example.",
             patch=AgentPatch(
@@ -149,6 +150,10 @@ class ProfilingTests(unittest.TestCase):
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
             transform_instance="contrastive_card_examples",
+            intervention=Intervention(
+                kind="example_selection",
+                payload={"source_case_ids": ["train-1", "train-2"], "selection_strategy": "contrastive"},
+            ),
             transform_parameters={
                 "source_case_ids": ["train-1", "train-2"],
                 "selection_strategy": "contrastive",
@@ -172,6 +177,13 @@ class ProfilingTests(unittest.TestCase):
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
             transform_instance="contrastive_card_examples",
+            intervention=Intervention(
+                kind="example_selection",
+                payload={
+                    "source_case_ids": ["train-1", "train-2", "train-3", "train-4"],
+                    "selection_strategy": "contrastive",
+                },
+            ),
             transform_parameters={
                 "source_case_ids": ["train-1", "train-2", "train-3", "train-4"],
                 "selection_strategy": "contrastive",
@@ -205,6 +217,8 @@ class ProfilingTests(unittest.TestCase):
         )
         self.assertEqual(variants[2].patch.metadata["few_shot_variant"]["selection_strategy"], "contrastive")
         self.assertEqual(variants[2].transform_parameters["source_case_ids"], ["train-1", "train-2", "train-3"])
+        self.assertEqual(variants[0].patch.metadata["few_shot_source_case_ids"], ["train-1"])
+        self.assertEqual(variants[2].patch.metadata["few_shot_source_case_ids"], ["train-1", "train-2", "train-3"])
 
     def test_contrastive_few_shot_is_not_frontier_preferred_when_representative_ties(self) -> None:
         representative_candidate = CandidateProposal(
@@ -254,13 +268,41 @@ class ProfilingTests(unittest.TestCase):
             {
                 "transform_family": "targeted_few_shot",
                 "transform_instance": "identity_examples",
-                "transform_parameters": {"source_case_ids": ["train-1"]},
+                "intervention": {
+                    "kind": "example_selection",
+                    "payload": {"source_case_ids": ["train-1"]},
+                },
                 "hypothesis": "Use a representative train example.",
             }
         )
 
         self.assertTrue(candidate.patch.is_empty)
         self.assertEqual(candidate.transform_parameters["source_case_ids"], ["train-1"])
+
+    def test_candidate_parser_rejects_missing_intervention(self) -> None:
+        with self.assertRaisesRegex(ValueError, "explicit intervention"):
+            CandidateProposal.from_dict(
+                {
+                    "transform_family": "targeted_few_shot",
+                    "transform_instance": "identity_examples",
+                    "hypothesis": "Use a representative train example.",
+                }
+            )
+
+    def test_candidate_parser_rejects_model_authored_transform_parameters(self) -> None:
+        with self.assertRaisesRegex(ValueError, "transform_parameters are derived"):
+            CandidateProposal.from_dict(
+                {
+                    "transform_family": "targeted_few_shot",
+                    "transform_instance": "identity_examples",
+                    "transform_parameters": {"source_case_ids": ["train-1"]},
+                    "intervention": {
+                        "kind": "example_selection",
+                        "payload": {"source_case_ids": ["train-1"]},
+                    },
+                    "hypothesis": "Use a representative train example.",
+                }
+            )
 
     def test_unknown_few_shot_reference_is_rejected_after_materialization(self) -> None:
         bank = ProposalExampleBank(
@@ -271,6 +313,7 @@ class ProfilingTests(unittest.TestCase):
         )
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["missing"]}),
             transform_parameters={"source_case_ids": ["missing"]},
             hypothesis="Try a missing train example.",
             patch=AgentPatch(
@@ -321,6 +364,7 @@ class ProfilingTests(unittest.TestCase):
         )
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": "train-1"}),
             transform_parameters={"source_case_ids": "train-1"},
             hypothesis="Malformed source_case_ids should be rejected, not repaired.",
             patch=AgentPatch(

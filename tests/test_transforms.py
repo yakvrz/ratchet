@@ -6,6 +6,7 @@ from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.surface import SurfaceGenerator
 from ratchet.transforms import (
     CandidateProposal,
+    Intervention,
     TransformContextKey,
     build_search_hypothesis,
     select_branch_history,
@@ -194,11 +195,13 @@ class TransformLibraryTests(unittest.TestCase):
         missing_reference_only = proposal(
             transform_family="targeted_few_shot",
             mechanism_class="representative_examples",
+            intervention=Intervention(kind="example_selection", payload={}),
             patch=AgentPatch.empty(),
         )
         valid = proposal(
             transform_family="targeted_few_shot",
             mechanism_class="representative_examples",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["train-1"]}),
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=AgentPatch(
                 operations=list(patch.operations),
@@ -208,19 +211,21 @@ class TransformLibraryTests(unittest.TestCase):
         reference_only = proposal(
             transform_family="targeted_few_shot",
             mechanism_class="representative_examples",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["train-1"]}),
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=AgentPatch.empty(),
         )
         malformed = proposal(
             transform_family="targeted_few_shot",
             mechanism_class="representative_examples",
+            intervention=Intervention(kind="example_selection", payload={"source_case_ids": "train-1"}),
             transform_parameters={"source_case_ids": "train-1"},
             patch=AgentPatch.empty(),
         )
 
-        self.assertIn("not inline add_few_shot", validate_candidate_transform(missing, surface=surface) or "")
+        self.assertIn("example_selection intervention", validate_candidate_transform(missing, surface=surface) or "")
         self.assertIn(
-            "requires transform_parameters.source_case_ids",
+            "requires intervention.payload.source_case_ids",
             validate_candidate_transform(missing_reference_only, surface=surface) or "",
         )
         self.assertIsNone(validate_candidate_transform(valid, surface=surface))
@@ -232,7 +237,7 @@ class TransformLibraryTests(unittest.TestCase):
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=patch,
         )
-        self.assertIn("not inline add_few_shot", validate_candidate_transform(inline, surface=surface) or "")
+        self.assertIn("example_selection intervention", validate_candidate_transform(inline, surface=surface) or "")
 
     def test_candidate_validation_rejects_unknown_and_incompatible_family(self) -> None:
         spec = AgentSpec(

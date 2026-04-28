@@ -2,7 +2,7 @@
 
 This sample is a small Ratchet sanity check for CLINC150-style intent classification with out-of-scope detection.
 
-It builds a focused subset of CLINC150 from the official CLINC OOS evaluation repository. The sanity subset uses 12 of the 150 in-scope labels plus the `oos` label, rather than the full CLINC150 label set. The selected labels are intentionally confusable financial intents: balance vs. transactions, bill amount vs. bill due vs. bill payment, credit limit lookup vs. credit limit change, card/account access problems, and fraud reporting.
+It builds a focused subset of CLINC150 from the official CLINC OOS evaluation repository. The sanity subset uses 33 of the 150 in-scope labels plus the `oos` label, rather than the full CLINC150 label set. The selected labels cover several confusable clusters: banking and card support, bills and credit limits, travel booking and travel status, calendar and list update intents, restaurant lookup intents, shopping-list intents, directions vs. distance, weather, and out-of-scope requests.
 
 The baseline is deliberately simple and cheap:
 
@@ -11,7 +11,7 @@ The baseline is deliberately simple and cheap:
 - literal-overlap-oriented decision rule
 - sufficient output cap, so the interesting failures should mostly be semantic label confusions and out-of-scope boundaries
 
-Build the local eval file. The default sanity split writes 39 proposal-safe train examples, 39 protected dev cases, and 26 protected holdout cases:
+Build the local eval file. The default sanity split writes 102 proposal-safe train examples, 102 protected dev cases, and 68 protected holdout cases:
 
 ```bash
 python3 samples/clinc150_intent_agent/prepare_evals.py

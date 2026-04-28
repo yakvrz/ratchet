@@ -40,7 +40,7 @@ class FakePatchClient:
                 "hypothesis": str(patch.get("rationale", "")),
                 "expected_effects": {"summary": patch.get("expected_effect", "")},
                 "evaluation_plan": "full_dev",
-                "patch": patch,
+                "intervention": {"kind": "patch", "payload": {"patch": patch}},
             }
             for patch in self.patches
         ]
@@ -636,6 +636,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals, [])
         self.assertIn('"planner_guidance"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)
+        self.assertIn('"example_selection"', client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
 
     def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
@@ -661,9 +662,12 @@ class GeneratedSurfaceTests(unittest.TestCase):
                     "transform_family": "targeted_few_shot",
                     "mechanism_class": "representative_examples",
                     "candidate_role": "atomic",
-                    "transform_parameters": {
-                        "source_case_ids": ["train-card-1", "train-card-2"],
-                        "selection_strategy": "representative",
+                    "intervention": {
+                        "kind": "example_selection",
+                        "payload": {
+                            "source_case_ids": ["train-card-1", "train-card-2"],
+                            "selection_strategy": "representative",
+                        },
                     },
                     "hypothesis": "Anchor the weak card payment label.",
                 }
@@ -681,7 +685,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             search_hypothesis=search_hypothesis_with_budget({"targeted_few_shot": 1.0}),
             proposal_example_bank=build_proposal_example_bank(train_cases),
             proposal_example_cases=train_cases,
-            proposal_budget=3,
+            proposal_budget=1,
         )
 
         self.assertEqual(len(proposals), 2)
@@ -691,6 +695,12 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(first_value[0]["output"], {"label": "card_payment_not_recognised"})
         self.assertEqual(proposals[0].candidate_role, "compression")
         self.assertEqual(engine.last_stats.valid_count, 2)
+        self.assertEqual(engine.last_stats.returned_count, 2)
+        self.assertNotIn(
+            "transform family budget exceeded for 'targeted_few_shot' (quota 1)",
+            engine.last_stats.invalid_reasons or {},
+        )
+        self.assertEqual([row["scheduled"] for row in engine.last_candidate_rows], [True, True])
         self.assertTrue(engine.last_candidate_rows[0]["materialization"]["materialized"])
 
     def test_targeted_few_shot_rejects_inline_examples_and_unknown_ids(self) -> None:
@@ -715,25 +725,32 @@ class GeneratedSurfaceTests(unittest.TestCase):
                     "transform_family": "targeted_few_shot",
                     "mechanism_class": "representative_examples",
                     "candidate_role": "atomic",
-                    "transform_parameters": {"source_case_ids": ["train-card-1"]},
                     "hypothesis": "Inline examples should be rejected.",
-                    "patch": {
-                        "operations": [
-                            {
-                                "op": "add_few_shot",
-                                "target": "few_shot",
-                                "value": [{}],
+                    "intervention": {
+                        "kind": "patch",
+                        "payload": {
+                            "patch": {
+                                "operations": [
+                                    {
+                                        "op": "add_few_shot",
+                                        "target": "few_shot",
+                                        "value": [{}],
+                                    }
+                                ],
+                                "rationale": "Malformed inline example.",
+                                "expected_effect": "Should be rejected.",
                             }
-                        ],
-                        "rationale": "Malformed inline example.",
-                        "expected_effect": "Should be rejected.",
+                        },
                     },
                 },
                 {
                     "transform_family": "targeted_few_shot",
                     "mechanism_class": "representative_examples",
                     "candidate_role": "atomic",
-                    "transform_parameters": {"source_case_ids": ["missing-train-case"]},
+                    "intervention": {
+                        "kind": "example_selection",
+                        "payload": {"source_case_ids": ["missing-train-case"]},
+                    },
                     "hypothesis": "Unknown IDs should be rejected.",
                 },
             ]
@@ -755,8 +772,56 @@ class GeneratedSurfaceTests(unittest.TestCase):
 
         self.assertEqual(proposals, [])
         reasons = engine.last_stats.invalid_reasons or {}
-        self.assertTrue(any("not inline add_few_shot" in reason for reason in reasons))
+        self.assertTrue(any("example_selection intervention" in reason for reason in reasons))
         self.assertTrue(any("unknown few-shot source_case_ids" in reason for reason in reasons))
+
+    def test_targeted_few_shot_rejects_legacy_source_ids_outside_intervention(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Classify."},
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        train_cases = (
+            EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
+        )
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = RawCandidateClient(
+            [
+                {
+                    "transform_family": "targeted_few_shot",
+                    "mechanism_class": "representative_examples",
+                    "candidate_role": "atomic",
+                    "transform_parameters": {"source_case_ids": ["train-card-1"]},
+                    "intervention": {"kind": "example_selection", "payload": {}},
+                    "hypothesis": "Legacy transform_parameters should not satisfy the contract.",
+                }
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_labeled_summary("baseline", [["wrong_label"], []]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget({"targeted_few_shot": 1.0}),
+            proposal_example_bank=build_proposal_example_bank(train_cases),
+            proposal_example_cases=train_cases,
+            proposal_budget=1,
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertTrue(
+            any("candidate transform_parameters are derived" in reason for reason in (engine.last_stats.invalid_reasons or {}))
+        )
 
     def test_llm_proposer_rejects_legacy_bare_patches(self) -> None:
         spec = AgentSpec(

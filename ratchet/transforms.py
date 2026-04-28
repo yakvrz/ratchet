@@ -134,8 +134,9 @@ class TransformContextKey:
     def from_candidate(cls, candidate: "CandidateProposal") -> "TransformContextKey":
         operations = tuple(candidate.patch.operations)
         if candidate.transform_family == "targeted_few_shot" and not operations:
-            source_ids = candidate.transform_parameters.get("source_case_ids")
-            mechanism = _parameter_mechanism_signature(candidate.transform_parameters)
+            selection_payload = candidate.intervention.payload if candidate.intervention.kind == "example_selection" else {}
+            source_ids = selection_payload.get("source_case_ids")
+            mechanism = _parameter_mechanism_signature(selection_payload)
             if isinstance(source_ids, list):
                 mechanism = (f"few_shot:count={len(source_ids)}", *mechanism)
             return cls(
@@ -338,9 +339,26 @@ class SearchHypothesis:
 
 
 @dataclass(frozen=True)
+class Intervention:
+    kind: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"kind": self.kind, "payload": dict(self.payload)}
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "Intervention":
+        return cls(
+            kind=str(payload.get("kind", "")),
+            payload=dict(payload.get("payload", {})),
+        )
+
+
+@dataclass(frozen=True)
 class CandidateProposal:
     patch: AgentPatch
     transform_family: str
+    intervention: Intervention = field(default_factory=lambda: Intervention(kind="patch", payload={}))
     transform_instance: str = ""
     transform_parameters: dict[str, Any] = field(default_factory=dict)
     mechanism_class: str = ""
@@ -355,6 +373,7 @@ class CandidateProposal:
     def to_dict(self) -> dict[str, Any]:
         return {
             "transform_family": self.transform_family,
+            "intervention": self.intervention.to_dict(),
             "transform_instance": self.transform_instance,
             "transform_parameters": dict(self.transform_parameters),
             "mechanism_class": self.mechanism_class,
@@ -372,16 +391,29 @@ class CandidateProposal:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
         if "patch" in payload:
-            patch_payload = payload["patch"]
-        elif str(payload.get("transform_family", "")) == "targeted_few_shot":
+            raise ValueError("candidate patch must be inside intervention.payload.patch")
+        if payload.get("transform_parameters"):
+            raise ValueError("candidate transform_parameters are derived; put candidate-specific data in intervention.payload")
+        transform_family = str(payload.get("transform_family", ""))
+        transform_parameters: dict[str, Any] = {}
+        intervention = _candidate_intervention_from_payload(payload)
+        if intervention.kind == "example_selection":
+            source_ids = intervention.payload.get("source_case_ids")
+            if "source_case_ids" not in transform_parameters and isinstance(source_ids, list):
+                transform_parameters["source_case_ids"] = [str(item) for item in source_ids if isinstance(item, str)]
             patch_payload = {"operations": []}
+        elif intervention.kind == "patch":
+            patch_payload = intervention.payload.get("patch")
+            if not isinstance(patch_payload, dict):
+                raise ValueError("patch intervention requires payload.patch")
         else:
-            patch_payload = payload
+            raise ValueError(f"unknown intervention kind {intervention.kind!r}")
         return cls(
             patch=AgentPatch.from_dict(dict(patch_payload)),
-            transform_family=str(payload.get("transform_family", "")),
+            transform_family=transform_family,
+            intervention=intervention,
             transform_instance=str(payload.get("transform_instance", "")),
-            transform_parameters=dict(payload.get("transform_parameters", {})),
+            transform_parameters=transform_parameters,
             mechanism_class=str(payload.get("mechanism_class", "")),
             experiment_id=str(payload.get("experiment_id", "")),
             candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
@@ -391,6 +423,13 @@ class CandidateProposal:
             expected_effects=dict(payload.get("expected_effects", {})),
             evaluation_plan=str(payload.get("evaluation_plan", "full_dev") or "full_dev"),
         )
+
+
+def _candidate_intervention_from_payload(payload: dict[str, Any]) -> Intervention:
+    raw_intervention = payload.get("intervention")
+    if isinstance(raw_intervention, dict):
+        return Intervention.from_dict(raw_intervention)
+    raise ValueError("candidate requires explicit intervention")
 
 
 @dataclass(frozen=True)
@@ -836,6 +875,9 @@ def validate_candidate_transform(
         return "candidate must belong to an experiment"
     if candidate.candidate_role not in CANDIDATE_ROLES:
         return f"unknown candidate role {candidate.candidate_role!r}"
+    intervention_error = _candidate_intervention_error(candidate)
+    if intervention_error is not None:
+        return intervention_error
     mechanism_error = mechanism_error_for_family(candidate.transform_family, candidate.mechanism_class)
     if mechanism_error is not None:
         return mechanism_error
@@ -871,17 +913,37 @@ def validate_candidate_transform(
 def _transform_parameter_contract_error(candidate: CandidateProposal, family: TransformFamily) -> str | None:
     if candidate.transform_family == "targeted_few_shot" and candidate.patch.operations:
         if not candidate.patch.metadata.get("materialized_few_shot"):
-            return "targeted_few_shot must use transform_parameters.source_case_ids, not inline add_few_shot values"
+            return "targeted_few_shot must use example_selection intervention, not inline add_few_shot values"
     required = family.parameter_contract.get("required")
     if not isinstance(required, dict):
         return None
     for key in required:
-        if key not in candidate.transform_parameters:
+        value = _candidate_parameter_value(candidate, key)
+        if value is None:
+            if candidate.intervention.kind == "example_selection":
+                return f"transform family {family.name!r} requires intervention.payload.{key}"
             return f"transform family {family.name!r} requires transform_parameters.{key}"
-        value = candidate.transform_parameters[key]
         if key.endswith("_ids") or key == "source_case_ids":
             if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
                 return f"transform_parameters.{key} must be a non-empty string array"
+    return None
+
+
+def _candidate_intervention_error(candidate: CandidateProposal) -> str | None:
+    if candidate.transform_family == "targeted_few_shot":
+        if candidate.intervention.kind != "example_selection":
+            return "targeted_few_shot must use example_selection intervention"
+        return None
+    if candidate.intervention.kind != "patch":
+        return f"transform family {candidate.transform_family!r} does not support intervention kind {candidate.intervention.kind!r}"
+    return None
+
+
+def _candidate_parameter_value(candidate: CandidateProposal, key: str) -> Any:
+    if candidate.intervention.kind == "example_selection":
+        return candidate.intervention.payload.get(key)
+    if key in candidate.transform_parameters:
+        return candidate.transform_parameters[key]
     return None
 
 
