@@ -176,7 +176,7 @@ class FakeResearchClient:
         payload = json.loads(prompt.split("\n\n", 1)[1])
         action = payload["allowed_actions"][0]
         state = payload["state"]
-        candidates = state.get("candidates", [])
+        candidates = state.get("candidates", []) or state.get("variants", [])
         max_select = int(action.get("max_select", len(candidates)))
         max_per_group = int(action.get("max_select_per_group") or 0)
         selected: list[str] = []

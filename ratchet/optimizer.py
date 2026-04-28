@@ -87,6 +87,7 @@ MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
 MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 2
+MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION = 1
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -1051,11 +1052,36 @@ class RatchetOptimizer:
             simplification_results.append(row)
             decision_log.append(row)
         simplification_full_dev_count = 0
-        for parent in simplification_parents:
+        for parent_index, parent in enumerate(simplification_parents, start=1):
             parent_full_dev_count = 0
-            for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]:
+            candidate_variants = [
+                variant
+                for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]
+                if patch_hash(variant) != parent.patch_hash
+            ]
+            selected_variant_hashes, skipped_variant_reasons = self._select_simplification_variants_with_research_controller(
+                parent=parent,
+                variants=candidate_variants,
+                baseline=baseline_dev,
+                decision_log=decision_log,
+                parent_rank=parent_index,
+            )
+            for variant in candidate_variants:
                 digest = patch_hash(variant)
-                if digest == parent.patch_hash:
+                if digest not in selected_variant_hashes:
+                    row = {
+                        "type": "simplification_skipped",
+                        "parent_patch_hash": parent.patch_hash,
+                        "patch_hash": digest,
+                        "patch": variant.to_dict(),
+                        "simplification": variant.metadata.get("simplification"),
+                        "reason": skipped_variant_reasons.get(
+                            digest,
+                            "research controller did not select simplification variant",
+                        ),
+                    }
+                    simplification_results.append(row)
+                    decision_log.append(row)
                     continue
                 summary = known_by_hash.get(digest)
                 reused = summary is not None
@@ -1133,6 +1159,101 @@ class RatchetOptimizer:
             augmented_by_hash.values(),
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
+
+    def _select_simplification_variants_with_research_controller(
+        self,
+        *,
+        parent: PatchSummary,
+        variants: list[AgentPatch],
+        baseline: PatchSummary,
+        decision_log: list[dict[str, Any]],
+        parent_rank: int,
+    ) -> tuple[set[str], dict[str, str]]:
+        if not variants:
+            return set(), {}
+        action = ResearchAction(
+            action_id=f"simplify_{parent.patch_hash}",
+            action_type="simplify_candidate",
+            stage="simplification",
+            candidate_ids=[patch_hash(variant) for variant in variants],
+            max_select=min(MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST, len(variants)),
+            max_select_per_group=0,
+            rationale="Choose which simplification variants are worth evaluating before holdout.",
+            metadata={
+                "parent_patch_hash": parent.patch_hash,
+                "max_simplification_variants": MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST,
+            },
+        )
+        state_packet = {
+            "objective": self.objective.to_dict(),
+            "decision_point": "simplification",
+            "parent": {
+                "patch_hash": parent.patch_hash,
+                "score": parent.mean_score,
+                "pass_count": parent.pass_count,
+                "case_count": parent.case_count,
+                "operation_count": parent.operation_count,
+                "cost_usd": parent.mean_cost_usd,
+                "latency_s": parent.median_latency_s,
+            },
+            "baseline": {
+                "patch_hash": baseline.patch_hash,
+                "score": baseline.mean_score,
+                "pass_count": baseline.pass_count,
+                "case_count": baseline.case_count,
+                "operation_count": baseline.operation_count,
+                "cost_usd": baseline.mean_cost_usd,
+                "latency_s": baseline.median_latency_s,
+            },
+            "variants": [
+                {
+                    "candidate_id": patch_hash(variant),
+                    "operation_count": len(variant.operations),
+                    "simplification": variant.metadata.get("simplification"),
+                    "operations": [
+                        {"op": operation.op, "target": operation.target}
+                        for operation in variant.operations
+                    ],
+                }
+                for variant in variants
+            ],
+        }
+        self._emit_progress(
+            "research_controller_started",
+            stage="simplification",
+            parent_rank=parent_rank,
+            candidate_count=len(variants),
+            max_select=action.max_select,
+        )
+        decision = self.research_controller.decide(state=state_packet, allowed_actions=[action])
+        if self.research_controller.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "stage": "simplification",
+                    "parent_rank": parent_rank,
+                    "parent_patch_hash": parent.patch_hash,
+                    **self.research_controller.last_call_diagnostics,
+                }
+            )
+        decision_log.append(
+            {
+                "type": "research_decision",
+                "stage": "simplification",
+                "parent_rank": parent_rank,
+                "parent_patch_hash": parent.patch_hash,
+                "action": action.to_dict(),
+                "decision": decision.to_dict(),
+            }
+        )
+        self._emit_progress(
+            "research_controller_completed",
+            stage="simplification",
+            parent_rank=parent_rank,
+            selected_candidate_ids=decision.selected_candidate_ids,
+            rationale=decision.rationale,
+            call_diagnostics=self.research_controller.last_call_diagnostics or {},
+        )
+        return set(decision.selected_candidate_ids), dict(decision.skipped_candidate_reasons)
 
     def _evaluate_simplification_variant(
         self,
@@ -2312,10 +2433,11 @@ def _research_evaluate_action(
             else MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
         )
         group_count = len({_candidate_research_group(state) for state in states})
-        max_select = sum(
+        raw_max_select = sum(
             min(group_cap, len(group_states))
             for group_states in _states_by_research_group(states).values()
         )
+        max_select = min(raw_max_select, MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION) if late_budget else raw_max_select
         rationale = (
             "Choose which smoke/small-dev survivors deserve full-dev measurement. "
             "Prefer experiments that best resolve the current task theory under remaining budget."
@@ -2345,6 +2467,8 @@ def _research_evaluate_action(
             "dev_evaluations_used": dev_evaluations_used,
             "dev_budget": dev_budget,
             "comparison_group_count": group_count,
+            "late_budget": late_budget if stage_name == "full_dev" else False,
+            "raw_max_select": raw_max_select if stage_name == "full_dev" else max_select,
         },
     )
 

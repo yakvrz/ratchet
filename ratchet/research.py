@@ -9,6 +9,7 @@ from ratchet.errors import OptimizerModelError
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
+    combine_response_diagnostics,
     error_response_diagnostics,
     response_diagnostics,
 )
@@ -152,7 +153,43 @@ class ResearchController:
         try:
             payload = extract_json_object(response.output_text)
         except Exception as exc:
-            raise OptimizerModelError(f"Research controller returned invalid JSON: {exc}") from exc
+            primary_diagnostics = self.last_call_diagnostics or {}
+            repair_started_at = time.perf_counter()
+            try:
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous research-controller response was invalid JSON. "
+                        "Return only a valid JSON object matching the requested schema. "
+                        "Preserve the same action choice, candidate IDs, rationale, expected_information, risks, "
+                        "and skipped_candidate_reasons where possible; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:9000]}"
+                    ),
+                    max_output_tokens=RESEARCH_CONTROLLER_MAX_OUTPUT_TOKENS,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="research_controller",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                payload = extract_json_object(repair_response.output_text)
+            except Exception as repair_exc:
+                self.last_call_diagnostics = {
+                    **primary_diagnostics,
+                    "component": "research_controller",
+                    "repair_attempted": True,
+                    "repair_error": str(repair_exc),
+                }
+                raise OptimizerModelError(
+                    f"Research controller returned invalid JSON: {exc}; repair failed: {repair_exc}"
+                ) from repair_exc
         raw_selected = payload.get("selected_candidate_ids", [])
         if not isinstance(raw_selected, list):
             raise OptimizerModelError("Research controller selected_candidate_ids is not an array")
