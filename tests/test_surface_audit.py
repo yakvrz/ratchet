@@ -821,19 +821,20 @@ class GeneratedSurfaceTests(unittest.TestCase):
             proposal_budget=1,
         )
 
-        self.assertEqual(len(proposals), 2)
+        self.assertEqual(len(proposals), 1)
         first_value = proposals[0].patch.operations[0].value
         self.assertEqual(first_value[0]["source_case_id"], "train-card-1")
         self.assertEqual(first_value[0]["input"], "card charge I do not know")
         self.assertEqual(first_value[0]["output"], {"label": "card_payment_not_recognised"})
-        self.assertEqual(proposals[0].candidate_role, "compression")
-        self.assertEqual(engine.last_stats.valid_count, 2)
-        self.assertEqual(engine.last_stats.returned_count, 2)
+        self.assertEqual(len(first_value), 2)
+        self.assertEqual(proposals[0].candidate_role, "atomic")
+        self.assertEqual(engine.last_stats.valid_count, 1)
+        self.assertEqual(engine.last_stats.returned_count, 1)
         self.assertNotIn(
             "transform family budget exceeded for 'targeted_few_shot' (quota 1)",
             engine.last_stats.invalid_reasons or {},
         )
-        self.assertEqual([row["scheduled"] for row in engine.last_candidate_rows], [True, True])
+        self.assertEqual([row["scheduled"] for row in engine.last_candidate_rows], [True])
         self.assertTrue(engine.last_candidate_rows[0]["materialization"]["materialized"])
 
     def test_targeted_few_shot_rejects_inline_examples_and_unknown_ids(self) -> None:

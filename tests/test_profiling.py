@@ -9,10 +9,9 @@ from ratchet.profiling import (
     quality_cost_tradeoffs,
     runtime_reliability_diagnostics,
 )
-from ratchet.proposals import _few_shot_count_variants, _materialize_candidate_references
+from ratchet.proposals import _materialize_candidate_references
 from ratchet.optimizer import (
     CandidateEvaluationState,
-    _prefer_simple_few_shot_strategy,
     _select_full_dev_candidates,
     _simplification_variants,
 )
@@ -109,6 +108,8 @@ def candidate_state(
     pass_count: int,
     cost_usd: float = 0.001,
     score_delta: float | None = None,
+    fixed_count: int = 0,
+    regressed_count: int = 0,
 ) -> CandidateEvaluationState:
     return CandidateEvaluationState(
         candidate=candidate,
@@ -127,10 +128,22 @@ def candidate_state(
                 token_ci=(0.0, 0.0),
                 latency_delta=0.0,
                 latency_ci=(0.0, 0.0),
+                pass_significance=None,
             )
             if score_delta is not None
             else None
         ),
+        stage_rows=[
+            {
+                "stage": "small_dev",
+                "case_count": 10,
+                "comparison_to_parent": {"score_delta": score_delta or 0.0},
+                "behavior_flip_summary": {
+                    "fixed_count": fixed_count,
+                    "regressed_count": regressed_count,
+                },
+            }
+        ],
     )
 
 
@@ -144,7 +157,6 @@ def few_shot_candidate(example_count: int, *, comparison_group: str = "few-shot-
         intervention=Intervention(kind="example_selection", payload={}),
         transform_parameters={
             "few_shot_example_count": example_count,
-            "original_few_shot_example_count": 3,
             "selection_strategy": "representative",
         },
         comparison_group=comparison_group,
@@ -152,12 +164,8 @@ def few_shot_candidate(example_count: int, *, comparison_group: str = "few-shot-
         patch=AgentPatch(
             operations=[PatchOperation(op="add_few_shot", target="few_shot", value=examples)],
             metadata={
-                "few_shot_variant": {
-                    "example_count": example_count,
-                    "original_example_count": 3,
-                    "selection_strategy": "representative",
-                    "source_case_ids": [item["source_case_id"] for item in examples],
-                }
+                "few_shot_example_count": example_count,
+                "few_shot_source_case_ids": [item["source_case_id"] for item in examples],
             },
         ),
     )
@@ -351,7 +359,7 @@ class ProfilingTests(unittest.TestCase):
         self.assertTrue(materialized.patch.metadata["materialized_few_shot"])
         self.assertEqual(materialization["source_case_ids"], ["train-1", "train-2"])
 
-    def test_few_shot_candidate_expands_to_one_two_three_shot_variants(self) -> None:
+    def test_few_shot_candidate_materializes_exact_selected_examples(self) -> None:
         candidate = CandidateProposal(
             transform_family="targeted_few_shot",
             transform_instance="contrastive_card_examples",
@@ -382,66 +390,30 @@ class ProfilingTests(unittest.TestCase):
                 ]
             ),
         )
-
-        variants = _few_shot_count_variants(candidate)
-
-        self.assertEqual(
-            [variant.transform_parameters["few_shot_example_count"] for variant in variants],
-            [1, 2, 3],
-        )
-        self.assertEqual(
-            [len(variant.patch.operations[0].value) for variant in variants],
-            [1, 2, 3],
-        )
-        self.assertEqual(variants[2].patch.metadata["few_shot_variant"]["selection_strategy"], "contrastive")
-        self.assertEqual(variants[2].transform_parameters["source_case_ids"], ["train-1", "train-2", "train-3"])
-        self.assertEqual(variants[0].patch.metadata["few_shot_source_case_ids"], ["train-1"])
-        self.assertEqual(variants[2].patch.metadata["few_shot_source_case_ids"], ["train-1", "train-2", "train-3"])
-
-    def test_contrastive_few_shot_is_not_frontier_preferred_when_representative_ties(self) -> None:
-        representative_candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            transform_parameters={
-                "selection_strategy": "representative",
-                "few_shot_example_count": 1,
-            },
-            hypothesis="Representative example.",
-            patch=AgentPatch(
-                operations=[
-                    PatchOperation(op="add_few_shot", target="few_shot", value=[{"source_case_id": "train-1"}])
-                ]
+        bank = ProposalExampleBank(
+            examples=tuple(
+                ProposalExample(
+                    case_id=f"train-{index}",
+                    input=f"example {index}",
+                    expected={"label": "card_payment_not_recognised"},
+                    metadata={},
+                    label="card_payment_not_recognised",
+                )
+                for index in range(1, 5)
             ),
-        )
-        contrastive_candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            transform_parameters={
-                "selection_strategy": "contrastive",
-                "few_shot_example_count": 2,
-            },
-            hypothesis="Contrastive examples.",
-            patch=AgentPatch(
-                operations=[
-                    PatchOperation(
-                        op="add_few_shot",
-                        target="few_shot",
-                        value=[{"source_case_id": "train-1"}, {"source_case_id": "train-2"}],
-                    )
-                ]
-            ),
-        )
-        representative_summary = summary(representative_candidate.patch, passed=True, output={"label": "ok"})
-        contrastive_summary = summary(contrastive_candidate.patch, passed=True, output={"label": "ok"})
-
-        filtered = _prefer_simple_few_shot_strategy(
-            [
-                (contrastive_candidate, contrastive_summary, None),
-                (representative_candidate, representative_summary, None),
-            ]
+            label_counts={"card_payment_not_recognised": 4},
+            metadata_categories={},
+            label_field="label",
         )
 
-        self.assertEqual([row[0].transform_parameters["selection_strategy"] for row in filtered], ["representative"])
+        materialized, materialization = _materialize_candidate_references(candidate, bank)
 
-    def test_full_dev_selection_keeps_two_few_shot_compression_variants(self) -> None:
+        self.assertEqual(materialized.transform_parameters["few_shot_example_count"], 4)
+        self.assertEqual(len(materialized.patch.operations[0].value), 4)
+        self.assertEqual(materialization["source_case_ids"], ["train-1", "train-2", "train-3", "train-4"])
+        self.assertNotIn("few_shot_variant", materialized.patch.metadata)
+
+    def test_full_dev_selection_treats_few_shot_as_normal_experiment_candidates(self) -> None:
         one_shot = candidate_state(few_shot_candidate(1), pass_count=8, cost_usd=0.001)
         two_shot = candidate_state(few_shot_candidate(2), pass_count=9, cost_usd=0.002)
         three_shot = candidate_state(few_shot_candidate(3), pass_count=9, cost_usd=0.003)
@@ -451,11 +423,11 @@ class ProfilingTests(unittest.TestCase):
             OptimizationObjective(mode="correctness"),
         )
 
-        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [2, 3])
+        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [2])
         self.assertEqual(one_shot.frontier_status, "screened_out")
-        self.assertIn("few-shot compression ranking", one_shot.rejection_reason or "")
+        self.assertIn("few_shot_compression_choice", one_shot.rejection_reason or "")
 
-    def test_full_dev_selection_prefers_smaller_few_shot_variant_when_tied(self) -> None:
+    def test_full_dev_selection_does_not_apply_few_shot_specific_tiebreak(self) -> None:
         one_shot = candidate_state(few_shot_candidate(1), pass_count=9, cost_usd=0.001)
         two_shot = candidate_state(few_shot_candidate(2), pass_count=9, cost_usd=0.001)
         three_shot = candidate_state(few_shot_candidate(3), pass_count=9, cost_usd=0.001)
@@ -465,8 +437,8 @@ class ProfilingTests(unittest.TestCase):
             OptimizationObjective(mode="correctness"),
         )
 
-        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [1, 2])
-        self.assertEqual(three_shot.frontier_status, "screened_out")
+        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [3])
+        self.assertEqual(one_shot.frontier_status, "screened_out")
 
     def test_full_dev_selection_keeps_one_ordinary_candidate_per_group(self) -> None:
         weak = candidate_state(prompt_candidate("weak"), pass_count=7)
@@ -488,6 +460,7 @@ class ProfilingTests(unittest.TestCase):
             output_contract_candidate("close-json", comparison_group="exp"),
             pass_count=7,
             score_delta=0.22,
+            fixed_count=3,
         )
         weak = candidate_state(prompt_candidate("weak", comparison_group="exp"), pass_count=6, score_delta=0.01)
 
@@ -499,7 +472,43 @@ class ProfilingTests(unittest.TestCase):
         selected_instances = {state.candidate.transform_instance for state in selected}
         self.assertEqual(selected_instances, {"best", "close-json"})
         self.assertEqual(weak.frontier_status, "screened_out")
-        self.assertIn("experiment-aware batch ranking", weak.rejection_reason or "")
+        self.assertIn("small_dev_triage", weak.rejection_reason or "")
+
+    def test_full_dev_selection_does_not_escape_non_structural_prompt_signal(self) -> None:
+        best_absolute = candidate_state(prompt_candidate("best", comparison_group="exp"), pass_count=10, score_delta=0.02)
+        strong_prompt = candidate_state(
+            prompt_candidate("semantic", comparison_group="exp"),
+            pass_count=7,
+            score_delta=0.22,
+            fixed_count=3,
+        )
+
+        selected = _select_full_dev_candidates(
+            [strong_prompt, best_absolute],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        self.assertEqual([state.candidate.transform_instance for state in selected], ["best"])
+        self.assertEqual(strong_prompt.frontier_status, "screened_out")
+        self.assertIn("small_dev_triage", strong_prompt.rejection_reason or "")
+
+    def test_full_dev_selection_requires_structural_pass_gain(self) -> None:
+        best_absolute = candidate_state(prompt_candidate("best", comparison_group="exp"), pass_count=10, score_delta=0.02)
+        weak_contract = candidate_state(
+            output_contract_candidate("close-json", comparison_group="exp"),
+            pass_count=7,
+            score_delta=0.22,
+            fixed_count=1,
+        )
+
+        selected = _select_full_dev_candidates(
+            [weak_contract, best_absolute],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        self.assertEqual([state.candidate.transform_instance for state in selected], ["best"])
+        self.assertEqual(weak_contract.frontier_status, "screened_out")
+        self.assertIn("small_dev_triage", weak_contract.rejection_reason or "")
 
     def test_full_dev_selection_preserves_control_or_ablation_role(self) -> None:
         atomic = candidate_state(experiment_role_candidate("atomic", role="atomic"), pass_count=10)
@@ -534,7 +543,7 @@ class ProfilingTests(unittest.TestCase):
         selected_instances = {state.candidate.transform_instance for state in selected}
         self.assertEqual(selected_instances, {"atomic", "composed"})
         self.assertEqual(weak.frontier_status, "screened_out")
-        self.assertIn("experiment role ranking", weak.rejection_reason or "")
+        self.assertIn("small_dev_triage", weak.rejection_reason or "")
 
     def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
         candidate = CandidateProposal.from_dict(

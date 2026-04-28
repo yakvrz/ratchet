@@ -78,13 +78,16 @@ FINALIST_CONFIRMATION_SAMPLES = 2
 FRONTIER_PARENT_STALL_LIMIT = 2
 MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 2
 MAX_SIMPLIFICATION_PARENT_COUNT = 2
+MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT = 1
+MAX_SIMPLIFICATION_FULL_DEV_PER_RUN = 2
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
-MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP = 2
 FULL_DEV_STRONG_SIGNAL_SCORE_DELTA = 0.10
+FULL_DEV_STRONG_SIGNAL_PASS_GAIN = 2
 FULL_DEV_COMPOSED_COMPETITIVE_MARGIN = 0.05
+FULL_DEV_STRONG_SIGNAL_MECHANISMS = {"runtime_defect_fix", "output_contract_fix", "model_capability_probe"}
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -996,7 +999,9 @@ class RatchetOptimizer:
             }
             simplification_results.append(row)
             decision_log.append(row)
+        simplification_full_dev_count = 0
         for parent in simplification_parents:
+            parent_full_dev_count = 0
             for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]:
                 digest = patch_hash(variant)
                 if digest == parent.patch_hash:
@@ -1017,7 +1022,15 @@ class RatchetOptimizer:
                         parent=parent,
                         baseline=baseline_dev,
                         dev_cases=dev_cases,
+                        allow_full_dev=(
+                            parent_full_dev_count < MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT
+                            and simplification_full_dev_count < MAX_SIMPLIFICATION_FULL_DEV_PER_RUN
+                        ),
                     )
+                    reached_full_dev = any(row.get("stage") == "full_dev" for row in stage_rows)
+                    if reached_full_dev:
+                        parent_full_dev_count += 1
+                        simplification_full_dev_count += 1
                     evaluated_patch_hashes.add(digest)
                     known_by_hash[digest] = summary
                 else:
@@ -1077,11 +1090,22 @@ class RatchetOptimizer:
         parent: PatchSummary,
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
+        allow_full_dev: bool = True,
     ) -> tuple[PatchSummary, str | None, list[dict[str, Any]]]:
         stage_rows: list[dict[str, Any]] = []
         latest_summary: PatchSummary | None = None
         latest_rejection: str | None = None
         for stage_name, stage_cases in self._progressive_eval_stages(parent, dev_cases):
+            if stage_name == "full_dev" and not allow_full_dev and latest_summary is not None:
+                return (
+                    latest_summary,
+                    (
+                        "simplification_full_dev_cap: screened out before full_dev "
+                        f"(max {MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT} per parent, "
+                        f"{MAX_SIMPLIFICATION_FULL_DEV_PER_RUN} per run)"
+                    ),
+                    stage_rows,
+                )
             parent_stage = _summary_for_cases(parent, stage_cases) or self.evaluate_patch(parent.patch, stage_cases)
             baseline_stage = _summary_for_cases(baseline, stage_cases) or self.evaluate_patch(baseline.patch, stage_cases)
             candidate_stage = self.evaluate_patch(patch, stage_cases)
@@ -1115,6 +1139,15 @@ class RatchetOptimizer:
             )
             if rejection is not None:
                 return candidate_stage, f"simplification {stage_name} gate rejected variant: {rejection}", stage_rows
+            if stage_name == "small_dev" and candidate_stage.pass_count < parent_stage.pass_count:
+                return (
+                    candidate_stage,
+                    (
+                        "simplification small_dev gate rejected variant: "
+                        f"pass count regressed versus parent ({candidate_stage.pass_count} < {parent_stage.pass_count})"
+                    ),
+                    stage_rows,
+                )
             if stage_name == "full_dev":
                 return candidate_stage, None, stage_rows
         if latest_summary is None:
@@ -1364,7 +1397,7 @@ class RatchetOptimizer:
                             "reason": "structural/runtime fix accepted; child branch should be rediagnosed for residual failures",
                         }
                     )
-        return _prefer_simple_few_shot_strategy(accepted_rows), evaluations_used
+        return accepted_rows, evaluations_used
 
     def _evaluate_candidate_batch_progressively(
         self,
@@ -1973,33 +2006,33 @@ def _select_full_dev_candidates(
             limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
         )
 
-        few_shot_variants = [state for state in ranked if _is_few_shot_variant_state(state)]
-        _append_unique_states(
-            group_selected,
-            few_shot_variants[:MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP],
-            limit=MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP,
-        )
         selected_ids = {id(state) for state in group_selected}
         for state in group_states:
             if id(state) in selected_ids:
                 continue
-            if _is_few_shot_variant_state(state):
+            if _is_few_shot_compression_choice(state):
                 state.rejection_reason = (
-                    "screened out before full_dev by few-shot compression ranking "
-                    f"(cap {MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP} variants per comparison group)"
+                    "few_shot_compression_choice: screened out before full_dev by experiment allocation "
+                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"{_small_dev_signal_text(state)})"
                 )
             elif _has_strong_full_dev_signal(state):
                 state.rejection_reason = (
-                    "screened out before full_dev by experiment full-dev cap despite strong small-dev signal "
-                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group)"
+                    "structural_strong_signal: screened out before full_dev by experiment allocation "
+                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"{_small_dev_signal_text(state)})"
                 )
             elif str(state.candidate.candidate_role or "").lower() in {"control", "ablation", "composed"}:
                 state.rejection_reason = (
-                    "screened out before full_dev by experiment role ranking "
-                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group)"
+                    "small_dev_triage: screened out before full_dev by experiment role ranking "
+                    f"(cap {MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP} candidates per comparison group; "
+                    f"{_small_dev_signal_text(state)})"
                 )
             else:
-                state.rejection_reason = "screened out before full_dev by experiment-aware batch ranking"
+                state.rejection_reason = (
+                    "small_dev_triage: screened out before full_dev by experiment-aware batch ranking "
+                    f"({_small_dev_signal_text(state)})"
+                )
             state.frontier_status = "screened_out"
             state.accepted = False
         selected.extend(group_selected)
@@ -2023,12 +2056,7 @@ def _candidate_full_dev_sort_key(
     state: CandidateEvaluationState,
     objective: OptimizationObjective,
 ) -> tuple[Any, ...]:
-    base = _candidate_stage_sort_key(state, objective)
-    if _is_few_shot_variant_state(state):
-        if len(base) > 1:
-            return (*base[:-1], _few_shot_example_count(state.candidate), base[-1])
-        return (*base, _few_shot_example_count(state.candidate))
-    return base
+    return _candidate_stage_sort_key(state, objective)
 
 
 def _candidate_stage_sort_key(
@@ -2040,25 +2068,55 @@ def _candidate_stage_sort_key(
     return (0, *objective_sort_key(state.summary, objective))
 
 
-def _is_few_shot_variant_state(state: CandidateEvaluationState) -> bool:
+def _is_few_shot_compression_choice(state: CandidateEvaluationState) -> bool:
     candidate = state.candidate
     if candidate.transform_family != "targeted_few_shot":
         return False
-    if candidate.patch.metadata.get("few_shot_variant"):
-        return True
-    return _few_shot_example_count(candidate) > 0
+    return str(candidate.candidate_role or "").lower() == "compression"
 
 
 def _has_strong_full_dev_signal(state: CandidateEvaluationState) -> bool:
-    if state.candidate.transform_family != "output_contract_tightening":
+    if state.candidate.mechanism_class not in FULL_DEV_STRONG_SIGNAL_MECHANISMS:
         return False
-    return _candidate_score_delta(state) >= FULL_DEV_STRONG_SIGNAL_SCORE_DELTA
+    if _candidate_score_delta(state) < FULL_DEV_STRONG_SIGNAL_SCORE_DELTA:
+        return False
+    return _candidate_pass_gain(state) >= FULL_DEV_STRONG_SIGNAL_PASS_GAIN
 
 
 def _candidate_score_delta(state: CandidateEvaluationState) -> float:
     if state.comparison is None:
         return 0.0
     return float(state.comparison.score_delta)
+
+
+def _candidate_pass_gain(state: CandidateEvaluationState) -> int:
+    comparison = state.comparison
+    if comparison is not None and comparison.pass_significance is not None:
+        significance = comparison.pass_significance
+        return int(significance.fixed_count) - int(significance.regressed_count)
+    if not state.stage_rows:
+        return 0
+    latest = state.stage_rows[-1]
+    flips = latest.get("behavior_flip_summary") or {}
+    try:
+        return int(flips.get("fixed_count") or 0) - int(flips.get("regressed_count") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _small_dev_signal_text(state: CandidateEvaluationState) -> str:
+    row = next((item for item in reversed(state.stage_rows) if item.get("stage") == "small_dev"), None)
+    if row is None:
+        row = state.stage_rows[-1] if state.stage_rows else {}
+    comparison = row.get("comparison_to_parent") or {}
+    flips = row.get("behavior_flip_summary") or {}
+    score_delta = float(comparison.get("score_delta") or _candidate_score_delta(state))
+    try:
+        pass_gain = int(flips.get("fixed_count") or 0) - int(flips.get("regressed_count") or 0)
+    except (TypeError, ValueError):
+        pass_gain = _candidate_pass_gain(state)
+    case_count = int(row.get("case_count") or (state.summary.case_count if state.summary is not None else 0))
+    return f"small_dev_case_count={case_count}; score_delta={score_delta:+.3f}; pass_gain={pass_gain:+d}"
 
 
 def _finalize_candidate_state(state: CandidateEvaluationState, reference: PatchSummary) -> None:
@@ -2179,47 +2237,6 @@ def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:
         if variant.operations:
             unique.setdefault(patch_hash(variant), variant)
     return list(unique.values())
-
-
-def _prefer_simple_few_shot_strategy(
-    accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]],
-) -> list[tuple[CandidateProposal, PatchSummary, Comparison]]:
-    representative_rows = [
-        row
-        for row in accepted_rows
-        if row[0].transform_family == "targeted_few_shot"
-        and str(row[0].transform_parameters.get("selection_strategy") or "").lower() == "representative"
-    ]
-    if not representative_rows:
-        return accepted_rows
-    filtered: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
-    for row in accepted_rows:
-        candidate, summary, _ = row
-        strategy = str(candidate.transform_parameters.get("selection_strategy") or "").lower()
-        if candidate.transform_family != "targeted_few_shot" or strategy != "contrastive":
-            filtered.append(row)
-            continue
-        example_count = _few_shot_example_count(candidate)
-        dominated = any(
-            _few_shot_example_count(rep_candidate) <= example_count
-            and rep_summary.mean_score >= summary.mean_score - 1e-9
-            for rep_candidate, rep_summary, _ in representative_rows
-        )
-        if not dominated:
-            filtered.append(row)
-    return filtered
-
-
-def _few_shot_example_count(candidate: CandidateProposal) -> int:
-    raw = candidate.transform_parameters.get("few_shot_example_count")
-    try:
-        return int(raw)
-    except (TypeError, ValueError):
-        pass
-    for operation in candidate.patch.operations:
-        if operation.op == "add_few_shot" and isinstance(operation.value, list):
-            return len(operation.value)
-    return 0
 
 
 def _transform_lineage_families(patch_hash_value: str, proposals: list[dict[str, Any]]) -> list[str]:

@@ -241,6 +241,10 @@ class RatchetReporter:
             "",
             *self._frontier_status_rows(result),
             "",
+            "## Small-Dev Screening",
+            "",
+            *self._small_dev_screening_rows(result),
+            "",
             "## Holdout Frontier",
             "",
             *self._frontier_variant_rows(result),
@@ -293,7 +297,7 @@ class RatchetReporter:
             "",
             *self._simplification_rows(result),
             "",
-            "## Few-Shot Compression",
+            "## Few-Shot Examples",
             "",
             *self._few_shot_compression_rows(result),
             "",
@@ -518,6 +522,34 @@ class RatchetReporter:
         return rows
 
     @staticmethod
+    def _small_dev_screening_rows(result: RatchetResult) -> list[str]:
+        rows = [
+            row
+            for row in result.proposals
+            if row.get("frontier_status") == "screened_out" and row.get("evaluation_stages")
+        ]
+        if not rows:
+            return ["No candidates were screened after small-dev triage."]
+        table = [
+            "| Patch | Reason | Small-dev cases | Score delta | Pass gain | Mechanism |",
+            "| --- | --- | ---: | ---: | ---: | --- |",
+        ]
+        for row in rows[:12]:
+            signal = _small_dev_signal(row)
+            table.append(
+                "| "
+                f"`{row.get('patch_hash')}` | "
+                f"{_short_reason(row.get('rejection_reason'))} | "
+                f"{signal['case_count']} | "
+                f"{signal['score_delta']:+.3f} | "
+                f"{signal['pass_gain']:+d} | "
+                f"`{row.get('mechanism_class') or row.get('transform_family')}` |"
+            )
+        if len(rows) > 12:
+            table.append(f"- {len(rows) - 12} additional screened candidates omitted from this table.")
+        return table
+
+    @staticmethod
     def _frontier_variant_rows(result: RatchetResult) -> list[str]:
         variants = result.frontier_recommendation.get("frontier_variants") or []
         if not variants:
@@ -628,7 +660,7 @@ class RatchetReporter:
             if row.get("transform_family") == "targeted_few_shot" and row.get("metrics")
         ]
         if not rows:
-            return ["No evaluated few-shot variants were recorded."]
+            return ["No evaluated few-shot example candidates were recorded."]
         table = [
             "| Patch | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
             "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
@@ -856,6 +888,29 @@ def _frontier_status_summaries(proposals: list[dict[str, Any]]) -> dict[str, dic
         if patch_hash_value and patch_hash_value not in item["patch_hashes"]:
             item["patch_hashes"].append(str(patch_hash_value))
     return summaries
+
+
+def _small_dev_signal(row: dict[str, Any]) -> dict[str, Any]:
+    stages = row.get("evaluation_stages") or []
+    stage = next((item for item in reversed(stages) if item.get("stage") == "small_dev"), None)
+    if stage is None:
+        stage = stages[-1] if stages else {}
+    comparison = stage.get("comparison_to_parent") or {}
+    flips = stage.get("behavior_flip_summary") or {}
+    try:
+        pass_gain = int(flips.get("fixed_count") or 0) - int(flips.get("regressed_count") or 0)
+    except (TypeError, ValueError):
+        pass_gain = 0
+    return {
+        "case_count": int(stage.get("case_count") or 0),
+        "score_delta": float(comparison.get("score_delta") or 0.0),
+        "pass_gain": pass_gain,
+    }
+
+
+def _short_reason(reason: Any) -> str:
+    text = str(reason or "screened")
+    return text.split(":", 1)[0] if ":" in text else text
 
 
 def _selected_finalist_status(
