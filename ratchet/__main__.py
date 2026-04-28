@@ -9,6 +9,7 @@ from typing import Any
 
 from ratchet.adapters import adapter_fingerprint, load_adapter
 from ratchet.config import RatchetConfigError, RatchetRunConfig, ensure_search_path, resolve_run_config
+from ratchet.eval_health import EvalHealthReport, render_eval_health_markdown, run_eval_health_check
 from ratchet.errors import OptimizerModelError
 from ratchet.io import file_sha256, load_eval_cases
 from ratchet.optimizer import RatchetOptimizer
@@ -454,6 +455,80 @@ def run_check(
     return summary.to_dict()
 
 
+def run_eval_health(
+    *,
+    config: RatchetRunConfig,
+    sample_limit: int | None = None,
+    repeats: int | None = None,
+    strict: bool = False,
+) -> EvalHealthReport:
+    adapter, cases = load_runtime(config)
+    report = run_eval_health_check(
+        adapter_spec=config.adapter,
+        adapter=adapter,
+        cases=cases,
+        config=config.eval_health,
+        sample_limit=sample_limit,
+        repeats=repeats,
+        case_timeout_s=config.case_timeout_s,
+        evaluation_samples_per_case=config.samples_per_case,
+        case_concurrency=config.case_concurrency,
+    )
+    out_dir = config.out / "eval_health"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "eval_health.json").write_text(json.dumps(report.to_dict(), indent=2, default=str) + "\n")
+    (out_dir / "eval_health.md").write_text(render_eval_health_markdown(report))
+    _print_eval_health_summary(report, out_dir=out_dir, strict=strict)
+    return report
+
+
+def _print_eval_health_summary(report: EvalHealthReport, *, out_dir: Path, strict: bool) -> None:
+    issue_counts: dict[str, int] = {"fatal": 0, "warning": 0, "info": 0}
+    for issue in report.issues:
+        issue_counts[issue.severity] = issue_counts.get(issue.severity, 0) + 1
+    print(
+        "Ratchet eval health: "
+        f"{report.status} "
+        f"(fatal={issue_counts['fatal']} warning={issue_counts['warning']} info={issue_counts['info']})"
+    )
+    split_counts = report.split_summary.get("by_split", {})
+    print(
+        "Splits: "
+        f"train={split_counts.get('train', 0)} "
+        f"dev={split_counts.get('dev', 0)} "
+        f"holdout={split_counts.get('holdout', 0)}"
+    )
+    probe = report.baseline_probe
+    if probe.get("checked"):
+        runtime = ((probe.get("runtime_feasibility") or {}).get("estimated_eval_sweep") or {})
+        print(
+            "Baseline probe: "
+            f"cases={len(probe.get('sampled_case_ids') or [])} "
+            f"repeats={probe.get('repeats')} "
+            f"pass_rate={float(probe.get('pass_rate') or 0.0):.3f} "
+            f"errors={int(probe.get('error_attempt_count') or 0)}/{int(probe.get('attempt_count') or 0)} "
+            f"unstable={int(probe.get('unstable_case_count') or 0)}"
+        )
+        if runtime:
+            print(
+                "Estimated eval sweep: "
+                f"attempts={runtime.get('case_attempts')} "
+                f"wall={float(runtime.get('wall_time_s') or 0.0):.1f}s "
+                f"cost=${float(runtime.get('cost_usd') or 0.0):.6f} "
+                f"tokens={int(runtime.get('total_tokens') or 0)}"
+            )
+    else:
+        print(f"Baseline probe: skipped ({probe.get('reason')})")
+    for issue in report.issues[:10]:
+        print(f"- {issue.severity.upper()} {issue.code}: {issue.message}")
+    if len(report.issues) > 10:
+        print(f"- ... {len(report.issues) - 10} more issue(s) in eval_health.json")
+    if strict and report.warning and not report.fatal:
+        print("Strict mode: warnings make this check fail.")
+    print(f"Report: {out_dir / 'eval_health.md'}")
+    print(f"JSON: {out_dir / 'eval_health.json'}")
+
+
 def _split_csv(value: str | None) -> list[str] | None:
     if value is None:
         return None
@@ -523,6 +598,22 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_eval_health_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", help="Path to ratchet.toml")
+    parser.add_argument("--adapter", help="Adapter import path, e.g. package.module:adapter")
+    parser.add_argument("--evals", help="Path to evals JSONL")
+    parser.add_argument("--out", help="Output directory")
+    parser.add_argument("--env-file", help="Path to .env with model provider API keys")
+    parser.add_argument("--sample-limit", type=int, help="Maximum dev/holdout cases to probe with the baseline")
+    parser.add_argument("--repeats", type=int, help="Repeated baseline probes per sampled case; use 0 to skip probes")
+    parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds for baseline probes")
+    parser.add_argument(
+        "--strict",
+        action="store_true",
+        help="Exit nonzero when eval health reports warnings as well as fatal issues",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ratchet: eval-backed agent optimizer")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -540,6 +631,9 @@ def build_parser() -> argparse.ArgumentParser:
     check_parser = subparsers.add_parser("check", help="Validate adapter/eval/spec wiring before optimization.")
     add_run_arguments(check_parser)
     check_parser.add_argument("--sample-limit", type=int, default=2, help="How many cases to probe during preflight")
+
+    eval_health_parser = subparsers.add_parser("eval-health", help="Check eval-set and grader health before optimization.")
+    add_eval_health_arguments(eval_health_parser)
 
     return parser
 
@@ -562,6 +656,18 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "check":
             config = _resolve_check_config(args)
             run_check(config=config, sample_limit=args.sample_limit)
+            return 0
+
+        if args.command == "eval-health":
+            config = _apply_run_overrides(args)
+            report = run_eval_health(
+                config=config,
+                sample_limit=getattr(args, "sample_limit", None),
+                repeats=getattr(args, "repeats", None),
+                strict=bool(getattr(args, "strict", False)),
+            )
+            if report.fatal or (bool(getattr(args, "strict", False)) and report.warning):
+                return 5
             return 0
 
         raise ValueError(f"Unsupported command: {args.command}")

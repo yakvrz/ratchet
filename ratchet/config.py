@@ -18,6 +18,7 @@ RUN_CONFIG_KEYS = {
     "evals",
     "out",
     "env_file",
+    "eval_health",
     "dev_budget",
     "holdout_budget",
     "holdout_top_k",
@@ -35,6 +36,21 @@ RUN_CONFIG_KEYS = {
     "fail_fast",
 }
 OBJECTIVE_KEYS = {"mode", "constraints", "tie_breakers"}
+EVAL_HEALTH_KEYS = {
+    "sample_limit",
+    "repeats",
+    "min_dev_cases",
+    "min_holdout_cases",
+    "min_cases_per_category",
+    "max_runtime_error_rate",
+    "max_unstable_case_rate",
+    "max_mean_latency_s",
+    "max_p95_latency_s",
+    "max_mean_cost_usd",
+    "max_estimated_eval_cost_usd",
+    "max_estimated_eval_wall_time_s",
+    "max_estimated_eval_tokens",
+}
 CONSTRAINT_KEYS = {
     "allowed_edits",
     "allowed_models",
@@ -45,6 +61,82 @@ CONSTRAINT_KEYS = {
     "sanitize_examples",
 }
 REQUIRED_RUN_KEYS = {"adapter", "evals", "out"}
+
+
+@dataclass(frozen=True)
+class EvalHealthConfig:
+    sample_limit: int = 8
+    repeats: int = 2
+    min_dev_cases: int = 1
+    min_holdout_cases: int = 5
+    min_cases_per_category: int = 2
+    max_runtime_error_rate: float = 0.05
+    max_unstable_case_rate: float = 0.2
+    max_mean_latency_s: float = 30.0
+    max_p95_latency_s: float = 60.0
+    max_mean_cost_usd: float = 0.25
+    max_estimated_eval_cost_usd: float = 25.0
+    max_estimated_eval_wall_time_s: float = 3600.0
+    max_estimated_eval_tokens: int = 5_000_000
+
+    def __post_init__(self) -> None:
+        for name in ("sample_limit", "repeats", "min_dev_cases", "min_holdout_cases", "min_cases_per_category"):
+            value = getattr(self, name)
+            if value < 0:
+                raise RatchetConfigError(f"eval_health.{name} must be non-negative.")
+        if self.max_estimated_eval_tokens < 0:
+            raise RatchetConfigError("eval_health.max_estimated_eval_tokens must be non-negative.")
+        for name in ("max_runtime_error_rate", "max_unstable_case_rate"):
+            value = getattr(self, name)
+            if not 0.0 <= value <= 1.0:
+                raise RatchetConfigError(f"eval_health.{name} must be between 0 and 1.")
+        for name in (
+            "max_mean_latency_s",
+            "max_p95_latency_s",
+            "max_mean_cost_usd",
+            "max_estimated_eval_cost_usd",
+            "max_estimated_eval_wall_time_s",
+        ):
+            value = getattr(self, name)
+            if value < 0:
+                raise RatchetConfigError(f"eval_health.{name} must be non-negative.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "sample_limit": self.sample_limit,
+            "repeats": self.repeats,
+            "min_dev_cases": self.min_dev_cases,
+            "min_holdout_cases": self.min_holdout_cases,
+            "min_cases_per_category": self.min_cases_per_category,
+            "max_runtime_error_rate": self.max_runtime_error_rate,
+            "max_unstable_case_rate": self.max_unstable_case_rate,
+            "max_mean_latency_s": self.max_mean_latency_s,
+            "max_p95_latency_s": self.max_p95_latency_s,
+            "max_mean_cost_usd": self.max_mean_cost_usd,
+            "max_estimated_eval_cost_usd": self.max_estimated_eval_cost_usd,
+            "max_estimated_eval_wall_time_s": self.max_estimated_eval_wall_time_s,
+            "max_estimated_eval_tokens": self.max_estimated_eval_tokens,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | None) -> "EvalHealthConfig":
+        payload = dict(payload or {})
+        _reject_unknown_keys(payload, EVAL_HEALTH_KEYS, "ratchet.eval_health")
+        return cls(
+            sample_limit=int(payload.get("sample_limit", 8)),
+            repeats=int(payload.get("repeats", 2)),
+            min_dev_cases=int(payload.get("min_dev_cases", 1)),
+            min_holdout_cases=int(payload.get("min_holdout_cases", 5)),
+            min_cases_per_category=int(payload.get("min_cases_per_category", 2)),
+            max_runtime_error_rate=float(payload.get("max_runtime_error_rate", 0.05)),
+            max_unstable_case_rate=float(payload.get("max_unstable_case_rate", 0.2)),
+            max_mean_latency_s=float(payload.get("max_mean_latency_s", 30.0)),
+            max_p95_latency_s=float(payload.get("max_p95_latency_s", 60.0)),
+            max_mean_cost_usd=float(payload.get("max_mean_cost_usd", 0.25)),
+            max_estimated_eval_cost_usd=float(payload.get("max_estimated_eval_cost_usd", 25.0)),
+            max_estimated_eval_wall_time_s=float(payload.get("max_estimated_eval_wall_time_s", 3600.0)),
+            max_estimated_eval_tokens=int(payload.get("max_estimated_eval_tokens", 5_000_000)),
+        )
 
 
 @dataclass(frozen=True)
@@ -63,6 +155,7 @@ class RatchetRunConfig:
     max_case_retries: int = 2
     case_timeout_s: int = 180
     fail_fast: bool = False
+    eval_health: EvalHealthConfig = field(default_factory=EvalHealthConfig)
     config_path: Path | None = None
 
     @property
@@ -87,6 +180,7 @@ class RatchetRunConfig:
             "max_case_retries": self.max_case_retries,
             "case_timeout_s": self.case_timeout_s,
             "fail_fast": self.fail_fast,
+            "eval_health": self.eval_health.to_dict(),
             "config_path": str(self.config_path) if self.config_path else None,
         }
 
@@ -102,6 +196,15 @@ def _as_bool(payload: dict[str, Any], key: str, default: bool) -> bool:
     if key not in payload:
         return default
     return bool(payload[key])
+
+
+def _eval_health_from_payload(payload: dict[str, Any]) -> EvalHealthConfig:
+    raw_eval_health = payload.get("eval_health", {})
+    if raw_eval_health is None:
+        raw_eval_health = {}
+    if not isinstance(raw_eval_health, dict):
+        raise RatchetConfigError("Config key 'ratchet.eval_health' must be a table.")
+    return EvalHealthConfig.from_dict(raw_eval_health)
 
 
 def _objective_from_payload(payload: dict[str, Any]) -> OptimizationObjective:
@@ -153,6 +256,7 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         max_case_retries=int(payload.get("max_case_retries", 2)),
         case_timeout_s=int(payload.get("case_timeout_s", 180)),
         fail_fast=_as_bool(payload, "fail_fast", False),
+        eval_health=_eval_health_from_payload(payload),
         config_path=config_path,
     )
 
@@ -168,6 +272,9 @@ def _validate_run_payload(payload: dict[str, Any]) -> None:
     raw_constraints = dict(raw_objective or {}).get("constraints", {})
     if raw_constraints is not None and not isinstance(raw_constraints, dict):
         raise RatchetConfigError("Config key 'ratchet.objective.constraints' must be a table.")
+    raw_eval_health = payload.get("eval_health", {})
+    if raw_eval_health is not None and not isinstance(raw_eval_health, dict):
+        raise RatchetConfigError("Config key 'ratchet.eval_health' must be a table.")
 
 
 def _reject_unknown_keys(payload: dict[str, Any], allowed: set[str], context: str) -> None:

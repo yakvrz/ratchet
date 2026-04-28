@@ -35,6 +35,15 @@ Run the optimizer:
 python3 -m ratchet optimize --config my-agent-ratchet/ratchet.toml
 ```
 
+Optionally check eval-set and grader health before optimizing:
+
+```bash
+python3 -m ratchet eval-health --config my-agent-ratchet/ratchet.toml
+```
+
+The eval health command writes a readable `eval_health.md` and a complete ordered `eval_health.json`
+under `<out>/eval_health/`.
+
 You can still run with explicit flags instead of a config file:
 
 ```bash
@@ -102,6 +111,23 @@ Helper utilities:
 - `case_timeout_s`
 - `fail_fast`
 
+Optional eval health config:
+
+```toml
+[ratchet.eval_health]
+sample_limit = 8
+repeats = 2
+min_holdout_cases = 5
+max_runtime_error_rate = 0.05
+max_unstable_case_rate = 0.2
+max_mean_latency_s = 30.0
+max_p95_latency_s = 60.0
+max_mean_cost_usd = 0.25
+max_estimated_eval_cost_usd = 25.0
+max_estimated_eval_wall_time_s = 3600.0
+max_estimated_eval_tokens = 5000000
+```
+
 Objective config:
 
 ```toml
@@ -123,6 +149,7 @@ Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repea
 
 - `python3 -m ratchet init --template python_function|python_cli --out <dir>`
 - `python3 -m ratchet check --config ratchet.toml`
+- `python3 -m ratchet eval-health --config ratchet.toml`
 - `python3 -m ratchet optimize --config ratchet.toml`
 
 `run` remains as an alias for `optimize`.
