@@ -81,6 +81,7 @@ MAX_SIMPLIFICATION_PARENT_COUNT = 2
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
+MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP = 2
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -1933,9 +1934,39 @@ def _select_full_dev_candidates(
         by_group.setdefault(group, []).append(state)
     selected: list[CandidateEvaluationState] = []
     for group_states in by_group.values():
-        ranked = sorted(group_states, key=lambda state: _candidate_stage_sort_key(state, objective))
-        selected.extend(ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP])
+        ranked = sorted(group_states, key=lambda state: _candidate_full_dev_sort_key(state, objective))
+        group_selected = ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP]
+        few_shot_variants = [state for state in ranked if _is_few_shot_variant_state(state)]
+        for state in few_shot_variants[:MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP]:
+            if all(state is not item for item in group_selected):
+                group_selected.append(state)
+        selected_ids = {id(state) for state in group_selected}
+        for state in group_states:
+            if id(state) in selected_ids:
+                continue
+            if _is_few_shot_variant_state(state):
+                state.rejection_reason = (
+                    "screened out before full_dev by few-shot compression ranking "
+                    f"(cap {MAX_FULL_DEV_FEW_SHOT_VARIANTS_PER_GROUP} variants per comparison group)"
+                )
+            else:
+                state.rejection_reason = "screened out before full_dev by batch ranking"
+            state.frontier_status = "screened_out"
+            state.accepted = False
+        selected.extend(group_selected)
     return sorted(selected, key=lambda state: _candidate_stage_sort_key(state, objective))
+
+
+def _candidate_full_dev_sort_key(
+    state: CandidateEvaluationState,
+    objective: OptimizationObjective,
+) -> tuple[Any, ...]:
+    base = _candidate_stage_sort_key(state, objective)
+    if _is_few_shot_variant_state(state):
+        if len(base) > 1:
+            return (*base[:-1], _few_shot_example_count(state.candidate), base[-1])
+        return (*base, _few_shot_example_count(state.candidate))
+    return base
 
 
 def _candidate_stage_sort_key(
@@ -1945,6 +1976,15 @@ def _candidate_stage_sort_key(
     if state.summary is None:
         return (1,)
     return (0, *objective_sort_key(state.summary, objective))
+
+
+def _is_few_shot_variant_state(state: CandidateEvaluationState) -> bool:
+    candidate = state.candidate
+    if candidate.transform_family != "targeted_few_shot":
+        return False
+    if candidate.patch.metadata.get("few_shot_variant"):
+        return True
+    return _few_shot_example_count(candidate) > 0
 
 
 def _finalize_candidate_state(state: CandidateEvaluationState, reference: PatchSummary) -> None:

@@ -10,9 +10,14 @@ from ratchet.profiling import (
     runtime_reliability_diagnostics,
 )
 from ratchet.proposals import _few_shot_count_variants, _materialize_candidate_references
-from ratchet.optimizer import _prefer_simple_few_shot_strategy, _simplification_variants
+from ratchet.optimizer import (
+    CandidateEvaluationState,
+    _prefer_simple_few_shot_strategy,
+    _select_full_dev_candidates,
+    _simplification_variants,
+)
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.transforms import CandidateProposal, Intervention
+from ratchet.transforms import CandidateProposal, Intervention, TransformContextKey
 from ratchet.types import (
     AgentPatch,
     DiagnosticTrace,
@@ -59,6 +64,105 @@ def summary(
         patch=patch,
         split="dev",
         evaluations=[evaluation],
+    )
+
+
+def selection_summary(
+    patch: AgentPatch,
+    *,
+    pass_count: int,
+    case_count: int = 10,
+    cost_usd: float = 0.001,
+) -> PatchSummary:
+    evaluations = []
+    for index in range(case_count):
+        passed = index < pass_count
+        case = EvalCase(id=f"case-{index}", split="dev", input=f"x {index}", expected={"label": "ok"})
+        evaluations.append(
+            CaseEvaluation(
+                case=case,
+                record=RunRecord(
+                    output={"label": "ok" if passed else "wrong"},
+                    metrics=OperationalMetrics(
+                        latency_s=1.0,
+                        input_tokens=100,
+                        output_tokens=8,
+                        total_tokens=108,
+                        cost_usd=cost_usd,
+                    ),
+                    diagnostics=DiagnosticTrace(raw_output_text="{}"),
+                ),
+                grade=GradeResult(score=1.0 if passed else 0.0, passed=passed),
+            )
+        )
+    return PatchSummary(
+        patch_hash=f"summary-{pass_count}-{cost_usd}",
+        patch=patch,
+        split="dev",
+        evaluations=evaluations,
+    )
+
+
+def candidate_state(
+    candidate: CandidateProposal,
+    *,
+    pass_count: int,
+    cost_usd: float = 0.001,
+) -> CandidateEvaluationState:
+    return CandidateEvaluationState(
+        candidate=candidate,
+        patch=candidate.patch,
+        patch_hash=f"patch-{candidate.transform_family}-{pass_count}-{cost_usd}",
+        proposal_patch_hash=f"proposal-{candidate.transform_family}-{pass_count}-{cost_usd}",
+        transform_context=TransformContextKey.from_candidate(candidate),
+        summary=selection_summary(candidate.patch, pass_count=pass_count, cost_usd=cost_usd),
+    )
+
+
+def few_shot_candidate(example_count: int, *, comparison_group: str = "few-shot-exp") -> CandidateProposal:
+    examples = [
+        {"source_case_id": f"train-{index}", "input": f"example {index}", "output": {"label": "ok"}}
+        for index in range(example_count)
+    ]
+    return CandidateProposal(
+        transform_family="targeted_few_shot",
+        intervention=Intervention(kind="example_selection", payload={}),
+        transform_parameters={
+            "few_shot_example_count": example_count,
+            "original_few_shot_example_count": 3,
+            "selection_strategy": "representative",
+        },
+        comparison_group=comparison_group,
+        candidate_role="compression" if example_count < 3 else "atomic",
+        patch=AgentPatch(
+            operations=[PatchOperation(op="add_few_shot", target="few_shot", value=examples)],
+            metadata={
+                "few_shot_variant": {
+                    "example_count": example_count,
+                    "original_example_count": 3,
+                    "selection_strategy": "representative",
+                    "source_case_ids": [item["source_case_id"] for item in examples],
+                }
+            },
+        ),
+    )
+
+
+def prompt_candidate(name: str, *, comparison_group: str = "prompt-exp") -> CandidateProposal:
+    return CandidateProposal(
+        transform_family="prompt_rewrite",
+        intervention=Intervention(kind="patch", payload={}),
+        transform_instance=name,
+        comparison_group=comparison_group,
+        patch=AgentPatch(
+            operations=[
+                PatchOperation(
+                    op="revise_instruction",
+                    target="instructions.system",
+                    value=f"Classify carefully: {name}",
+                )
+            ]
+        ),
     )
 
 
@@ -278,6 +382,47 @@ class ProfilingTests(unittest.TestCase):
         )
 
         self.assertEqual([row[0].transform_parameters["selection_strategy"] for row in filtered], ["representative"])
+
+    def test_full_dev_selection_keeps_two_few_shot_compression_variants(self) -> None:
+        one_shot = candidate_state(few_shot_candidate(1), pass_count=8, cost_usd=0.001)
+        two_shot = candidate_state(few_shot_candidate(2), pass_count=9, cost_usd=0.002)
+        three_shot = candidate_state(few_shot_candidate(3), pass_count=9, cost_usd=0.003)
+
+        selected = _select_full_dev_candidates(
+            [one_shot, two_shot, three_shot],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [2, 3])
+        self.assertEqual(one_shot.frontier_status, "screened_out")
+        self.assertIn("few-shot compression ranking", one_shot.rejection_reason or "")
+
+    def test_full_dev_selection_prefers_smaller_few_shot_variant_when_tied(self) -> None:
+        one_shot = candidate_state(few_shot_candidate(1), pass_count=9, cost_usd=0.001)
+        two_shot = candidate_state(few_shot_candidate(2), pass_count=9, cost_usd=0.001)
+        three_shot = candidate_state(few_shot_candidate(3), pass_count=9, cost_usd=0.001)
+
+        selected = _select_full_dev_candidates(
+            [three_shot, two_shot, one_shot],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        self.assertEqual([state.candidate.transform_parameters["few_shot_example_count"] for state in selected], [1, 2])
+        self.assertEqual(three_shot.frontier_status, "screened_out")
+
+    def test_full_dev_selection_keeps_one_ordinary_candidate_per_group(self) -> None:
+        weak = candidate_state(prompt_candidate("weak"), pass_count=7)
+        good = candidate_state(prompt_candidate("good"), pass_count=9)
+        best = candidate_state(prompt_candidate("best"), pass_count=10)
+
+        selected = _select_full_dev_candidates(
+            [weak, good, best],
+            OptimizationObjective(mode="correctness"),
+        )
+
+        self.assertEqual([state.candidate.transform_instance for state in selected], ["best"])
+        self.assertEqual(weak.frontier_status, "screened_out")
+        self.assertEqual(good.frontier_status, "screened_out")
 
     def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
         candidate = CandidateProposal.from_dict(
