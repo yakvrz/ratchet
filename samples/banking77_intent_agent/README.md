@@ -2,7 +2,7 @@
 
 This sample is a small Ratchet sanity check for fine-grained banking intent classification.
 
-It builds a focused subset of BANKING77 from the public PolyAI task-specific dataset repository. The selected labels are intentionally confusable: cash withdrawal fees vs. unrecognized withdrawals, card payment fees vs. unrecognized card payments, transfer issues, and identity verification intents.
+It builds a focused subset of BANKING77 from the public PolyAI task-specific dataset repository. The sanity subset uses 12 of the 77 BANKING77 labels, rather than the full BANKING77 label set. The selected labels are intentionally confusable: cash withdrawal fees vs. unrecognized withdrawals, card payment fees vs. unrecognized card payments, transfer issues, and identity verification intents.
 
 The baseline is deliberately simple and cheap:
 

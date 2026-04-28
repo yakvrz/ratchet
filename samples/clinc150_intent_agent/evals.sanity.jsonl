@@ -1,0 +1,104 @@
+{"expected": {"label": "balance"}, "id": "train-balance-1", "input": "what is my balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "balance"}, "id": "train-balance-2", "input": "check my bank balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "balance"}, "id": "train-balance-3", "input": "what's my bank balance", "metadata": {"category": "balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "balance"}, "id": "dev-balance-1", "input": "what's my pnc balance", "metadata": {"category": "balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "balance"}, "id": "dev-balance-2", "input": "what is the balance in my pnc account", "metadata": {"category": "balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "balance"}, "id": "dev-balance-3", "input": "how much is in my pnc account", "metadata": {"category": "balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "balance"}, "id": "holdout-balance-1", "input": "check my checking balance", "metadata": {"category": "balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "balance"}, "id": "holdout-balance-2", "input": "can you tell me my bank balance", "metadata": {"category": "balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "transactions"}, "id": "train-transactions-1", "input": "show me recent transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transactions"}, "id": "train-transactions-2", "input": "pull up my grocery transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transactions"}, "id": "train-transactions-3", "input": "retrieve my recent transactions", "metadata": {"category": "transactions", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transactions"}, "id": "dev-transactions-1", "input": "show me all new transactions", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transactions"}, "id": "dev-transactions-2", "input": "i want to see transactions from this month", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transactions"}, "id": "dev-transactions-3", "input": "show me all transactions for current statement", "metadata": {"category": "transactions", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transactions"}, "id": "holdout-transactions-1", "input": "show my transactions", "metadata": {"category": "transactions", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "transactions"}, "id": "holdout-transactions-2", "input": "i need to know all my spending transactions", "metadata": {"category": "transactions", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "transfer"}, "id": "train-transfer-1", "input": "money transfer request", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transfer"}, "id": "train-transfer-2", "input": "please transfer my funds", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transfer"}, "id": "train-transfer-3", "input": "transfer between two accounts", "metadata": {"category": "transfer", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "transfer"}, "id": "dev-transfer-1", "input": "transfer funds to the other account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transfer"}, "id": "dev-transfer-2", "input": "please transfer half of my funds to an alternate account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transfer"}, "id": "dev-transfer-3", "input": "transfer 50 dollars from my checking account to my money market account", "metadata": {"category": "transfer", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "transfer"}, "id": "holdout-transfer-1", "input": "how much money can i transfer today", "metadata": {"category": "transfer", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "transfer"}, "id": "holdout-transfer-2", "input": "i need to make a transfer of my money", "metadata": {"category": "transfer", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "pay_bill"}, "id": "train-pay_bill-1", "input": "can i pay a bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "pay_bill"}, "id": "train-pay_bill-2", "input": "can i pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "pay_bill"}, "id": "train-pay_bill-3", "input": "please pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "pay_bill"}, "id": "dev-pay_bill-1", "input": "pay a bill!", "metadata": {"category": "pay_bill", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "pay_bill"}, "id": "dev-pay_bill-2", "input": "i want to pay a bill", "metadata": {"category": "pay_bill", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "pay_bill"}, "id": "dev-pay_bill-3", "input": "tell me if you can help pay a bill", "metadata": {"category": "pay_bill", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "pay_bill"}, "id": "holdout-pay_bill-1", "input": "pay my light bill", "metadata": {"category": "pay_bill", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "pay_bill"}, "id": "holdout-pay_bill-2", "input": "i want to pay my bill", "metadata": {"category": "pay_bill", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_balance"}, "id": "train-bill_balance-1", "input": "can you check the balance on the water bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_balance"}, "id": "train-bill_balance-2", "input": "please give me the full balance on my water bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_balance"}, "id": "train-bill_balance-3", "input": "please find the current balance on my con edison bill", "metadata": {"category": "bill_balance", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_balance"}, "id": "dev-bill_balance-1", "input": "how much is due on the gas bill", "metadata": {"category": "bill_balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_balance"}, "id": "dev-bill_balance-2", "input": "how much is my kill bill bill for", "metadata": {"category": "bill_balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_balance"}, "id": "dev-bill_balance-3", "input": "how much is my xfinity cable bill", "metadata": {"category": "bill_balance", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_balance"}, "id": "holdout-bill_balance-1", "input": "tell me my water bill please", "metadata": {"category": "bill_balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_balance"}, "id": "holdout-bill_balance-2", "input": "what is the electricity bill", "metadata": {"category": "bill_balance", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_due"}, "id": "train-bill_due-1", "input": "when is my bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_due"}, "id": "train-bill_due-2", "input": "when is the bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_due"}, "id": "train-bill_due-3", "input": "when's the ac bill due", "metadata": {"category": "bill_due", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "bill_due"}, "id": "dev-bill_due-1", "input": "is the bill due this week", "metadata": {"category": "bill_due", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_due"}, "id": "dev-bill_due-2", "input": "when is my kaiser bill due", "metadata": {"category": "bill_due", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_due"}, "id": "dev-bill_due-3", "input": "when is the electric bill due", "metadata": {"category": "bill_due", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "bill_due"}, "id": "holdout-bill_due-1", "input": "is the bill due", "metadata": {"category": "bill_due", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "bill_due"}, "id": "holdout-bill_due-2", "input": "is the bill due today", "metadata": {"category": "bill_due", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit"}, "id": "train-credit_limit-1", "input": "credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit"}, "id": "train-credit_limit-2", "input": "credit limit info", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit"}, "id": "train-credit_limit-3", "input": "how is my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit"}, "id": "dev-credit_limit-1", "input": "what's my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit"}, "id": "dev-credit_limit-2", "input": "give me my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit"}, "id": "dev-credit_limit-3", "input": "what's the limit for my credit", "metadata": {"category": "credit_limit", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit"}, "id": "holdout-credit_limit-1", "input": "tell me my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit"}, "id": "holdout-credit_limit-2", "input": "how high is my credit limit", "metadata": {"category": "credit_limit", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-1", "input": "credit limit change", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-2", "input": "can you change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit_change"}, "id": "train-credit_limit_change-3", "input": "change my credit limit, please", "metadata": {"category": "credit_limit_change", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "credit_limit_change"}, "id": "dev-credit_limit_change-1", "input": "how do i change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit_change"}, "id": "dev-credit_limit_change-2", "input": "can i make a change to my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit_change"}, "id": "dev-credit_limit_change-3", "input": "can you help me change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "credit_limit_change"}, "id": "holdout-credit_limit_change-1", "input": "can i change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "credit_limit_change"}, "id": "holdout-credit_limit_change-2", "input": "when can i change my credit limit", "metadata": {"category": "credit_limit_change", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "card_declined"}, "id": "train-card_declined-1", "input": "why was my card declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "card_declined"}, "id": "train-card_declined-2", "input": "yesterday, my card was declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "card_declined"}, "id": "train-card_declined-3", "input": "tell me why my card got declined", "metadata": {"category": "card_declined", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "card_declined"}, "id": "dev-card_declined-1", "input": "tell me why my card was declined", "metadata": {"category": "card_declined", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "card_declined"}, "id": "dev-card_declined-2", "input": "is there a reason my card was declined", "metadata": {"category": "card_declined", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "card_declined"}, "id": "dev-card_declined-3", "input": "target declined my card and i don't know why", "metadata": {"category": "card_declined", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "card_declined"}, "id": "holdout-card_declined-1", "input": "my card declined", "metadata": {"category": "card_declined", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "card_declined"}, "id": "holdout-card_declined-2", "input": "my card got declined; why", "metadata": {"category": "card_declined", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "freeze_account"}, "id": "train-freeze_account-1", "input": "freeze my account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "freeze_account"}, "id": "train-freeze_account-2", "input": "freeze my bank account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "freeze_account"}, "id": "train-freeze_account-3", "input": "please freeze my account", "metadata": {"category": "freeze_account", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "freeze_account"}, "id": "dev-freeze_account-1", "input": "can you please freeze my account", "metadata": {"category": "freeze_account", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "freeze_account"}, "id": "dev-freeze_account-2", "input": "how we stop my account", "metadata": {"category": "freeze_account", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "freeze_account"}, "id": "dev-freeze_account-3", "input": "can we stop my bank account", "metadata": {"category": "freeze_account", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "freeze_account"}, "id": "holdout-freeze_account-1", "input": "freeze my account for me", "metadata": {"category": "freeze_account", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "freeze_account"}, "id": "holdout-freeze_account-2", "input": "put a freeze on my account", "metadata": {"category": "freeze_account", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "account_blocked"}, "id": "train-account_blocked-1", "input": "why is my account blocked", "metadata": {"category": "account_blocked", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "account_blocked"}, "id": "train-account_blocked-2", "input": "help, my account is blocked", "metadata": {"category": "account_blocked", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "account_blocked"}, "id": "train-account_blocked-3", "input": "i think my account is blocked", "metadata": {"category": "account_blocked", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "account_blocked"}, "id": "dev-account_blocked-1", "input": "can you check and see if my account's blocked", "metadata": {"category": "account_blocked", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "account_blocked"}, "id": "dev-account_blocked-2", "input": "do you have any idea why my account may be blocked", "metadata": {"category": "account_blocked", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "account_blocked"}, "id": "dev-account_blocked-3", "input": "can you confirm my account's blocked and tell me why", "metadata": {"category": "account_blocked", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "account_blocked"}, "id": "holdout-account_blocked-1", "input": "what is up with my account, why is it blocked", "metadata": {"category": "account_blocked", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "account_blocked"}, "id": "holdout-account_blocked-2", "input": "is there a problem with my account, it appears to be blocked", "metadata": {"category": "account_blocked", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "report_fraud"}, "id": "train-report_fraud-1", "input": "report fraud on my card", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "report_fraud"}, "id": "train-report_fraud-2", "input": "please file a fraud report", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "report_fraud"}, "id": "train-report_fraud-3", "input": "can you report credit card fraud for me", "metadata": {"category": "report_fraud", "source": "clinc150_train"}, "split": "train"}
+{"expected": {"label": "report_fraud"}, "id": "dev-report_fraud-1", "input": "where do i report fraud on my credit card", "metadata": {"category": "report_fraud", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "report_fraud"}, "id": "dev-report_fraud-2", "input": "how do i report fraud on my chase bank card", "metadata": {"category": "report_fraud", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "report_fraud"}, "id": "dev-report_fraud-3", "input": "i want to report fraud on my american express", "metadata": {"category": "report_fraud", "source": "clinc150_val"}, "split": "dev"}
+{"expected": {"label": "report_fraud"}, "id": "holdout-report_fraud-1", "input": "who do i contact to report fraud on my visa", "metadata": {"category": "report_fraud", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "report_fraud"}, "id": "holdout-report_fraud-2", "input": "i need to report fraudulent activity on my usaa card", "metadata": {"category": "report_fraud", "source": "clinc150_test"}, "split": "holdout"}
+{"expected": {"label": "oos"}, "id": "train-oos-1", "input": "how much is an overdraft fee for bank", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
+{"expected": {"label": "oos"}, "id": "train-oos-2", "input": "why are exponents preformed before multiplication in the order of operations", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
+{"expected": {"label": "oos"}, "id": "train-oos-3", "input": "what size wipers does this car take", "metadata": {"category": "oos", "source": "clinc150_oos_train"}, "split": "train"}
+{"expected": {"label": "oos"}, "id": "dev-oos-1", "input": "set a warning for when my bank account starts running low", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
+{"expected": {"label": "oos"}, "id": "dev-oos-2", "input": "a show on broadway", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
+{"expected": {"label": "oos"}, "id": "dev-oos-3", "input": "who has the best record in the nfl", "metadata": {"category": "oos", "source": "clinc150_oos_val"}, "split": "dev"}
+{"expected": {"label": "oos"}, "id": "holdout-oos-1", "input": "how much has the dow changed today", "metadata": {"category": "oos", "source": "clinc150_oos_test"}, "split": "holdout"}
+{"expected": {"label": "oos"}, "id": "holdout-oos-2", "input": "how many prime numbers are there between 0 and 100", "metadata": {"category": "oos", "source": "clinc150_oos_test"}, "split": "holdout"}
