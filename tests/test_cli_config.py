@@ -213,8 +213,8 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(run_line)
-        self.assertIn("[ratchet 00:03] RUN", run_line)
-        self.assertIn("train=20 dev=30 holdout=10", run_line)
+        self.assertIn("[00:03] Setup", run_line)
+        self.assertIn("train=20, dev=30, holdout=10", run_line)
         self.assertIn("concurrency=4/12", run_line)
 
         proposal_line = printer.format(
@@ -236,8 +236,8 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(proposal_line)
-        self.assertIn("IMPLEMENT", proposal_line)
-        self.assertIn("returned=5 valid=4 invalid=1", proposal_line)
+        self.assertIn("Implement", proposal_line)
+        self.assertIn("returned 5 candidate(s): 4 valid, 1 invalid", proposal_line)
         self.assertIn("model=gemini-3-flash-preview", proposal_line)
         self.assertIn("tokens=1200/300", proposal_line)
 
@@ -257,10 +257,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(candidate_line)
-        self.assertIn("CANDIDATE", candidate_line)
+        self.assertIn("Candidate", candidate_line)
         self.assertIn("patch=abcdef12", candidate_line)
-        self.assertIn("score_delta=+0.125", candidate_line)
-        self.assertIn("cost_delta=-$0.0020", candidate_line)
+        self.assertIn("score +0.125", candidate_line)
+        self.assertIn("cost -$0.0020", candidate_line)
         self.assertIn("full_dev=no", candidate_line)
 
     def test_check_fails_clearly_on_invalid_adapter_wiring(self) -> None:
