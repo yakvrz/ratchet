@@ -213,8 +213,8 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(run_line)
-        self.assertIn("[ratchet 00:03] RUN", run_line)
-        self.assertIn("train=20 dev=30 holdout=10", run_line)
+        self.assertIn("[00:03] Setup", run_line)
+        self.assertIn("train=20, dev=30, holdout=10", run_line)
         self.assertIn("concurrency=4/12", run_line)
 
         proposal_line = printer.format(
@@ -236,8 +236,8 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(proposal_line)
-        self.assertIn("PROPOSE", proposal_line)
-        self.assertIn("returned=5 valid=4 invalid=1", proposal_line)
+        self.assertIn("Implement", proposal_line)
+        self.assertIn("returned 5 candidate(s): 4 valid, 1 invalid", proposal_line)
         self.assertIn("model=gemini-3-flash-preview", proposal_line)
         self.assertIn("tokens=1200/300", proposal_line)
 
@@ -257,10 +257,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(candidate_line)
-        self.assertIn("CANDIDATE", candidate_line)
+        self.assertIn("Candidate", candidate_line)
         self.assertIn("patch=abcdef12", candidate_line)
-        self.assertIn("score_delta=+0.125", candidate_line)
-        self.assertIn("cost_delta=-$0.0020", candidate_line)
+        self.assertIn("score +0.125", candidate_line)
+        self.assertIn("cost -$0.0020", candidate_line)
         self.assertIn("full_dev=no", candidate_line)
 
     def test_check_fails_clearly_on_invalid_adapter_wiring(self) -> None:
@@ -407,6 +407,72 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 sanitize_examples=False,
             )
             self.assertFalse(overridden.objective.constraints.sanitize_examples)
+
+    def test_optimizer_role_models_fall_back_to_default_and_can_override(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    optimizer_model = "default-model"
+                    optimizer_reasoning = "medium"
+                    diagnoser_model = "diagnoser-model"
+                    research_planner_reasoning = "high"
+                    candidate_implementer_model = "implementer-model"
+                    measurement_selector_model = "selector-model"
+                    measurement_selector_reasoning = "low"
+                    """
+                ).strip()
+            )
+
+            loaded = load_run_config(config_path)
+            self.assertEqual(
+                loaded.optimizer_role_models(),
+                {
+                    "diagnoser": "diagnoser-model",
+                    "research_planner": "default-model",
+                    "candidate_implementer": "implementer-model",
+                    "measurement_selector": "selector-model",
+                },
+            )
+            self.assertEqual(
+                loaded.optimizer_role_reasoning(),
+                {
+                    "diagnoser": "medium",
+                    "research_planner": "high",
+                    "candidate_implementer": "medium",
+                    "measurement_selector": "low",
+                },
+            )
+
+            overridden = resolve_run_config(
+                config_path=config_path,
+                adapter=None,
+                evals_path=None,
+                out_dir=None,
+                env_file=None,
+                dev_budget=None,
+                holdout_budget=None,
+                objective_mode=None,
+                allowed_models=None,
+                allowed_edits=None,
+                optimizer_model=None,
+                optimizer_reasoning=None,
+                samples_per_case=None,
+                case_concurrency=None,
+                stage_case_concurrency=None,
+                max_case_retries=None,
+                case_timeout_s=None,
+                fail_fast=None,
+                candidate_implementer_model="override-implementer",
+            )
+            self.assertEqual(overridden.optimizer_role_models()["candidate_implementer"], "override-implementer")
 
     def test_config_rejects_unknown_top_level_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

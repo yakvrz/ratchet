@@ -365,6 +365,7 @@ class CandidateProposal:
     experiment_id: str = ""
     candidate_role: str = "atomic"
     comparison_group: str = ""
+    affordance_ids: list[str] = field(default_factory=list)
     target_slice: str = "global"
     hypothesis: str = ""
     expected_effects: dict[str, Any] = field(default_factory=dict)
@@ -380,6 +381,7 @@ class CandidateProposal:
             "experiment_id": self.experiment_id,
             "candidate_role": self.candidate_role,
             "comparison_group": self.comparison_group,
+            "affordance_ids": list(self.affordance_ids),
             "target_slice": self.target_slice,
             "transform_context": TransformContextKey.from_candidate(self).to_dict(),
             "hypothesis": self.hypothesis,
@@ -418,6 +420,7 @@ class CandidateProposal:
             experiment_id=str(payload.get("experiment_id", "")),
             candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
             comparison_group=str(payload.get("comparison_group", "")),
+            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
             target_slice=str(payload.get("target_slice", "global") or "global"),
             hypothesis=str(payload.get("hypothesis", "")),
             expected_effects=dict(payload.get("expected_effects", {})),
@@ -546,6 +549,60 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
             }
         },
     ),
+    "retrieval_tuning": TransformFamily(
+        name="retrieval_tuning",
+        category="retrieval",
+        purpose="Tune retrieval parameters or retrieval query policy exposed by the agent surface.",
+        supported_edit_kinds=["retrieval"],
+        supported_ops=["set_retrieval_param"],
+        activation_signals=["retrieval_dependent_failures", "cost_objective", "latency_objective"],
+        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
+        risks=["retrieval recall regression", "retrieval cost increase"],
+        required_measurements=["score_delta", "retrieval_param_delta", "cost_delta", "latency_delta"],
+        complexity_cost=1.0,
+        parameter_contract={
+            "recommended": {
+                "retrieval_param": "retrieval setting being changed",
+                "expected_tradeoff": "quality, cost, or latency tradeoff",
+            }
+        },
+    ),
+    "tool_policy_revision": TransformFamily(
+        name="tool_policy_revision",
+        category="tools",
+        purpose="Revise tool descriptions, enablement, or tool-use policy exposed by the agent surface.",
+        supported_edit_kinds=["tool"],
+        supported_ops=["revise_tool_description", "revise_tool_policy", "set_runtime_param"],
+        activation_signals=["tool_dependent_slice", "cost_objective", "latency_objective"],
+        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
+        risks=["tool overuse", "tool underuse", "tool-call regression"],
+        required_measurements=["score_delta", "tool_call_delta", "cost_delta", "latency_delta"],
+        complexity_cost=1.25,
+        parameter_contract={
+            "recommended": {
+                "tool_target": "tool description, enabled flag, or policy being changed",
+                "expected_tool_behavior": "how tool-use should change",
+            }
+        },
+    ),
+    "verifier_retry": TransformFamily(
+        name="verifier_retry",
+        category="runtime",
+        purpose="Add or tune verifier/retry behavior for high-risk output failures.",
+        supported_edit_kinds=["verifier"],
+        supported_ops=["add_verifier_retry"],
+        activation_signals=["invalid_output", "runtime_errors", "high_risk_slice"],
+        expected_effects={"correctness": "possible_increase", "cost": "increase", "latency": "increase"},
+        risks=["extra model calls", "latency increase", "retry overfitting"],
+        required_measurements=["score_delta", "invalid_output_rate_delta", "cost_delta", "latency_delta"],
+        complexity_cost=1.75,
+        parameter_contract={
+            "recommended": {
+                "trigger": "failure condition that should trigger verifier/retry",
+                "retry_limit": "maximum retry count",
+            }
+        },
+    ),
 }
 
 
@@ -556,6 +613,9 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "targeted_few_shot": 1.0,
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
+        "retrieval_tuning": 1.0,
+        "tool_policy_revision": 1.0,
+        "verifier_retry": 1.0,
     },
     "invalid_output": {
         "output_contract_tightening": 1.0,
@@ -563,26 +623,36 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "targeted_few_shot": 1.0,
         "runtime_tuning": 1.0,
         "model_substitution": -0.6,
+        "verifier_retry": 0.8,
     },
     "correctness_gap": {
         "prompt_rewrite": 1.0,
         "model_substitution": 1.0,
         "targeted_few_shot": 1.0,
+        "retrieval_tuning": 0.4,
+        "tool_policy_revision": 0.4,
     },
     "cost_objective": {
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
+        "retrieval_tuning": 0.8,
+        "tool_policy_revision": 0.8,
     },
     "high_cost_cases": {
         "runtime_tuning": 1.0,
+        "retrieval_tuning": 0.8,
+        "tool_policy_revision": 0.8,
         "model_substitution": 1.0,
     },
     "latency_objective": {
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
+        "retrieval_tuning": 0.8,
+        "tool_policy_revision": 0.8,
     },
     "high_latency_cases": {
         "runtime_tuning": 1.0,
+        "verifier_retry": 0.8,
         "model_substitution": 1.0,
     },
     "weak_slices": {
@@ -599,6 +669,7 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "prompt_rewrite": 0.4,
         "model_substitution": 0.2,
         "targeted_few_shot": -0.4,
+        "verifier_retry": 0.6,
     },
 }
 

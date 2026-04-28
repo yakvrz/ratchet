@@ -11,6 +11,7 @@ from ratchet.adapters import adapter_fingerprint, load_adapter
 from ratchet.config import RatchetConfigError, RatchetRunConfig, ensure_search_path, resolve_run_config
 from ratchet.eval_health import EvalHealthReport, render_eval_health_markdown, run_eval_health_check
 from ratchet.errors import OptimizerModelError
+from ratchet.ideation_benchmark import write_ideation_assessment
 from ratchet.io import file_sha256, load_eval_cases
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.partial import write_partial_run_outputs
@@ -39,6 +40,14 @@ def run_optimizer(
     allowed_edits: list[str] | None = None,
     optimizer_model: str | None = "gpt-5.4",
     optimizer_reasoning: str | None = "medium",
+    diagnoser_model: str | None = None,
+    diagnoser_reasoning: str | None = None,
+    research_planner_model: str | None = None,
+    research_planner_reasoning: str | None = None,
+    candidate_implementer_model: str | None = None,
+    candidate_implementer_reasoning: str | None = None,
+    measurement_selector_model: str | None = None,
+    measurement_selector_reasoning: str | None = None,
     samples_per_case: int | None = 1,
     case_concurrency: int | None = 1,
     stage_case_concurrency: int | None = None,
@@ -64,6 +73,14 @@ def run_optimizer(
         allowed_edits=allowed_edits,
         optimizer_model=optimizer_model,
         optimizer_reasoning=optimizer_reasoning,
+        diagnoser_model=diagnoser_model,
+        diagnoser_reasoning=diagnoser_reasoning,
+        research_planner_model=research_planner_model,
+        research_planner_reasoning=research_planner_reasoning,
+        candidate_implementer_model=candidate_implementer_model,
+        candidate_implementer_reasoning=candidate_implementer_reasoning,
+        measurement_selector_model=measurement_selector_model,
+        measurement_selector_reasoning=measurement_selector_reasoning,
         samples_per_case=samples_per_case,
         case_concurrency=case_concurrency,
         stage_case_concurrency=stage_case_concurrency,
@@ -85,6 +102,14 @@ def run_optimizer(
         objective=config.objective,
         optimizer_model=config.optimizer_model,
         optimizer_reasoning=config.optimizer_reasoning,
+        diagnoser_model=config.diagnoser_model,
+        diagnoser_reasoning=config.diagnoser_reasoning,
+        research_planner_model=config.research_planner_model,
+        research_planner_reasoning=config.research_planner_reasoning,
+        candidate_implementer_model=config.candidate_implementer_model,
+        candidate_implementer_reasoning=config.candidate_implementer_reasoning,
+        measurement_selector_model=config.measurement_selector_model,
+        measurement_selector_reasoning=config.measurement_selector_reasoning,
         samples_per_case=config.samples_per_case,
         case_concurrency=config.case_concurrency,
         stage_case_concurrency=config.stage_case_concurrency,
@@ -119,10 +144,8 @@ def run_optimizer(
         )
         print(f"Partial report: {config.out / 'partial_report.md'}", file=sys.stderr)
         raise
-    print(
-        f"Selected patch: {result.selected_patch_hash} "
-        f"({'promoted' if result.promoted else 'baseline kept'})"
-    )
+    outcome = "promoted optimized patch" if result.promoted else "kept baseline"
+    print(f"Ratchet finished: {outcome}; selected patch {result.selected_patch_hash}")
     print(f"Report: {config.out / 'report.md'}")
     return config.out
 
@@ -138,7 +161,7 @@ class CliProgressPrinter:
         phase, message = _progress_message(event, row)
         if message is None:
             return None
-        return f"[ratchet {_format_elapsed(row.get('elapsed_s'))}] {phase:<10} {message}"
+        return f"[{_format_elapsed(row.get('elapsed_s'))}] {phase:<12} {message}"
 
 
 def _print_progress_event(row: dict[str, Any]) -> None:
@@ -148,45 +171,44 @@ def _print_progress_event(row: dict[str, Any]) -> None:
 def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]:
     if event == "run_started":
         return (
-            "RUN",
-            "started "
-            f"objective={row.get('objective')} train={row.get('train_cases')} dev={row.get('dev_cases')} "
-            f"holdout={row.get('holdout_cases')} dev_budget={row.get('dev_budget')} "
-            f"holdout_budget={row.get('holdout_budget')} concurrency={row.get('case_concurrency')}"
-            f"/{row.get('stage_case_concurrency', row.get('case_concurrency'))} "
-            f"examples={row.get('proposal_example_count')}",
+            "Setup",
+            f"objective={row.get('objective')} cases={row.get('total_cases')} "
+            f"(train={row.get('train_cases')}, dev={row.get('dev_cases')}, holdout={row.get('holdout_cases')}) "
+            f"budget=dev:{row.get('dev_budget')} holdout:{row.get('holdout_budget')} "
+            f"concurrency={row.get('case_concurrency')}/{row.get('stage_case_concurrency', row.get('case_concurrency'))} "
+            f"train_examples={row.get('proposal_example_count')}",
         )
     if event == "baseline_dev_started":
-        return "BASELINE", f"dev evaluation started cases={row.get('case_count')}"
+        return "Baseline", f"measuring dev behavior on {row.get('case_count')} cases"
     if event == "baseline_dev_completed":
-        return "BASELINE", "dev complete " + _score_summary(row)
+        return "Baseline", "dev result " + _score_brief(row)
     if event == "baseline_holdout_started":
-        return "BASELINE", f"holdout evaluation started cases={row.get('case_count')}"
+        return "Baseline", f"measuring protected holdout on {row.get('case_count')} cases"
     if event == "baseline_holdout_completed":
-        return "BASELINE", "holdout complete " + _score_summary(row)
+        return "Baseline", "holdout reference " + _score_brief(row)
     if event == "iteration_started":
         return (
-            "SEARCH",
-            f"iteration={row.get('iteration')} frontier={row.get('frontier_width')} "
-            f"dev_evals={row.get('dev_evaluations')}/{row.get('dev_budget')}",
+            "Search",
+            f"round {row.get('iteration')} starting with {row.get('frontier_width')} frontier parent(s); "
+            f"dev evals used {row.get('dev_evaluations')}/{row.get('dev_budget')}",
         )
     if event == "parent_started":
         return (
-            "PARENT",
-            f"rank={row.get('parent_rank')} patch={_short_hash(row.get('parent_patch_hash'))} "
-            + _score_summary(row),
+            "Frontier",
+            f"examining parent #{row.get('parent_rank')} patch={_short_hash(row.get('parent_patch_hash'))} "
+            + _score_brief(row),
         )
     if event == "diagnosis_started":
-        return "DIAGNOSE", f"started parent={row.get('parent_rank')} failures={row.get('failure_count')}"
+        return "Diagnose", f"inspecting {row.get('failure_count')} failing case(s) for parent #{row.get('parent_rank')}"
     if event == "diagnosis_completed":
         diagnostics = row.get("call_diagnostics") or {}
         cached = " cached" if row.get("cached") else ""
         return (
-            "DIAGNOSE",
+            "Diagnose",
             " ".join(
                 part
                 for part in (
-                    f"complete diagnoses={row.get('diagnosis_count')}{cached}",
+                    f"found {row.get('diagnosis_count')} diagnosis item(s){cached}",
                     _call_summary(diagnostics),
                     _short_reason(row.get("analysis")),
                 )
@@ -197,50 +219,89 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         modes = _join_limited(row.get("residual_failure_modes") or [], limit=3)
         cached = " cached" if row.get("cached") else ""
         return (
-            "THEORY",
-            f"bottleneck={row.get('bottleneck_class')} confidence={row.get('confidence')}{cached} "
+            "Theory",
+            f"bottleneck={_humanize_key(row.get('bottleneck_class'))} confidence={row.get('confidence')}{cached}; "
             f"residual={modes or 'none'}",
         )
     if event == "search_hypothesis_ready":
         families = _join_limited(row.get("active_families") or [], limit=5)
-        return "HYPOTHESIS", f"active={families or 'none'} contexts={row.get('active_context_count')}"
+        return "Hypothesis", f"active families={families or 'none'} contexts={row.get('active_context_count')}"
+    if event == "research_planner_started":
+        return (
+            "Plan",
+            f"choosing experiments for parent #{row.get('parent_rank')} from "
+            f"{row.get('opportunity_count')} opportunity signal(s) and {row.get('affordance_count')} affordance(s)",
+        )
+    if event == "research_planner_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        mechanisms = _join_limited(row.get("mechanisms") or [], limit=4)
+        return (
+            "Plan",
+            " ".join(
+                part
+                for part in (
+                    f"planned {row.get('intent_count')} experiment intent(s): {mechanisms or 'none'}",
+                    _call_summary(diagnostics),
+                )
+                if part
+            ),
+        )
+    if event == "measurement_selector_started":
+        return (
+            "Measure",
+            f"selecting {row.get('stage')} measurements from {row.get('candidate_count')} candidate(s); "
+            f"limit={row.get('max_select')}",
+        )
+    if event == "measurement_selector_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        selected = _join_limited([_short_hash(item) for item in row.get("selected_candidate_ids") or []], limit=4)
+        return (
+            "Measure",
+            " ".join(
+                part
+                for part in (
+                    f"selected for {row.get('stage')}: {selected or 'none'}",
+                    _call_summary(diagnostics),
+                    _short_reason(row.get("rationale")),
+                )
+                if part
+            ),
+        )
     if event == "proposal_started":
         families = _join_limited(row.get("active_families") or [], limit=5)
         retry = " retry" if row.get("proposal_retry") else ""
         return (
-            "PROPOSE",
-            f"started{retry} parent={row.get('parent_rank')} budget={row.get('proposal_budget')} "
-            f"families={families or 'none'}",
+            "Implement",
+            f"building candidates{retry} for parent #{row.get('parent_rank')} "
+            f"budget={row.get('proposal_budget')} families={families or 'none'}",
         )
     if event == "proposal_completed":
         diagnostics = row.get("call_diagnostics") or {}
         return (
-            "PROPOSE",
+            "Implement",
             " ".join(
                 part
                 for part in (
-                    f"complete returned={row.get('returned_count')} valid={row.get('valid_count')} "
-                    f"invalid={row.get('invalid_count')} duplicates={row.get('duplicate_count')}",
+                    f"returned {row.get('returned_count')} candidate(s): "
+                    f"{row.get('valid_count')} valid, {row.get('invalid_count')} invalid, "
+                    f"{row.get('duplicate_count')} duplicate",
                     _call_summary(diagnostics),
                 )
                 if part
             ),
         )
     if event == "candidate_evaluation_started":
-        return (
-            "CANDIDATE",
-            f"queued family={row.get('transform_family')} patch={_short_hash(row.get('patch_hash'))}",
-        )
+        return "Candidate", None
     if event == "candidate_stage_started":
         return (
-            "STAGE",
-            f"{_stage_name(row.get('stage'))} started candidates={row.get('candidate_count')} "
-            f"cases={row.get('case_count')}",
+            "Evaluate",
+            f"{_stage_name(row.get('stage'))}: running {row.get('candidate_count')} candidate(s) "
+            f"on {row.get('case_count')} case(s)",
         )
     if event == "candidate_stage_completed":
         return (
-            "STAGE",
-            f"{_stage_name(row.get('stage'))} complete advanced={row.get('advanced_count')} "
+            "Evaluate",
+            f"{_stage_name(row.get('stage'))}: advanced={row.get('advanced_count')} "
             f"accepted={row.get('accepted_count')} rejected={row.get('rejected_count')} "
             f"screened={row.get('screened_count')}",
         )
@@ -248,77 +309,74 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         status = row.get("frontier_status") or ("accepted" if row.get("accepted") else "rejected")
         reason = row.get("rejection_reason") or row.get("constraint_warning")
         return (
-            "CANDIDATE",
-            f"{status} family={row.get('transform_family')} patch={_short_hash(row.get('patch_hash'))} "
-            f"score_delta={_format_signed(row.get('score_delta'), digits=3)} "
-            f"cost_delta={_format_money_delta(row.get('cost_delta'))} "
-            f"latency_delta={_format_seconds_delta(row.get('latency_delta'))} "
+            "Candidate",
+            f"{_humanize_key(status)} patch={_short_hash(row.get('patch_hash'))} "
+            f"family={_humanize_key(row.get('transform_family'))} "
+            f"score {_format_signed(row.get('score_delta'), digits=3)} "
+            f"cost {_format_money_delta(row.get('cost_delta'))} "
+            f"latency {_format_seconds_delta(row.get('latency_delta'))} "
             f"stages={row.get('stage_count')} full_dev={_format_bool(row.get('full_dev_evaluated'))}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "retry_started":
-        return "RETRY", f"parent={row.get('parent_rank')} reason={_short_reason(row.get('reason'))}"
+        return "Retry", f"parent #{row.get('parent_rank')} because {_short_reason(row.get('reason'))}"
     if event == "frontier_updated":
         patches = _join_limited([_short_hash(item) for item in row.get("frontier_patch_hashes") or []], limit=4)
-        return "FRONTIER", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} patches={patches}"
+        return "Frontier", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} patches={patches}"
     if event == "search_stopped":
-        return "SEARCH", f"stopped reason={_short_reason(row.get('reason'))}"
+        return "Search", f"stopped: {_short_reason(row.get('reason'))}"
     if event == "simplification_started":
         return (
-            "SIMPLIFY",
-            f"started parent={_short_hash(row.get('parent_patch_hash'))} variant={_short_hash(row.get('patch_hash'))}",
+            "Simplify",
+            f"testing simpler variant={_short_hash(row.get('patch_hash'))} of parent={_short_hash(row.get('parent_patch_hash'))}",
         )
     if event == "simplification_completed":
         status = "accepted" if row.get("accepted") else "rejected"
         reason = row.get("rejection_reason")
         return (
-            "SIMPLIFY",
-            f"{status} variant={_short_hash(row.get('variant_patch_hash'))} {_score_summary(row)}"
+            "Simplify",
+            f"{status} variant={_short_hash(row.get('variant_patch_hash'))} {_score_brief(row)}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "confirmation_started":
         return (
-            "CONFIRM",
-            f"started patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')} "
+            "Confirm",
+            f"checking suspicious finalist patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')} "
             f"samples={row.get('sample_count')}",
         )
     if event == "confirmation_completed":
         status = "passed" if row.get("passed") else "failed"
-        return "CONFIRM", f"{status} patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+        return "Confirm", f"{status} patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
     if event == "confirmation_skipped":
-        return "CONFIRM", f"skipped patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+        return "Confirm", f"skipped patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
     if event == "holdout_candidate_started":
-        return "HOLDOUT", f"started patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')}"
+        return "Holdout", f"validating finalist patch={_short_hash(row.get('patch_hash'))} on {row.get('case_count')} protected case(s)"
     if event == "holdout_candidate_completed":
         status = row.get("finalist_status") or ("validated" if row.get("passed_final_gate") else "rejected")
         reason = row.get("rejection_reason")
         return (
-            "HOLDOUT",
-            f"{status} patch={_short_hash(row.get('patch_hash'))} {_score_summary(row)}"
+            "Holdout",
+            f"{_humanize_key(status)} patch={_short_hash(row.get('patch_hash'))} {_score_brief(row)}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "holdout_validation_skipped":
         patch = row.get("patch_hash")
         patch_text = f" patch={_short_hash(patch)}" if patch else ""
-        return "HOLDOUT", f"skipped{patch_text} reason={_short_reason(row.get('reason'))}"
+        return "Holdout", f"skipped{patch_text} reason={_short_reason(row.get('reason'))}"
     if event == "case_batch_started":
-        return (
-            "BATCH",
-            f"started split={row.get('split')} patch={_short_hash(row.get('patch_hash'))} "
-            f"fresh={row.get('fresh_count')} cases={row.get('case_count')} samples={row.get('sample_count')} "
-            f"concurrency={row.get('concurrency')}",
+        if int(row.get("fresh_count") or 0) <= 0:
+            return "Evaluate", None
+        return "Evaluate", (
+            f"running {row.get('fresh_count')} fresh {row.get('split')} case(s) "
+            f"for patch={_short_hash(row.get('patch_hash'))} concurrency={row.get('concurrency')}"
         )
     if event == "case_batch_completed":
-        return (
-            "BATCH",
-            f"complete split={row.get('split')} patch={_short_hash(row.get('patch_hash'))} "
-            f"fresh={row.get('fresh_count')} concurrency={row.get('concurrency')}",
-        )
+        return "Evaluate", None
     if event == "run_completed":
         status = "promoted" if row.get("promoted") else "baseline kept"
         return (
-            "DONE",
-            f"{status} selected={_short_hash(row.get('selected_patch_hash'))} "
+            "Done",
+            f"{status}; selected={_short_hash(row.get('selected_patch_hash'))} "
             f"accepted_dev={row.get('accepted_dev_patches')} holdout_validations={row.get('holdout_validations')} "
             f"reason={_short_reason(row.get('selection_reason'))}",
         )
@@ -334,12 +392,12 @@ def _format_elapsed(value: object) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
-def _score_summary(row: dict[str, Any]) -> str:
+def _score_brief(row: dict[str, Any]) -> str:
     return (
-        f"score={_format_number(row.get('mean_score'), digits=3)} "
-        f"pass={_format_count(row.get('pass_count'))}/{_format_count(row.get('case_count'))} "
-        f"cost={_format_money(row.get('mean_cost_usd'))}/case "
-        f"latency={_format_seconds(row.get('median_latency_s'))}"
+        f"score {_format_number(row.get('mean_score'), digits=3)} "
+        f"({_format_count(row.get('pass_count'))}/{_format_count(row.get('case_count'))} pass), "
+        f"cost {_format_money(row.get('mean_cost_usd'))}/case, "
+        f"latency {_format_seconds(row.get('median_latency_s'))}"
     )
 
 
@@ -446,6 +504,11 @@ def _stage_name(value: object) -> str:
     return text.replace("_", "-")
 
 
+def _humanize_key(value: object) -> str:
+    text = str(value or "")
+    return text.replace("_", " ") if text else "n/a"
+
+
 def _join_limited(values: list[Any] | tuple[Any, ...], *, limit: int) -> str:
     items = [str(item) for item in values if item is not None and str(item)]
     if not items:
@@ -453,7 +516,7 @@ def _join_limited(values: list[Any] | tuple[Any, ...], *, limit: int) -> str:
     shown = items[:limit]
     if len(items) > limit:
         shown.append(f"+{len(items) - limit}")
-    return ",".join(shown)
+    return ", ".join(shown)
 
 
 def _short_reason(value: object, *, limit: int = 120) -> str:
@@ -588,6 +651,14 @@ def _apply_run_overrides(
         allowed_edits=_split_csv(getattr(args, "allowed_edits", None)),
         optimizer_model=getattr(args, "optimizer_model", None),
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
+        diagnoser_model=getattr(args, "diagnoser_model", None),
+        diagnoser_reasoning=getattr(args, "diagnoser_reasoning", None),
+        research_planner_model=getattr(args, "research_planner_model", None),
+        research_planner_reasoning=getattr(args, "research_planner_reasoning", None),
+        candidate_implementer_model=getattr(args, "candidate_implementer_model", None),
+        candidate_implementer_reasoning=getattr(args, "candidate_implementer_reasoning", None),
+        measurement_selector_model=getattr(args, "measurement_selector_model", None),
+        measurement_selector_reasoning=getattr(args, "measurement_selector_reasoning", None),
         samples_per_case=getattr(args, "samples_per_case", None),
         case_concurrency=getattr(args, "case_concurrency", None),
         stage_case_concurrency=getattr(args, "stage_case_concurrency", None),
@@ -617,8 +688,16 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", choices=["correctness", "cost", "latency"], help="Primary optimization objective")
     parser.add_argument("--allowed-models", help="Comma-separated model allowlist for change_model patches")
     parser.add_argument("--allowed-edits", help="Comma-separated edit kinds to allow")
-    parser.add_argument("--optimizer-model", help="Model used by Ratchet's diagnosis/proposal loop")
-    parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's diagnosis/proposal loop")
+    parser.add_argument("--optimizer-model", help="Model used by Ratchet's research loop")
+    parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's research loop")
+    parser.add_argument("--diagnoser-model", help="Override model for Ratchet's failure diagnoser")
+    parser.add_argument("--diagnoser-reasoning", help="Override reasoning effort for Ratchet's failure diagnoser")
+    parser.add_argument("--research-planner-model", help="Override model for Ratchet's research planner")
+    parser.add_argument("--research-planner-reasoning", help="Override reasoning effort for Ratchet's research planner")
+    parser.add_argument("--candidate-implementer-model", help="Override model for Ratchet's candidate implementer")
+    parser.add_argument("--candidate-implementer-reasoning", help="Override reasoning effort for Ratchet's candidate implementer")
+    parser.add_argument("--measurement-selector-model", help="Override model for Ratchet's measurement selector")
+    parser.add_argument("--measurement-selector-reasoning", help="Override reasoning effort for Ratchet's measurement selector")
     parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per patch/case")
     parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
     parser.add_argument(
@@ -671,6 +750,12 @@ def add_eval_health_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_ideation_assessment_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--run-dir", required=True, help="Completed Ratchet run output directory")
+    parser.add_argument("--spec", help="Optional ideation assessment spec JSON")
+    parser.add_argument("--out", help="Output JSON path; defaults to RUN_DIR/ideation_assessment.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ratchet: eval-backed agent optimizer")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -691,6 +776,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_health_parser = subparsers.add_parser("eval-health", help="Check eval-set and grader health before optimization.")
     add_eval_health_arguments(eval_health_parser)
+
+    assess_parser = subparsers.add_parser(
+        "assess-ideation",
+        help="Assess optimizer ideation quality from an existing run directory.",
+    )
+    add_ideation_assessment_arguments(assess_parser)
 
     return parser
 
@@ -725,6 +816,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             if report.fatal or (bool(getattr(args, "strict", False)) and report.warning):
                 return 5
+            return 0
+
+        if args.command == "assess-ideation":
+            assessment = write_ideation_assessment(
+                args.run_dir,
+                spec_path=getattr(args, "spec", None),
+                out_path=getattr(args, "out", None),
+            )
+            summary = assessment.get("summary") or {}
+            print(
+                "Ideation assessment: "
+                f"{summary.get('passed_checks')}/{summary.get('total_checks')} checks passed; "
+                f"valid_impl_rate={float(summary.get('valid_implementation_rate') or 0.0):.3f}; "
+                f"selected_holdout_delta={float(summary.get('selected_holdout_score_delta') or 0.0):+.3f}"
+            )
+            print(f"JSON: {getattr(args, 'out', None) or Path(args.run_dir) / 'ideation_assessment.json'}")
             return 0
 
         raise ValueError(f"Unsupported command: {args.command}")

@@ -13,9 +13,12 @@ import time
 from typing import Any, Callable, Iterable
 
 from ratchet.adapters import AdapterProtocol, checked_agent_spec
+from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
-from ratchet.experiments import TaskTheory, build_task_theory
+from ratchet.errors import OptimizerModelError
+from ratchet.experiments import ExperimentIntent, ResearchState, TaskTheory, build_task_theory
+from ratchet.ideation import build_ideation_metrics
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
 from ratchet.model_client import model_request_limits
 from ratchet.objectives import (
@@ -37,7 +40,8 @@ from ratchet.profiling import (
     quality_cost_tradeoffs,
     runtime_reliability_diagnostics,
 )
-from ratchet.proposals import ProposalEngine
+from ratchet.proposals import CandidateImplementer
+from ratchet.research import MeasurementSelector, MeasurementAction, ResearchPlanner
 from ratchet.reporting import RatchetReporter, build_outcome_analysis
 from ratchet.results import (
     PatchSummary,
@@ -83,13 +87,9 @@ MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT = 1
 MAX_SIMPLIFICATION_FULL_DEV_PER_RUN = 2
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
-MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
 MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 2
-FULL_DEV_STRONG_SIGNAL_SCORE_DELTA = 0.10
-FULL_DEV_STRONG_SIGNAL_PASS_GAIN = 2
-FULL_DEV_COMPOSED_COMPETITIVE_MARGIN = 0.05
-FULL_DEV_STRONG_SIGNAL_MECHANISMS = {"runtime_defect_fix", "output_contract_fix", "model_capability_probe"}
+MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION = 1
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -154,6 +154,14 @@ class RatchetOptimizer:
         objective: OptimizationObjective | None = None,
         optimizer_model: str = "gpt-5.4",
         optimizer_reasoning: str = "medium",
+        diagnoser_model: str | None = None,
+        diagnoser_reasoning: str | None = None,
+        research_planner_model: str | None = None,
+        research_planner_reasoning: str | None = None,
+        candidate_implementer_model: str | None = None,
+        candidate_implementer_reasoning: str | None = None,
+        measurement_selector_model: str | None = None,
+        measurement_selector_reasoning: str | None = None,
         samples_per_case: int = 1,
         case_concurrency: int = 1,
         stage_case_concurrency: int | None = None,
@@ -174,15 +182,37 @@ class RatchetOptimizer:
         self.objective = objective or OptimizationObjective()
         self.agent_spec = checked_agent_spec(adapter)
         self.surface_generator = SurfaceGenerator()
+        self.optimizer_role_models = {
+            "diagnoser": diagnoser_model or optimizer_model,
+            "research_planner": research_planner_model or optimizer_model,
+            "candidate_implementer": candidate_implementer_model or optimizer_model,
+            "measurement_selector": measurement_selector_model or optimizer_model,
+        }
+        self.optimizer_role_reasoning = {
+            "diagnoser": diagnoser_reasoning or optimizer_reasoning,
+            "research_planner": research_planner_reasoning or optimizer_reasoning,
+            "candidate_implementer": candidate_implementer_reasoning or optimizer_reasoning,
+            "measurement_selector": measurement_selector_reasoning or optimizer_reasoning,
+        }
         self.diagnoser = FailureDiagnoser(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["diagnoser"],
+            reasoning_effort=self.optimizer_role_reasoning["diagnoser"],
         )
-        self.proposer = ProposalEngine(
+        self.candidate_implementer = CandidateImplementer(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["candidate_implementer"],
+            reasoning_effort=self.optimizer_role_reasoning["candidate_implementer"],
+        )
+        self.research_planner = ResearchPlanner(
+            env_path=env_path,
+            model=self.optimizer_role_models["research_planner"],
+            reasoning_effort=self.optimizer_role_reasoning["research_planner"],
+        )
+        self.measurement_selector = MeasurementSelector(
+            env_path=env_path,
+            model=self.optimizer_role_models["measurement_selector"],
+            reasoning_effort=self.optimizer_role_reasoning["measurement_selector"],
         )
         if samples_per_case <= 0:
             raise ValueError("samples_per_case must be positive.")
@@ -270,9 +300,8 @@ class RatchetOptimizer:
         diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
         task_theory_cache: dict[str, TaskTheory] = {}
         evaluated_patch_hashes = {baseline_dev.patch_hash}
-        generated_surface_rows: list[dict[str, Any]] = [
-            target.to_dict() for target in self.surface_generator.generate(self.agent_spec, self.objective)
-        ]
+        generated_surface = self.surface_generator.generate(self.agent_spec, self.objective)
+        generated_surface_rows: list[dict[str, Any]] = [target.to_dict() for target in generated_surface]
         dev_evaluations = 0
         iteration = 0
         consecutive_zero_eval_parent_attempts = 0
@@ -445,6 +474,19 @@ class RatchetOptimizer:
                     active_families=search_hypothesis.active_families,
                     active_context_count=len(search_hypothesis.active_contexts),
                 )
+                affordances = generate_optimization_affordances(
+                    surface,
+                    active_families=search_hypothesis.active_families,
+                )
+                decision_log.append(
+                    {
+                        "type": "optimization_affordances",
+                        "iteration": iteration,
+                        "parent_rank": parent_index + 1,
+                        "parent_patch_hash": current_dev.patch_hash,
+                        "affordances": [affordance.to_dict() for affordance in affordances],
+                    }
+                )
                 for diagnosis in diagnoses:
                     diagnoses_log.append(
                         {
@@ -478,6 +520,22 @@ class RatchetOptimizer:
                     )
                     search_complete = True
                     break
+                experiment_intents = self._plan_parent_research_action(
+                    current_dev=current_dev,
+                    task_theory=task_theory,
+                    search_hypothesis=search_hypothesis,
+                    affordances=affordances,
+                    proposals_log=proposals_log,
+                    decision_log=decision_log,
+                    iteration=iteration,
+                    parent_index=parent_index,
+                    proposal_budget=proposal_budget,
+                    dev_evaluations_used=dev_evaluations,
+                )
+                if not experiment_intents:
+                    parent_state.exhausted = True
+                    parent_state.consecutive_stalls += 1
+                    continue
                 accepted_rows, evaluations_used = self._propose_and_evaluate_parent(
                     current_dev=current_dev,
                     baseline_dev=baseline_dev,
@@ -498,6 +556,8 @@ class RatchetOptimizer:
                     parent_summaries=parent_summaries,
                     proposal_budget=proposal_budget,
                     dev_evaluations_used=dev_evaluations,
+                    experiment_intents=experiment_intents,
+                    affordances=affordances,
                 )
                 dev_evaluations += evaluations_used
                 parent_evaluations_used = evaluations_used
@@ -569,29 +629,51 @@ class RatchetOptimizer:
                         active_families=retry_search_hypothesis.active_families,
                         active_context_count=len(retry_search_hypothesis.active_contexts),
                     )
-                    retry_rows, retry_evaluations_used = self._propose_and_evaluate_parent(
+                    retry_affordances = generate_optimization_affordances(
+                        surface,
+                        active_families=retry_search_hypothesis.active_families,
+                    )
+                    retry_experiment_intents = self._plan_parent_research_action(
                         current_dev=current_dev,
-                        baseline_dev=baseline_dev,
-                        dev_cases=dev_cases,
-                        surface=surface,
-                        diagnoses=diagnoses,
                         task_theory=task_theory,
-                        diagnosis_analysis=diagnosis_analysis,
                         search_hypothesis=retry_search_hypothesis,
-                        current_spec=current_spec,
-                        proposal_example_bank=proposal_example_bank,
-                        proposal_example_cases=train_cases,
-                        evaluated_patch_hashes=evaluated_patch_hashes,
+                        affordances=retry_affordances,
                         proposals_log=proposals_log,
                         decision_log=decision_log,
                         iteration=iteration,
                         parent_index=parent_index,
-                        parent_summaries=parent_summaries,
                         proposal_budget=min(PROPOSAL_RETRY_BUDGET, self.dev_budget - dev_evaluations),
                         dev_evaluations_used=dev_evaluations,
                         proposal_retry=True,
-                        retry_reason="no_accepted_candidates_from_parent",
                     )
+                    if not retry_experiment_intents:
+                        retry_rows, retry_evaluations_used = [], 0
+                    else:
+                        retry_rows, retry_evaluations_used = self._propose_and_evaluate_parent(
+                            current_dev=current_dev,
+                            baseline_dev=baseline_dev,
+                            dev_cases=dev_cases,
+                            surface=surface,
+                            diagnoses=diagnoses,
+                            task_theory=task_theory,
+                            diagnosis_analysis=diagnosis_analysis,
+                            search_hypothesis=retry_search_hypothesis,
+                            current_spec=current_spec,
+                            proposal_example_bank=proposal_example_bank,
+                            proposal_example_cases=train_cases,
+                            evaluated_patch_hashes=evaluated_patch_hashes,
+                            proposals_log=proposals_log,
+                            decision_log=decision_log,
+                            iteration=iteration,
+                            parent_index=parent_index,
+                            parent_summaries=parent_summaries,
+                            proposal_budget=min(PROPOSAL_RETRY_BUDGET, self.dev_budget - dev_evaluations),
+                            dev_evaluations_used=dev_evaluations,
+                            experiment_intents=retry_experiment_intents,
+                            affordances=retry_affordances,
+                            proposal_retry=True,
+                            retry_reason="no_accepted_candidates_from_parent",
+                        )
                     dev_evaluations += retry_evaluations_used
                     parent_evaluations_used += retry_evaluations_used
                     accepted_rows.extend(retry_rows)
@@ -925,6 +1007,11 @@ class RatchetOptimizer:
         transform_context_summaries = summarize_transform_context_results(proposals_log)
         transform_final_statuses = _transform_final_status_summaries(finalist_statuses)
         cost_tradeoffs = quality_cost_tradeoffs(proposals_log)
+        ideation_metrics = build_ideation_metrics(
+            decision_log=decision_log,
+            proposals=proposals_log,
+            finalist_statuses=finalist_statuses,
+        )
         outcome_analysis = build_outcome_analysis(
             objective=self.objective,
             promoted=promoted,
@@ -952,6 +1039,12 @@ class RatchetOptimizer:
             frontier_recommendation=frontier_recommendation,
             optimizer_call_diagnostics=self.optimizer_call_diagnostics,
             quality_cost_tradeoffs=cost_tradeoffs,
+            measurement_decisions=[
+                row
+                for row in decision_log
+                if row.get("type") in {"research_plan", "measurement_decision"}
+            ],
+            ideation_metrics=ideation_metrics,
             outcome_analysis=outcome_analysis,
         )
         result = RatchetResult(
@@ -981,6 +1074,7 @@ class RatchetOptimizer:
             run_profile={},
             quality_cost_tradeoffs=cost_tradeoffs,
             optimizer_call_diagnostics=self.optimizer_call_diagnostics,
+            ideation_metrics=ideation_metrics,
             selection_reason=selection_reason,
             outcome_analysis=outcome_analysis,
             manifest=manifest,
@@ -1016,11 +1110,36 @@ class RatchetOptimizer:
             simplification_results.append(row)
             decision_log.append(row)
         simplification_full_dev_count = 0
-        for parent in simplification_parents:
+        for parent_index, parent in enumerate(simplification_parents, start=1):
             parent_full_dev_count = 0
-            for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]:
+            candidate_variants = [
+                variant
+                for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]
+                if patch_hash(variant) != parent.patch_hash
+            ]
+            selected_variant_hashes, skipped_variant_reasons = self._select_simplification_variants_with_measurement_selector(
+                parent=parent,
+                variants=candidate_variants,
+                baseline=baseline_dev,
+                decision_log=decision_log,
+                parent_rank=parent_index,
+            )
+            for variant in candidate_variants:
                 digest = patch_hash(variant)
-                if digest == parent.patch_hash:
+                if digest not in selected_variant_hashes:
+                    row = {
+                        "type": "simplification_skipped",
+                        "parent_patch_hash": parent.patch_hash,
+                        "patch_hash": digest,
+                        "patch": variant.to_dict(),
+                        "simplification": variant.metadata.get("simplification"),
+                        "reason": skipped_variant_reasons.get(
+                            digest,
+                            "research controller did not select simplification variant",
+                        ),
+                    }
+                    simplification_results.append(row)
+                    decision_log.append(row)
                     continue
                 summary = known_by_hash.get(digest)
                 reused = summary is not None
@@ -1098,6 +1217,107 @@ class RatchetOptimizer:
             augmented_by_hash.values(),
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
+
+    def _select_simplification_variants_with_measurement_selector(
+        self,
+        *,
+        parent: PatchSummary,
+        variants: list[AgentPatch],
+        baseline: PatchSummary,
+        decision_log: list[dict[str, Any]],
+        parent_rank: int,
+    ) -> tuple[set[str], dict[str, str]]:
+        if not variants:
+            return set(), {}
+        action = MeasurementAction(
+            action_id=f"simplify_{parent.patch_hash}",
+            action_type="simplify_candidate",
+            stage="simplification",
+            candidate_ids=[patch_hash(variant) for variant in variants],
+            max_select=min(MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST, len(variants)),
+            max_select_per_group=0,
+            rationale="Choose which simplification variants are worth evaluating before holdout.",
+            metadata={
+                "parent_patch_hash": parent.patch_hash,
+                "max_simplification_variants": MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST,
+            },
+        )
+        state_packet = {
+            "objective": self.objective.to_dict(),
+            "decision_point": "simplification",
+            "parent": {
+                "patch_hash": parent.patch_hash,
+                "score": parent.mean_score,
+                "pass_count": parent.pass_count,
+                "case_count": parent.case_count,
+                "operation_count": parent.operation_count,
+                "cost_usd": parent.mean_cost_usd,
+                "latency_s": parent.median_latency_s,
+            },
+            "baseline": {
+                "patch_hash": baseline.patch_hash,
+                "score": baseline.mean_score,
+                "pass_count": baseline.pass_count,
+                "case_count": baseline.case_count,
+                "operation_count": baseline.operation_count,
+                "cost_usd": baseline.mean_cost_usd,
+                "latency_s": baseline.median_latency_s,
+            },
+            "variants": [
+                {
+                    "candidate_id": patch_hash(variant),
+                    "operation_count": len(variant.operations),
+                    "simplification": variant.metadata.get("simplification"),
+                    "operations": [
+                        {"op": operation.op, "target": operation.target}
+                        for operation in variant.operations
+                    ],
+                }
+                for variant in variants
+            ],
+        }
+        self._emit_progress(
+            "measurement_selector_started",
+            stage="simplification",
+            parent_rank=parent_rank,
+            candidate_count=len(variants),
+            max_select=action.max_select,
+        )
+        decision = self.measurement_selector.select(
+            stage="simplification",
+            state=state_packet,
+            candidate_ids=action.candidate_ids,
+            max_select=action.max_select,
+            max_select_per_group=action.max_select_per_group,
+        )
+        if self.measurement_selector.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "stage": "simplification",
+                    "parent_rank": parent_rank,
+                    "parent_patch_hash": parent.patch_hash,
+                    **self.measurement_selector.last_call_diagnostics,
+                }
+            )
+        decision_log.append(
+            {
+                "type": "measurement_decision",
+                "stage": "simplification",
+                "parent_rank": parent_rank,
+                "parent_patch_hash": parent.patch_hash,
+                "action": action.to_dict(),
+                "decision": decision.to_dict(),
+            }
+        )
+        self._emit_progress(
+            "measurement_selector_completed",
+            stage="simplification",
+            parent_rank=parent_rank,
+            selected_candidate_ids=decision.selected_candidate_ids,
+            rationale=decision.rationale,
+            call_diagnostics=self.measurement_selector.last_call_diagnostics or {},
+        )
+        return set(decision.selected_candidate_ids), dict(decision.skipped_candidate_reasons)
 
     def _evaluate_simplification_variant(
         self,
@@ -1192,6 +1412,8 @@ class RatchetOptimizer:
         parent_summaries: list[PatchSummary],
         proposal_budget: int,
         dev_evaluations_used: int,
+        experiment_intents: list[Any] | None = None,
+        affordances: list[OptimizationAffordance] | None = None,
         proposal_retry: bool = False,
         retry_reason: str | None = None,
     ) -> tuple[list[tuple[CandidateProposal, PatchSummary, Comparison]], int]:
@@ -1208,7 +1430,7 @@ class RatchetOptimizer:
             proposal_budget=proposal_budget,
             active_families=search_hypothesis.active_families,
         )
-        proposals, proposal_analysis = self.proposer.propose(
+        proposals, proposal_analysis = self.candidate_implementer.propose(
             current_dev,
             surface,
             objective=self.objective,
@@ -1222,8 +1444,10 @@ class RatchetOptimizer:
             proposal_example_bank=proposal_example_bank,
             proposal_example_cases=proposal_example_cases,
             proposal_budget=proposal_budget,
+            experiment_intents=experiment_intents or [],
+            affordances=affordances or [],
         )
-        if self.proposer.last_call_diagnostics is not None:
+        if self.candidate_implementer.last_call_diagnostics is not None:
             self.optimizer_call_diagnostics.append(
                 {
                     "iteration": iteration,
@@ -1231,7 +1455,7 @@ class RatchetOptimizer:
                     "proposal_retry": proposal_retry,
                     "parent_rank": parent_index + 1,
                     "parent_patch_hash": current_dev.patch_hash,
-                    **self.proposer.last_call_diagnostics,
+                    **self.candidate_implementer.last_call_diagnostics,
                 }
             )
         self._emit_progress(
@@ -1240,12 +1464,12 @@ class RatchetOptimizer:
             attempt=attempt,
             proposal_retry=proposal_retry,
             parent_rank=parent_index + 1,
-            raw_count=self.proposer.last_stats.raw_count,
-            valid_count=self.proposer.last_stats.valid_count,
-            returned_count=self.proposer.last_stats.returned_count,
-            invalid_count=self.proposer.last_stats.invalid_count,
-            duplicate_count=self.proposer.last_stats.duplicate_count,
-            call_diagnostics=self.proposer.last_call_diagnostics or {},
+            raw_count=self.candidate_implementer.last_stats.raw_count,
+            valid_count=self.candidate_implementer.last_stats.valid_count,
+            returned_count=self.candidate_implementer.last_stats.returned_count,
+            invalid_count=self.candidate_implementer.last_stats.invalid_count,
+            duplicate_count=self.candidate_implementer.last_stats.duplicate_count,
+            call_diagnostics=self.candidate_implementer.last_call_diagnostics or {},
         )
         decision_log.append(
             {
@@ -1261,16 +1485,16 @@ class RatchetOptimizer:
                 "active_frontier": [summary.patch_hash for summary in parent_summaries],
                 "diagnosis_analysis": diagnosis_analysis,
                 "proposal_analysis": proposal_analysis,
-                "proposal_stats": self.proposer.last_stats.to_dict(),
+                "proposal_stats": self.candidate_implementer.last_stats.to_dict(),
                 "search_hypothesis": search_hypothesis.to_dict(),
                 "diagnoses": [diagnosis.to_dict() for diagnosis in diagnoses],
                 "diagnosis": target_diagnosis.to_dict() if target_diagnosis else None,
                 "proposal_hashes": [patch_hash(proposal.patch) for proposal in proposals],
-                "candidate_proposals": self.proposer.last_candidate_rows,
-                "invalid_candidate_proposals": self.proposer.last_invalid_candidate_rows,
+                "candidate_proposals": self.candidate_implementer.last_candidate_rows,
+                "invalid_candidate_proposals": self.candidate_implementer.last_invalid_candidate_rows,
             }
         )
-        for invalid_row in self.proposer.last_invalid_candidate_rows:
+        for invalid_row in self.candidate_implementer.last_invalid_candidate_rows:
             proposal_row = {
                 "type": "candidate_proposal",
                 "iteration": iteration,
@@ -1289,7 +1513,7 @@ class RatchetOptimizer:
 
         materialization_by_proposal_hash = {
             str(row.get("proposal_patch_hash")): dict(row.get("materialization") or {})
-            for row in self.proposer.last_candidate_rows
+            for row in self.candidate_implementer.last_candidate_rows
             if row.get("proposal_patch_hash")
         }
         accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
@@ -1327,7 +1551,12 @@ class RatchetOptimizer:
             reference=current_dev,
             baseline=baseline_dev,
             dev_cases=dev_cases,
+            proposals_log=proposals_log,
+            decision_log=decision_log,
             dev_evaluations_used=dev_evaluations_used,
+            iteration=iteration,
+            attempt=attempt,
+            parent_index=parent_index,
         )
         evaluations_used = len(evaluation_states)
         for state in evaluation_states:
@@ -1417,6 +1646,94 @@ class RatchetOptimizer:
                     )
         return accepted_rows, evaluations_used
 
+    def _plan_parent_research_action(
+        self,
+        *,
+        current_dev: PatchSummary,
+        task_theory: TaskTheory,
+        search_hypothesis: Any,
+        affordances: list[OptimizationAffordance],
+        proposals_log: list[dict[str, Any]],
+        decision_log: list[dict[str, Any]],
+        iteration: int,
+        parent_index: int,
+        proposal_budget: int,
+        dev_evaluations_used: int,
+        proposal_retry: bool = False,
+    ) -> list[ExperimentIntent]:
+        attempt = 2 if proposal_retry else 1
+        state = ResearchState(
+            objective=self.objective.to_dict(),
+            budget={
+                "proposal_budget": proposal_budget,
+                "dev_evaluations_used": dev_evaluations_used,
+                "dev_budget": self.dev_budget,
+                "remaining_dev_budget": max(0, self.dev_budget - dev_evaluations_used),
+            },
+            parent={
+                "patch_hash": current_dev.patch_hash,
+                "score": current_dev.mean_score,
+                "pass_count": current_dev.pass_count,
+                "case_count": current_dev.case_count,
+                "failure_labels": _top_counter_dict(current_dev.failure_labels, limit=8),
+                "cost_usd": current_dev.mean_cost_usd,
+                "latency_s": current_dev.median_latency_s,
+            },
+            task_theory=task_theory.to_dict(),
+            behavior_profile=search_hypothesis.profile.to_dict(),
+            affordances=[affordance.to_dict() for affordance in affordances],
+            prior_experiment_outcomes=_compact_prior_stage_results(proposals_log, stage=None, limit=8),
+            frontier={
+                "active_families": list(search_hypothesis.active_families),
+                "active_context_count": len(search_hypothesis.active_contexts),
+                "budget_allocation": dict(search_hypothesis.budget_allocation),
+            },
+        )
+        self._emit_progress(
+            "research_planner_started",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            stage="plan_experiments",
+            opportunity_count=len(task_theory.experiment_opportunities),
+            affordance_count=len(affordances),
+        )
+        intents = self.research_planner.plan(state)
+        if self.research_planner.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "parent_rank": parent_index + 1,
+                    "stage": "plan_experiments",
+                    **self.research_planner.last_call_diagnostics,
+                }
+            )
+        decision_log.append(
+            {
+                "type": "research_plan",
+                "iteration": iteration,
+                "attempt": attempt,
+                "proposal_retry": proposal_retry,
+                "parent_rank": parent_index + 1,
+                "stage": "plan_experiments",
+                "research_state": state.to_dict(),
+                "experiment_intents": [intent.to_dict() for intent in intents],
+            }
+        )
+        self._emit_progress(
+            "research_planner_completed",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            stage="plan_experiments",
+            intent_count=len(intents),
+            mechanisms=[intent.mechanism_class for intent in intents],
+            experiment_intents=[intent.to_dict() for intent in intents],
+            call_diagnostics=self.research_planner.last_call_diagnostics or {},
+        )
+        return intents
+
     def _evaluate_candidate_batch_progressively(
         self,
         *,
@@ -1424,17 +1741,44 @@ class RatchetOptimizer:
         reference: PatchSummary,
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
+        proposals_log: list[dict[str, Any]],
+        decision_log: list[dict[str, Any]],
         dev_evaluations_used: int,
+        iteration: int,
+        attempt: int,
+        parent_index: int,
     ) -> None:
         active = list(states)
         for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
             if not active:
                 break
             if stage_name == "full_dev":
-                active = self._select_full_dev_candidates_for_run(
+                active = self._select_candidate_stage_with_measurement_selector(
                     active,
                     baseline,
+                    reference=reference,
+                    stage_name=stage_name,
+                    proposals_log=proposals_log,
+                    decision_log=decision_log,
                     dev_evaluations_used=dev_evaluations_used,
+                    iteration=iteration,
+                    attempt=attempt,
+                    parent_index=parent_index,
+                )
+                if not active:
+                    break
+            elif stage_name == "small_dev":
+                active = self._select_candidate_stage_with_measurement_selector(
+                    active,
+                    baseline,
+                    reference=reference,
+                    stage_name=stage_name,
+                    proposals_log=proposals_log,
+                    decision_log=decision_log,
+                    dev_evaluations_used=dev_evaluations_used,
+                    iteration=iteration,
+                    attempt=attempt,
+                    parent_index=parent_index,
                 )
                 if not active:
                     break
@@ -1518,20 +1862,95 @@ class RatchetOptimizer:
             state.frontier_status = "screened_out"
             state.accepted = False
 
-    def _select_full_dev_candidates_for_run(
+    def _select_candidate_stage_with_measurement_selector(
         self,
         states: list[CandidateEvaluationState],
         baseline: PatchSummary,
         *,
+        reference: PatchSummary,
+        stage_name: str,
+        proposals_log: list[dict[str, Any]],
+        decision_log: list[dict[str, Any]],
         dev_evaluations_used: int,
+        iteration: int,
+        attempt: int,
+        parent_index: int,
     ) -> list[CandidateEvaluationState]:
-        selected = _select_full_dev_candidates(
-            states,
-            self.objective,
+        action = _measurement_action(
+            stage_name=stage_name,
+            states=states,
             dev_evaluations_used=dev_evaluations_used,
             dev_budget=self.dev_budget,
         )
-        if self.max_expensive_full_dev_candidates is None:
+        state_packet = _research_state_packet(
+            objective=self.objective,
+            stage_name=stage_name,
+            reference=reference,
+            baseline=baseline,
+            states=states,
+            proposals_log=proposals_log,
+            dev_evaluations_used=dev_evaluations_used,
+            dev_budget=self.dev_budget,
+        )
+        self._emit_progress(
+            "measurement_selector_started",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            stage=stage_name,
+            candidate_count=len(states),
+            max_select=action.max_select,
+        )
+        decision = self.measurement_selector.select(
+            stage=stage_name,
+            state=state_packet,
+            candidate_ids=action.candidate_ids,
+            max_select=action.max_select,
+            max_select_per_group=action.max_select_per_group,
+        )
+        if self.measurement_selector.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "parent_rank": parent_index + 1,
+                    "stage": stage_name,
+                    **self.measurement_selector.last_call_diagnostics,
+                }
+            )
+        self._validate_research_candidate_groups(decision, action, states)
+        decision_row = {
+            "type": "measurement_decision",
+            "iteration": iteration,
+            "attempt": attempt,
+            "parent_rank": parent_index + 1,
+            "stage": stage_name,
+            "action": action.to_dict(),
+            "decision": decision.to_dict(),
+        }
+        decision_log.append(decision_row)
+        self._emit_progress(
+            "measurement_selector_completed",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            stage=stage_name,
+            selected_candidate_ids=decision.selected_candidate_ids,
+            rationale=decision.rationale,
+            call_diagnostics=self.measurement_selector.last_call_diagnostics or {},
+        )
+        selected_ids = set(decision.selected_candidate_ids)
+        selected = [state for state in states if state.patch_hash in selected_ids]
+        for state in states:
+            if state.patch_hash in selected_ids:
+                continue
+            state.rejection_reason = (
+                decision.skipped_candidate_reasons.get(state.patch_hash)
+                or f"measurement_selector_skipped_{stage_name}"
+            )
+            state.frontier_status = "screened_out"
+            state.accepted = False
+        if stage_name != "full_dev" or self.max_expensive_full_dev_candidates is None:
             return selected
         kept: list[CandidateEvaluationState] = []
         for state in selected:
@@ -1552,6 +1971,32 @@ class RatchetOptimizer:
                 self._expensive_full_dev_evaluations += 1
             kept.append(state)
         return kept
+
+    def _validate_research_candidate_groups(
+        self,
+        decision: Any,
+        action: MeasurementAction,
+        states: list[CandidateEvaluationState],
+    ) -> None:
+        if action.max_select_per_group <= 0:
+            return
+        group_counts: Counter[str] = Counter()
+        state_by_id = {state.patch_hash: state for state in states}
+        for candidate_id in decision.selected_candidate_ids:
+            state = state_by_id.get(candidate_id)
+            if state is None:
+                continue
+            group_counts[_candidate_research_group(state)] += 1
+        over = {
+            group: count
+            for group, count in group_counts.items()
+            if count > action.max_select_per_group
+        }
+        if over:
+            raise OptimizerModelError(
+                "Measurement selector exceeded max_select_per_group "
+                f"{action.max_select_per_group}: {over}"
+            )
 
     def _evaluate_candidate_progressively(
         self,
@@ -1911,6 +2356,8 @@ class RatchetOptimizer:
         frontier_recommendation: dict[str, Any],
         optimizer_call_diagnostics: list[dict[str, Any]],
         quality_cost_tradeoffs: list[dict[str, Any]],
+        measurement_decisions: list[dict[str, Any]],
+        ideation_metrics: dict[str, Any],
     ) -> dict[str, Any]:
         ended_at = datetime.now(timezone.utc)
         return {
@@ -1941,7 +2388,11 @@ class RatchetOptimizer:
             "simplification_results": simplification_results,
             "frontier_recommendation": frontier_recommendation,
             "optimizer_call_diagnostics": optimizer_call_diagnostics,
+            "optimizer_role_models": self.optimizer_role_models,
+            "optimizer_role_reasoning": self.optimizer_role_reasoning,
+            "measurement_decisions": measurement_decisions,
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
+            "ideation_metrics": ideation_metrics,
             "samples_per_case": self.samples_per_case,
             "case_concurrency": self.case_concurrency,
             "stage_case_concurrency": self.stage_case_concurrency,
@@ -2012,6 +2463,10 @@ def _ordered_unique(values: Iterable[str]) -> list[str]:
     return rows
 
 
+def _top_counter_dict(values: dict[str, int], *, limit: int) -> dict[str, int]:
+    return dict(sorted(values.items(), key=lambda item: (-item[1], item[0]))[:limit])
+
+
 def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) -> str | None:
     if candidate.runtime_error_count > reference.runtime_error_count:
         return "smoke rejected candidate because runtime errors increased"
@@ -2020,176 +2475,195 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
     return None
 
 
-def _select_full_dev_candidates(
-    states: list[CandidateEvaluationState],
-    objective: OptimizationObjective,
+def _measurement_action(
     *,
-    dev_evaluations_used: int = 0,
-    dev_budget: int | None = None,
-) -> list[CandidateEvaluationState]:
-    late_budget = dev_budget is not None and dev_budget > 0 and dev_evaluations_used >= dev_budget / 2
-    group_cap = (
-        MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
-        if late_budget
-        else MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
+    stage_name: str,
+    states: list[CandidateEvaluationState],
+    dev_evaluations_used: int,
+    dev_budget: int | None,
+) -> MeasurementAction:
+    if stage_name == "full_dev":
+        late_budget = dev_budget is not None and dev_budget > 0 and dev_evaluations_used >= dev_budget / 2
+        group_cap = (
+            MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
+            if late_budget
+            else MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP
+        )
+        group_count = len({_candidate_research_group(state) for state in states})
+        raw_max_select = sum(
+            min(group_cap, len(group_states))
+            for group_states in _states_by_research_group(states).values()
+        )
+        max_select = min(raw_max_select, MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION) if late_budget else raw_max_select
+        rationale = (
+            "Choose which smoke/small-dev survivors deserve full-dev measurement. "
+            "Prefer experiments that best resolve the current task theory under remaining budget."
+        )
+    elif stage_name == "small_dev":
+        group_cap = 0
+        group_count = len({_candidate_research_group(state) for state in states})
+        max_select = len(states)
+        rationale = (
+            "Choose which smoke-passing candidates deserve small-dev measurement. "
+            "Reject duplicates or experiments that no longer teach useful information."
+        )
+    else:
+        group_cap = 0
+        group_count = len({_candidate_research_group(state) for state in states})
+        max_select = len(states)
+        rationale = f"Choose candidates for {stage_name} measurement."
+    return MeasurementAction(
+        action_id=f"evaluate_{stage_name}",
+        action_type="evaluate_candidates",
+        stage=stage_name,
+        candidate_ids=[state.patch_hash for state in states],
+        max_select=max_select,
+        max_select_per_group=group_cap,
+        rationale=rationale,
+        metadata={
+            "dev_evaluations_used": dev_evaluations_used,
+            "dev_budget": dev_budget,
+            "comparison_group_count": group_count,
+            "late_budget": late_budget if stage_name == "full_dev" else False,
+            "raw_max_select": raw_max_select if stage_name == "full_dev" else max_select,
+        },
     )
+
+
+def _research_state_packet(
+    *,
+    objective: OptimizationObjective,
+    stage_name: str,
+    reference: PatchSummary,
+    baseline: PatchSummary,
+    states: list[CandidateEvaluationState],
+    proposals_log: list[dict[str, Any]],
+    dev_evaluations_used: int,
+    dev_budget: int,
+) -> dict[str, Any]:
+    return {
+        "objective": objective.to_dict(),
+        "decision_point": stage_name,
+        "budget": {
+            "dev_evaluations_used": dev_evaluations_used,
+            "dev_budget": dev_budget,
+            "remaining_dev_budget": max(0, dev_budget - dev_evaluations_used),
+        },
+        "reference": {
+            "patch_hash": reference.patch_hash,
+            "score": reference.mean_score,
+            "pass_count": reference.pass_count,
+            "case_count": reference.case_count,
+            "cost_usd": reference.mean_cost_usd,
+            "latency_s": reference.median_latency_s,
+        },
+        "baseline": {
+            "patch_hash": baseline.patch_hash,
+            "score": baseline.mean_score,
+            "pass_count": baseline.pass_count,
+            "case_count": baseline.case_count,
+            "cost_usd": baseline.mean_cost_usd,
+            "latency_s": baseline.median_latency_s,
+        },
+        "candidates": [_research_candidate_row(state) for state in states],
+        "prior_full_dev_results": _compact_prior_stage_results(proposals_log, stage="full_dev", limit=8),
+        "recent_candidate_history": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
+    }
+
+
+def _research_candidate_row(state: CandidateEvaluationState) -> dict[str, Any]:
+    row = {
+        "candidate_id": state.patch_hash,
+        "transform_family": state.candidate.transform_family,
+        "mechanism_class": state.candidate.mechanism_class,
+        "candidate_role": state.candidate.candidate_role,
+        "comparison_group": state.candidate.comparison_group,
+        "target_slice": state.candidate.target_slice,
+        "transform_instance": state.candidate.transform_instance,
+        "hypothesis": state.candidate.hypothesis,
+        "operation_count": len(state.patch.operations),
+        "operations": [
+            {"op": operation.op, "target": operation.target}
+            for operation in state.patch.operations
+        ],
+        "comparison_group_key": _candidate_research_group(state),
+        "stage_results": [],
+    }
+    for stage in state.stage_rows[-3:]:
+        comparison = stage.get("comparison_to_parent") or {}
+        flips = stage.get("behavior_flip_summary") or {}
+        row["stage_results"].append(
+            {
+                "stage": stage.get("stage"),
+                "case_count": stage.get("case_count"),
+                "passed": stage.get("passed"),
+                "score_delta": comparison.get("score_delta"),
+                "cost_delta": comparison.get("cost_delta"),
+                "latency_delta": comparison.get("latency_delta"),
+                "fixed_count": flips.get("fixed_count"),
+                "regressed_count": flips.get("regressed_count"),
+                "rejection_reason": stage.get("rejection_reason"),
+            }
+        )
+    return row
+
+
+def _compact_prior_stage_results(
+    proposals_log: list[dict[str, Any]],
+    *,
+    stage: str | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in reversed(proposals_log):
+        stages = item.get("evaluation_stages") or []
+        selected_stage = None
+        if stage is None:
+            selected_stage = stages[-1] if stages else None
+        else:
+            selected_stage = next((row for row in reversed(stages) if row.get("stage") == stage), None)
+        if selected_stage is None:
+            continue
+        comparison = selected_stage.get("comparison_to_parent") or {}
+        rows.append(
+            {
+                "candidate_id": item.get("patch_hash"),
+                "parent_patch_hash": item.get("parent_patch_hash"),
+                "transform_family": item.get("transform_family"),
+                "mechanism_class": item.get("mechanism_class"),
+                "candidate_role": item.get("candidate_role"),
+                "target_slice": item.get("target_slice"),
+                "frontier_status": item.get("frontier_status"),
+                "accepted": item.get("accepted"),
+                "stage": selected_stage.get("stage"),
+                "case_count": selected_stage.get("case_count"),
+                "score_delta": comparison.get("score_delta"),
+                "cost_delta": comparison.get("cost_delta"),
+                "latency_delta": comparison.get("latency_delta"),
+                "rejection_reason": item.get("rejection_reason"),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _candidate_research_group(state: CandidateEvaluationState) -> str:
+    comparison_group = (
+        state.candidate.comparison_group
+        or state.candidate.experiment_id
+        or state.candidate.transform_family
+    )
+    return f"{comparison_group}|{state.candidate.target_slice or 'global'}"
+
+
+def _states_by_research_group(
+    states: list[CandidateEvaluationState],
+) -> dict[str, list[CandidateEvaluationState]]:
     by_group: dict[str, list[CandidateEvaluationState]] = {}
     for state in states:
-        comparison_group = (
-            state.candidate.comparison_group
-            or state.candidate.experiment_id
-            or state.candidate.transform_family
-        )
-        group = f"{comparison_group}|{state.candidate.target_slice or 'global'}"
-        by_group.setdefault(group, []).append(state)
-    selected: list[CandidateEvaluationState] = []
-    for group_states in by_group.values():
-        ranked = sorted(group_states, key=lambda state: _candidate_full_dev_sort_key(state, objective))
-        group_selected: list[CandidateEvaluationState] = []
-        _append_unique_states(group_selected, ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP])
-
-        role_candidates = [
-            state
-            for state in ranked
-            if str(state.candidate.candidate_role or "").lower() in {"control", "ablation"}
-        ]
-        _append_unique_states(
-            group_selected,
-            role_candidates[:1],
-            limit=group_cap,
-        )
-
-        best_delta = max((_candidate_score_delta(state) for state in ranked), default=0.0)
-        composed_candidates = [
-            state
-            for state in ranked
-            if str(state.candidate.candidate_role or "").lower() == "composed"
-            and _candidate_score_delta(state) >= max(0.0, best_delta - FULL_DEV_COMPOSED_COMPETITIVE_MARGIN)
-        ]
-        _append_unique_states(
-            group_selected,
-            composed_candidates[:1],
-            limit=group_cap,
-        )
-
-        strong_signal_candidates = [state for state in ranked if _has_strong_full_dev_signal(state)]
-        _append_unique_states(
-            group_selected,
-            strong_signal_candidates,
-            limit=group_cap,
-        )
-
-        selected_ids = {id(state) for state in group_selected}
-        for state in group_states:
-            if id(state) in selected_ids:
-                continue
-            if _is_few_shot_compression_choice(state):
-                state.rejection_reason = (
-                    "few_shot_compression_choice: screened out before full_dev by experiment allocation "
-                    f"(cap {group_cap} candidates per comparison group; "
-                    f"{_small_dev_signal_text(state)})"
-                )
-            elif _has_strong_full_dev_signal(state):
-                state.rejection_reason = (
-                    "structural_strong_signal: screened out before full_dev by experiment allocation "
-                    f"(cap {group_cap} candidates per comparison group; "
-                    f"{_small_dev_signal_text(state)})"
-                )
-            elif str(state.candidate.candidate_role or "").lower() in {"control", "ablation", "composed"}:
-                state.rejection_reason = (
-                    "small_dev_triage: screened out before full_dev by experiment role ranking "
-                    f"(cap {group_cap} candidates per comparison group; "
-                    f"{_small_dev_signal_text(state)})"
-                )
-            else:
-                state.rejection_reason = (
-                    "small_dev_triage: screened out before full_dev by experiment-aware batch ranking "
-                    f"({_small_dev_signal_text(state)})"
-                )
-            state.frontier_status = "screened_out"
-            state.accepted = False
-        selected.extend(group_selected)
-    return sorted(selected, key=lambda state: _candidate_stage_sort_key(state, objective))
-
-
-def _append_unique_states(
-    target: list[CandidateEvaluationState],
-    candidates: Iterable[CandidateEvaluationState],
-    *,
-    limit: int | None = None,
-) -> None:
-    for state in candidates:
-        if limit is not None and len(target) >= limit:
-            return
-        if all(state is not item for item in target):
-            target.append(state)
-
-
-def _candidate_full_dev_sort_key(
-    state: CandidateEvaluationState,
-    objective: OptimizationObjective,
-) -> tuple[Any, ...]:
-    return _candidate_stage_sort_key(state, objective)
-
-
-def _candidate_stage_sort_key(
-    state: CandidateEvaluationState,
-    objective: OptimizationObjective,
-) -> tuple[Any, ...]:
-    if state.summary is None:
-        return (1,)
-    return (0, *objective_sort_key(state.summary, objective))
-
-
-def _is_few_shot_compression_choice(state: CandidateEvaluationState) -> bool:
-    candidate = state.candidate
-    if candidate.transform_family != "targeted_few_shot":
-        return False
-    return str(candidate.candidate_role or "").lower() == "compression"
-
-
-def _has_strong_full_dev_signal(state: CandidateEvaluationState) -> bool:
-    if state.candidate.mechanism_class not in FULL_DEV_STRONG_SIGNAL_MECHANISMS:
-        return False
-    if _candidate_score_delta(state) < FULL_DEV_STRONG_SIGNAL_SCORE_DELTA:
-        return False
-    return _candidate_pass_gain(state) >= FULL_DEV_STRONG_SIGNAL_PASS_GAIN
-
-
-def _candidate_score_delta(state: CandidateEvaluationState) -> float:
-    if state.comparison is None:
-        return 0.0
-    return float(state.comparison.score_delta)
-
-
-def _candidate_pass_gain(state: CandidateEvaluationState) -> int:
-    comparison = state.comparison
-    if comparison is not None and comparison.pass_significance is not None:
-        significance = comparison.pass_significance
-        return int(significance.fixed_count) - int(significance.regressed_count)
-    if not state.stage_rows:
-        return 0
-    latest = state.stage_rows[-1]
-    flips = latest.get("behavior_flip_summary") or {}
-    try:
-        return int(flips.get("fixed_count") or 0) - int(flips.get("regressed_count") or 0)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _small_dev_signal_text(state: CandidateEvaluationState) -> str:
-    row = next((item for item in reversed(state.stage_rows) if item.get("stage") == "small_dev"), None)
-    if row is None:
-        row = state.stage_rows[-1] if state.stage_rows else {}
-    comparison = row.get("comparison_to_parent") or {}
-    flips = row.get("behavior_flip_summary") or {}
-    score_delta = float(comparison.get("score_delta") or _candidate_score_delta(state))
-    try:
-        pass_gain = int(flips.get("fixed_count") or 0) - int(flips.get("regressed_count") or 0)
-    except (TypeError, ValueError):
-        pass_gain = _candidate_pass_gain(state)
-    case_count = int(row.get("case_count") or (state.summary.case_count if state.summary is not None else 0))
-    return f"small_dev_case_count={case_count}; score_delta={score_delta:+.3f}; pass_gain={pass_gain:+d}"
+        by_group.setdefault(_candidate_research_group(state), []).append(state)
+    return by_group
 
 
 def _finalize_candidate_state(state: CandidateEvaluationState, reference: PatchSummary) -> None:

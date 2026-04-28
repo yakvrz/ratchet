@@ -29,4 +29,12 @@ Run the short optimizer sanity check:
 python3 -m ratchet optimize --config samples/banking77_intent_agent/ratchet.sanity.toml
 ```
 
+Assess ideation quality from a completed run:
+
+```bash
+python3 -m ratchet assess-ideation \
+  --run-dir samples/banking77_intent_agent/results/sanity \
+  --spec samples/banking77_intent_agent/ideation_assessment.json
+```
+
 This is not a full BANKING77 benchmark. It is meant to inspect Ratchet behavior: whether it diagnoses weak labels, proposes distinct transform families, accepts dev improvements cautiously, and validates finalists on holdout.

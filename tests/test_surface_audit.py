@@ -6,7 +6,8 @@ import unittest
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.proposals import ProposalEngine, prompt_size_profile
+from ratchet.experiments import ExperimentIntent
+from ratchet.proposals import CandidateImplementer, prompt_size_profile
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.surface import SurfaceGenerator
 from ratchet.transforms import BehaviorProfile, SearchHypothesis, TransformFamilyState
@@ -27,7 +28,8 @@ class FakePatchClient:
     def __init__(self, patches: list[dict[str, object]]) -> None:
         self.patches = patches
 
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
         candidates = [
             {
                 "transform_family": _family_for_patch(patch),
@@ -44,6 +46,7 @@ class FakePatchClient:
             }
             for patch in self.patches
         ]
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates)
 
 
@@ -57,6 +60,7 @@ def experiment_response(candidates: list[dict[str, object]], *, mechanism: str =
                     "experiments": [
                         {
                             "experiment_id": "exp_1",
+                            "mechanism_class": mechanism,
                             "mechanism": mechanism,
                             "hypothesis": "Test a controlled optimization mechanism.",
                             "target_slices": ["global"],
@@ -101,6 +105,61 @@ def _mechanism_for_family(family: str) -> str:
     if family == "runtime_tuning":
         return "runtime_defect_fix"
     return "semantic_boundary_rewrite"
+
+
+def _attach_affordance_ids(candidates: list[object], prompt: str) -> None:
+    try:
+        payload = json.loads(prompt.split("\n\n", 1)[1])
+    except Exception:
+        return
+    affordances = payload.get("optimization_affordances") or []
+    if not isinstance(affordances, list):
+        return
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("affordance_ids"):
+            continue
+        matches = _matching_affordance_ids(candidate, affordances)
+        if matches:
+            candidate["affordance_ids"] = matches
+
+
+def _matching_affordance_ids(candidate: dict[str, object], affordances: list[object]) -> list[str]:
+    family = str(candidate.get("transform_family") or "")
+    mechanism = str(candidate.get("mechanism_class") or "")
+    operations = _candidate_operations(candidate)
+    matches: list[str] = []
+    for affordance in affordances:
+        if not isinstance(affordance, dict):
+            continue
+        if affordance.get("transform_family") != family or affordance.get("mechanism_class") != mechanism:
+            continue
+        if not operations:
+            if affordance.get("target_kind") == "few_shot":
+                matches.append(str(affordance.get("affordance_id") or ""))
+            continue
+        for operation in operations:
+            if (
+                operation.get("op") in set(affordance.get("allowed_ops") or [])
+                and operation.get("target") in {affordance.get("target_name"), affordance.get("target_path")}
+            ):
+                matches.append(str(affordance.get("affordance_id") or ""))
+    return [item for item in matches if item]
+
+
+def _candidate_operations(candidate: dict[str, object]) -> list[dict[str, object]]:
+    intervention = candidate.get("intervention")
+    if not isinstance(intervention, dict) or intervention.get("kind") == "example_selection":
+        return []
+    payload = intervention.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    patch = payload.get("patch")
+    if not isinstance(patch, dict):
+        return []
+    operations = patch.get("operations")
+    if not isinstance(operations, list):
+        return []
+    return [operation for operation in operations if isinstance(operation, dict)]
 
 
 def search_hypothesis_with_budget(budget_allocation: dict[str, float]) -> SearchHypothesis:
@@ -180,7 +239,10 @@ class RawCandidateClient:
     def __init__(self, candidates: list[object]) -> None:
         self.candidates = candidates
 
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
+        candidates = list(self.candidates)
+        _attach_affordance_ids(candidates, prompt)
         return type(
             "Response",
             (),
@@ -190,9 +252,10 @@ class RawCandidateClient:
                         "experiments": [
                             {
                                 "experiment_id": "exp_1",
+                                "mechanism_class": "semantic_boundary_rewrite",
                                 "mechanism": "semantic_boundary_rewrite",
                                 "hypothesis": "Malformed candidate test.",
-                                "candidates": self.candidates,
+                                "candidates": candidates,
                             }
                         ]
                     }
@@ -348,7 +411,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         with self.assertRaises(OptimizerModelError):
             diagnoser.diagnose(summary, surface)
 
-    def test_llm_proposer_validates_returned_patch(self) -> None:
+    def test_candidate_implementer_validates_returned_patch(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -367,7 +430,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         diagnoser._client = FakeDiagnosisClient()
         diagnoses, _ = diagnoser.diagnose(summary, surface)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -401,9 +464,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertTrue(proposals)
         self.assertEqual(proposals[0].patch.operations[0].op, "add_instruction")
         self.assertEqual(proposals[0].transform_family, "prompt_rewrite")
-        self.assertIn("Validated LLM transform candidate proposals", analysis)
+        self.assertIn("Validated transform candidate implementations", analysis)
 
-    def test_llm_proposer_preserves_model_rank_and_logs_deferred_candidates(self) -> None:
+    def test_candidate_implementer_preserves_model_rank_and_logs_deferred_candidates(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="old",
@@ -413,7 +476,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -474,7 +537,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             [True, False, False],
         )
 
-    def test_llm_proposer_allows_same_group_arms_within_family_budget(self) -> None:
+    def test_candidate_implementer_allows_same_group_arms_within_family_budget(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -483,7 +546,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -552,7 +615,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             any("transform family budget exceeded" in reason for reason in (engine.last_stats.invalid_reasons or {}))
         )
 
-    def test_llm_proposer_constrains_distinct_family_budget_groups(self) -> None:
+    def test_candidate_implementer_constrains_distinct_family_budget_groups(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -561,7 +624,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -620,7 +683,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             )
         )
 
-    def test_llm_proposer_accepts_categorical_runtime_patch(self) -> None:
+    def test_candidate_implementer_accepts_categorical_runtime_patch(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -630,7 +693,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective(mode="cost")
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -664,7 +727,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         targets = [operation.target for candidate in proposals for operation in candidate.patch.operations]
         self.assertEqual(targets, ["runtime.reasoning_effort"])
 
-    def test_llm_proposer_passes_task_theory_planner_guidance(self) -> None:
+    def test_candidate_implementer_passes_task_theory_and_affordances(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -674,7 +737,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
         client = CapturingPatchClient()
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -692,12 +755,68 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertIn('"planner_guidance"', client.input_text)
+        self.assertNotIn('"planner_guidance"', client.input_text)
+        self.assertIn('"optimization_affordances"', client.input_text)
+        self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)
         self.assertIn("example_selection", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
 
-    def test_llm_proposer_prompt_includes_experiment_opportunities(self) -> None:
+    def test_candidate_implementer_rejects_experiments_outside_requested_intents(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        client = FakePatchClient(
+            [
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Clarify failed cases.",
+                        }
+                    ],
+                    "rationale": "Clarify behavior.",
+                    "expected_effect": "Improve correctness.",
+                }
+            ]
+        )
+        engine = CandidateImplementer(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = client
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0, 1.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            experiment_intents=[
+                ExperimentIntent(
+                    intent_id="requested_intent",
+                    mechanism_class="semantic_boundary_rewrite",
+                    hypothesis="Implement only this requested intent.",
+                )
+            ],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn("requested_intent", engine.last_stats.plan_audit["missing_intent_ids"])
+        self.assertTrue(
+            any("does not match any requested experiment_intent" in reason for reason in engine.last_stats.invalid_reasons or {})
+        )
+
+    def test_candidate_implementer_prompt_includes_experiment_opportunities(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -707,7 +826,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
         client = CapturingPatchClient()
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -765,8 +884,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertIn('"experiment_opportunities"', client.input_text)
-        self.assertIn('"confusion:beta->alpha"', client.input_text)
+        self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
+        self.assertIn('"expected":"beta"', client.input_text)
+        self.assertIn('"actual":"alpha"', client.input_text)
         self.assertIn('"train-beta-1"', client.input_text)
 
     def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
@@ -781,7 +901,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
             EvalCase(id="train-card-2", split="train", input="unknown card transaction", expected={"label": "card_payment_not_recognised"}),
         )
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -845,7 +965,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         train_cases = (
             EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
         )
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -917,7 +1037,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         train_cases = (
             EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
         )
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -954,14 +1074,14 @@ class GeneratedSurfaceTests(unittest.TestCase):
             any("candidate transform_parameters are derived" in reason for reason in (engine.last_stats.invalid_reasons or {}))
         )
 
-    def test_llm_proposer_rejects_legacy_bare_patches(self) -> None:
+    def test_candidate_implementer_rejects_legacy_bare_patches(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
             instructions={"system_prompt": "Answer helpfully."},
         )
         surface = SurfaceGenerator().generate(spec, OptimizationObjective())
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -995,7 +1115,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals, [])
         self.assertEqual(engine.last_stats.raw_count, 0)
 
-    def test_llm_proposer_logs_malformed_raw_candidates(self) -> None:
+    def test_candidate_implementer_logs_malformed_raw_candidates(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -1003,7 +1123,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -1038,7 +1158,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertIn("candidate entry is not an object", reasons)
         self.assertTrue(any(reason.startswith("malformed candidate:") for reason in reasons))
 
-    def test_llm_proposer_rejects_inactive_family_candidate(self) -> None:
+    def test_candidate_implementer_rejects_inactive_family_candidate(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -1047,7 +1167,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         objective = OptimizationObjective()
         surface = SurfaceGenerator().generate(spec, objective)
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",
@@ -1081,7 +1201,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals, [])
         self.assertIn("inactive transform family", next(iter(engine.last_stats.invalid_reasons or {})))
 
-    def test_llm_proposer_redacts_diagnostic_examples_when_configured(self) -> None:
+    def test_candidate_implementer_redacts_diagnostic_examples_when_configured(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -1093,7 +1213,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
         surface = SurfaceGenerator().generate(spec, objective)
         client = CapturingPatchClient()
-        engine = ProposalEngine(
+        engine = CandidateImplementer(
             env_path=".env",
             model="gpt-5.4-mini",
             reasoning_effort="low",

@@ -1,14 +1,17 @@
 """Ratchet: attachable agent optimizer."""
 
 from ratchet.adapters import AdapterProtocol, load_adapter
+from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
 from ratchet.config import RatchetConfigError
 from ratchet.evidence import ProposalExample, ProposalExampleBank, build_behavior_diagnostics, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentSpec, TaskTheory, build_task_theory
+from ratchet.experiments import CandidateImplementation, ExperimentIntent, ExperimentSpec, MeasurementDecision, ResearchState, TaskTheory, build_task_theory
 from ratchet.grading import exact_text_grade, json_field_grade, numeric_tolerance_grade
+from ratchet.ideation_benchmark import IdeationAssessmentSpec, assess_ideation_run
 from ratchet.objectives import FinalGateResult, GatePredicate, final_gate_status, select_recommended_patch
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.pricing import estimate_cost_usd
+from ratchet.proposals import CandidateImplementer
 from ratchet.types import (
     AgentPatch,
     AgentSpec,
@@ -37,8 +40,11 @@ __all__ = [
     "FinalGateResult",
     "GatePredicate",
     "GradeResult",
+    "IdeationAssessmentSpec",
     "ExperimentSpec",
+    "ExperimentIntent",
     "OptimizationConstraints",
+    "OptimizationAffordance",
     "OptimizationObjective",
     "OptimizerModelError",
     "OperationalMetrics",
@@ -47,14 +53,20 @@ __all__ = [
     "ProposalExampleBank",
     "RatchetOptimizer",
     "RatchetConfigError",
+    "ResearchState",
     "RunRecord",
     "TaskTheory",
+    "CandidateImplementation",
+    "CandidateImplementer",
+    "MeasurementDecision",
     "build_behavior_diagnostics",
     "build_proposal_example_bank",
     "build_task_theory",
+    "assess_ideation_run",
     "exact_text_grade",
     "estimate_cost_usd",
     "final_gate_status",
+    "generate_optimization_affordances",
     "json_field_grade",
     "load_adapter",
     "numeric_tolerance_grade",

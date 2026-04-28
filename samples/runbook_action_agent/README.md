@@ -6,7 +6,7 @@ It asks the agent to choose the exact next runbook action from a frozen incident
 - supported incident scenarios with grounded actions
 - unsupported scenarios that should return `unknown`
 
-That makes it a good second proof integration for Ratchet's diagnosis/proposal loop.
+That makes it a good second proof integration for Ratchet's research loop.
 
 Run it:
 

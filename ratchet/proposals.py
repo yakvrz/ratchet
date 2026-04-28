@@ -6,9 +6,10 @@ import json
 import time
 from typing import Any
 
+from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_affordances
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
+from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, TaskTheory, build_task_theory
 from ratchet.io import extract_json_object, patch_hash
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -34,14 +35,15 @@ from ratchet.validation import PatchValidator
 MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
-    "You are Ratchet's task-agnostic patch proposer. Return JSON with experiments[] and optional "
-    "target_considerations[]. Keep text concise. Use planner_guidance and search_hypothesis to choose "
-    "mechanism_class values from the allowed mechanism list. Treat task_theory.experiment_opportunities "
-    "as evidence-backed hypotheses to test or explicitly skip; they are not patch recipes. Each candidate must name an active "
+    "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
+    "target_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
+    "research questions, mechanisms, target slices, controls, and measurements. Treat task_theory.experiment_opportunities "
+    "as supporting evidence only; they are not patch recipes. Each candidate must name an active "
     "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
     "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
     "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
-    "proposal_example_bank. Do not inline few-shot examples. Patch operations must use editable_targets, "
+    "proposal_example_bank. Do not inline few-shot examples. Each candidate must cite affordance_ids from "
+    "optimization_affordances. Patch operations must use editable_targets, "
     "allowed_ops, value_schema, and the declared transform family's supported ops. Declare family by the "
     "actual operation: instruction ops -> prompt_rewrite/output_contract_tightening, set_runtime_param -> "
     "runtime_tuning, change_model -> model_substitution, source_case_ids/add_few_shot -> targeted_few_shot. "
@@ -82,7 +84,7 @@ class ProposalStats:
         }
 
 
-class ProposalEngine:
+class CandidateImplementer:
     def __init__(
         self,
         *,
@@ -119,6 +121,8 @@ class ProposalEngine:
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
+        experiment_intents: list[ExperimentIntent] | None = None,
+        affordances: list[OptimizationAffordance] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
         analysis_parts: list[str] = []
@@ -140,6 +144,7 @@ class ProposalEngine:
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
+        active_affordances = list(affordances or generate_optimization_affordances(surface, active_families=search_hypothesis.active_families))
         llm_proposals, target_considerations = self._llm_proposals(
             summary,
             surface,
@@ -150,9 +155,11 @@ class ProposalEngine:
             task_theory=task_theory,
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
+            experiment_intents=experiment_intents or [],
+            affordances=active_affordances,
         )
         proposals.extend(llm_proposals)
-        analysis_parts.append("LLM proposer returned transform candidate proposals.")
+        analysis_parts.append("Candidate implementer returned transform candidate proposals.")
         invalid_reasons.update(self._last_parse_invalid_reasons)
         validator = PatchValidator()
         valid: list[CandidateProposal] = []
@@ -195,6 +202,20 @@ class ProposalEngine:
             if family_error is not None:
                 invalid_reasons[family_error] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, family_error, materialization=materialization))
+                continue
+            affordance_error = validate_candidate_affordances(
+                affordance_ids=candidate.affordance_ids,
+                transform_family=candidate.transform_family,
+                mechanism_class=candidate.mechanism_class,
+                operations=[
+                    {"op": operation.op, "target": operation.target}
+                    for operation in candidate.patch.operations
+                ],
+                affordances=active_affordances,
+            )
+            if affordance_error is not None:
+                invalid_reasons[affordance_error] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(candidate, affordance_error, materialization=materialization))
                 continue
             is_valid, invalid_reason = validator.validate_with_reason(
                 candidate.patch,
@@ -261,6 +282,7 @@ class ProposalEngine:
                         "experiment_id": candidate.experiment_id,
                         "candidate_role": candidate.candidate_role,
                         "comparison_group": candidate.comparison_group,
+                        "affordance_ids": list(candidate.affordance_ids),
                         "transform_instance": candidate.transform_instance,
                         "target_slice": candidate.target_slice,
                         "hypothesis": candidate.hypothesis,
@@ -297,9 +319,9 @@ class ProposalEngine:
             call_diagnostics=self.last_call_diagnostics,
         )
         if valid:
-            analysis_parts.append("Validated LLM transform candidate proposals.")
+            analysis_parts.append("Validated transform candidate implementations.")
         else:
-            analysis_parts.append("No valid LLM transform candidate proposals.")
+            analysis_parts.append("No valid transform candidate implementations.")
         analysis_parts.append(
             "Proposal counts: "
             f"raw={self.last_stats.raw_count}, valid={self.last_stats.valid_count}, "
@@ -320,6 +342,8 @@ class ProposalEngine:
         task_theory: TaskTheory,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
+        experiment_intents: list[ExperimentIntent],
+        affordances: list[OptimizationAffordance],
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
@@ -333,11 +357,6 @@ class ProposalEngine:
         ]
         behavior_diagnostics = build_behavior_diagnostics(summary)
         compact_diagnostics = _compact_behavior_diagnostics(behavior_diagnostics)
-        planner_guidance = _planner_guidance(
-            task_theory=task_theory,
-            search_hypothesis=search_hypothesis,
-            proposal_budget=proposal_budget,
-        )
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
@@ -345,8 +364,13 @@ class ProposalEngine:
             "transform_library": active_family_rows,
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
-            "planner_guidance": planner_guidance,
+            "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
+            "optimization_affordances": [_compact_affordance(affordance) for affordance in affordances],
             "proposal_policy": {
+                "experiment_intents": (
+                    "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
+                    "intent_id. Each candidate must cite affordance_ids from that intent and from optimization_affordances."
+                ),
                 "empty_patches_allowed": (
                     "Only when no listed editable target can plausibly improve the objective without violating constraints."
                 ),
@@ -443,7 +467,10 @@ class ProposalEngine:
                                             "hypothesis": {"type": "string", "maxLength": 360},
                                             "target_slices": {"type": "array", "items": {"type": "string"}},
                                             "measurements": {"type": "array", "items": {"type": "string"}},
-                                            "candidate_roles": {"type": "array", "items": {"type": "string"}},
+                                            "candidate_roles": {
+                                                "type": "array",
+                                                "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
+                                            },
                                             "candidates": {
                                                 "type": "array",
                                                 "items": {
@@ -451,16 +478,20 @@ class ProposalEngine:
                                                     "properties": {
                                                         "transform_family": {"type": "string", "maxLength": 80},
                                                         "mechanism_class": {"type": "string", "maxLength": 80},
-                                                        "candidate_role": {"type": "string", "maxLength": 40},
+                                                        "candidate_role": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
                                                         "comparison_group": {"type": "string", "maxLength": 80},
                                                         "transform_instance": {"type": "string", "maxLength": 160},
                                                         "target_slice": {"type": "string", "maxLength": 160},
                                                         "hypothesis": {"type": "string", "maxLength": 360},
                                                         "expected_effects": {"type": "object"},
                                                         "evaluation_plan": {"type": "string", "maxLength": 240},
+                                                        "affordance_ids": {
+                                                            "type": "array",
+                                                            "items": {"type": "string", "maxLength": 80},
+                                                        },
                                                         "intervention": _intervention_schema(),
                                                     },
-                                                    "required": ["transform_family", "candidate_role", "hypothesis", "intervention"],
+                                                    "required": ["transform_family", "candidate_role", "hypothesis", "affordance_ids", "intervention"],
                                                 },
                                             },
                                         },
@@ -476,7 +507,7 @@ class ProposalEngine:
                 max_output_tokens=PROPOSER_MAX_OUTPUT_TOKENS,
             )
             self.last_call_diagnostics = {
-                "component": "proposer",
+                "component": "candidate_implementer",
                 "prompt_chars": len(prompt_input),
                 "prompt_approx_tokens": approximate_prompt_tokens(prompt_input),
                 **response_diagnostics(
@@ -487,7 +518,7 @@ class ProposalEngine:
             }
         except Exception as exc:
             self.last_call_diagnostics = {
-                "component": "proposer",
+                "component": "candidate_implementer",
                 "prompt_chars": len(prompt_input) if "prompt_input" in locals() else None,
                 "prompt_approx_tokens": approximate_prompt_tokens(prompt_input) if "prompt_input" in locals() else None,
                 **error_response_diagnostics(
@@ -496,7 +527,7 @@ class ProposalEngine:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            raise OptimizerModelError(f"Optimizer proposer failed: {exc}") from exc
+            raise OptimizerModelError(f"Candidate implementer failed: {exc}") from exc
         self._last_raw_output_text = response.output_text
         self._last_raw_candidate_count = 0
         self._last_parse_invalid_reasons = Counter()
@@ -526,7 +557,7 @@ class ProposalEngine:
                         }
                     },
                     input=(
-                        "The previous proposer response was invalid JSON. "
+                        "The previous candidate-implementer response was invalid JSON. "
                         "Return only a valid JSON object with target_considerations and experiments. "
                         "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
@@ -539,7 +570,7 @@ class ProposalEngine:
                     elapsed_s=time.perf_counter() - repair_started_at,
                 )
                 self.last_call_diagnostics = combine_response_diagnostics(
-                    component="proposer",
+                    component="candidate_implementer",
                     primary=primary_diagnostics,
                     repair=repair_diagnostics,
                 )
@@ -548,14 +579,16 @@ class ProposalEngine:
             except Exception as repair_exc:
                 self.last_call_diagnostics = {
                     **primary_diagnostics,
-                    "component": "proposer",
+                    "component": "candidate_implementer",
                     "repair_attempted": True,
                     "repair_error": str(repair_exc),
                 }
                 raise OptimizerModelError(
-                    f"Optimizer proposer returned invalid JSON: {exc}; repair failed: {repair_exc}"
+                    f"Candidate implementer returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
         candidates: list[CandidateProposal] = []
+        intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
+        intent_ids = set(intent_by_id)
         raw_experiments = payload.get("experiments")
         if not isinstance(raw_experiments, list):
             self._last_parse_invalid_reasons["experiments field is not an array"] += 1
@@ -574,7 +607,7 @@ class ProposalEngine:
                 )
                 continue
             try:
-                experiment = ExperimentSpec.from_dict(raw_experiment, fallback_id=f"exp_{experiment_index}")
+                experiment = ExperimentSpec.from_dict(raw_experiment)
             except Exception as exc:
                 reason = f"malformed experiment: {exc}"
                 self._last_parse_invalid_reasons[reason] += 1
@@ -582,6 +615,14 @@ class ProposalEngine:
                     _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
+            if intent_ids and experiment.experiment_id not in intent_ids:
+                reason = f"experiment_id {experiment.experiment_id!r} does not match any requested experiment_intent"
+                self._last_parse_invalid_reasons[reason] += 1
+                self._last_parse_invalid_candidate_rows.append(
+                    _invalid_raw_candidate_row(raw_experiment, reason)
+                )
+                continue
+            intent = intent_by_id.get(experiment.experiment_id)
             raw_candidates = raw_experiment.get("candidates")
             if not isinstance(raw_candidates, list):
                 reason = "experiment candidates field is not an array"
@@ -607,7 +648,7 @@ class ProposalEngine:
                     or (experiment.target_slices[0] if experiment.target_slices else "global"),
                 }
                 try:
-                    candidates.append(CandidateProposal.from_dict(candidate_payload))
+                    candidate = CandidateProposal.from_dict(candidate_payload)
                 except Exception as exc:
                     reason = f"malformed candidate: {exc}"
                     self._last_parse_invalid_reasons[reason] += 1
@@ -615,10 +656,33 @@ class ProposalEngine:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
+                if intent is not None and intent.allowed_families and candidate.transform_family not in set(intent.allowed_families):
+                    reason = (
+                        f"candidate family {candidate.transform_family!r} is not allowed by experiment intent "
+                        f"{intent.intent_id!r}"
+                    )
+                    self._last_parse_invalid_reasons[reason] += 1
+                    self._last_parse_invalid_candidate_rows.append(
+                        _invalid_raw_candidate_row(raw_candidate, reason)
+                    )
+                    continue
+                if intent is not None and intent.affordance_ids:
+                    unknown_for_intent = sorted(set(candidate.affordance_ids) - set(intent.affordance_ids))
+                    if unknown_for_intent:
+                        reason = (
+                            f"candidate affordance_ids {unknown_for_intent} are not allowed by experiment intent "
+                            f"{intent.intent_id!r}"
+                        )
+                        self._last_parse_invalid_reasons[reason] += 1
+                        self._last_parse_invalid_candidate_rows.append(
+                            _invalid_raw_candidate_row(raw_candidate, reason)
+                        )
+                        continue
+                candidates.append(candidate)
         self._last_plan_audit = _audit_experiment_plan(
             raw_experiments=raw_experiments,
             parsed_candidates=candidates,
-            planner_guidance=planner_guidance,
+            experiment_intents=experiment_intents,
             task_theory=task_theory,
             proposal_budget=proposal_budget,
         )
@@ -798,132 +862,72 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
     }
 
 
-def _compact_experiment_opportunities(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    compact: list[dict[str, Any]] = []
-    for row in rows[:limit]:
-        if not isinstance(row, dict):
-            continue
-        compact.append(
-            {
-                "mechanism_class": row.get("mechanism_class"),
-                "target_slices": list(row.get("target_slices") or [])[:3],
-                "candidate_roles": list(row.get("candidate_roles") or [])[:4],
-                "compatible_mechanisms": list(row.get("compatible_mechanisms") or [])[:4],
-                "source_labels": list(row.get("source_labels") or [])[:3],
-                "source_case_ids_by_label": {
-                    str(label): list(case_ids)[:3]
-                    for label, case_ids in (row.get("source_case_ids_by_label") or {}).items()
-                    if isinstance(case_ids, list)
-                },
-                "measurements": list(row.get("measurements") or [])[:4],
-                "rationale": str(row.get("rationale") or "")[:180],
-                "disconfirming_result": str(row.get("disconfirming_result") or "")[:160],
-            }
-        )
-    return compact
-
-
-def _planner_guidance(
-    *,
-    task_theory: TaskTheory,
-    search_hypothesis: SearchHypothesis,
-    proposal_budget: int,
-) -> dict[str, Any]:
-    active_mechanisms = _active_mechanisms(search_hypothesis)
-    primary, secondary, rationale = _mechanisms_for_bottleneck(task_theory.bottleneck_class)
-    primary = [mechanism for mechanism in primary if mechanism in active_mechanisms]
-    secondary = [mechanism for mechanism in secondary if mechanism in active_mechanisms and mechanism not in primary]
-    if not primary:
-        primary = list(secondary[:2])
-        secondary = secondary[2:]
-    experiment_count = max(0, min(proposal_budget, 3))
-    opportunities = [
-        row
-        for row in _compact_experiment_opportunities(task_theory.experiment_opportunities, limit=3)
-        if row.get("mechanism_class") in active_mechanisms
-    ]
+def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
     return {
-        "bottleneck_class": task_theory.bottleneck_class,
-        "primary_mechanisms": primary[:3],
-        "secondary_mechanisms": secondary[:4],
-        "active_mechanisms": active_mechanisms,
-        "experiment_opportunities": opportunities,
-        "recommended_experiment_count": experiment_count,
-        "rationale": rationale,
-        "planning_rules": [
-            "Each experiment should test one mechanism, not a grab bag of unrelated edits.",
-            "Prefer one strong experiment with controls over many shallow single-candidate variants.",
-            "For the top experiment opportunity, include the listed measurements and explain the disconfirming result in the hypothesis.",
-            "Use composed candidates only when the mechanism needs multiple compatible transform families.",
-            "For semantic-boundary opportunities with source_case_ids_by_label, prefer a boundary rewrite control plus example anchoring when budget allows.",
-            "If few-shot is proposed, use proposal-safe source_case_ids and make the target labels/slices explicit.",
-        ],
+        "intent_id": intent.intent_id,
+        "mechanism_class": intent.mechanism_class,
+        "hypothesis": intent.hypothesis[:360],
+        "target_slices": list(intent.target_slices)[:5],
+        "candidate_roles": list(intent.candidate_roles)[:5],
+        "measurements": list(intent.measurements)[:5],
+        "allowed_families": list(intent.allowed_families)[:5],
+        "affordance_ids": list(intent.affordance_ids)[:8],
+        "success_criteria": intent.success_criteria[:240],
+        "disconfirming_result": intent.disconfirming_result[:240],
+        "priority": intent.priority,
     }
 
 
-def _active_mechanisms(search_hypothesis: SearchHypothesis) -> list[str]:
-    mechanisms: set[str] = set()
-    for family in search_hypothesis.active_families:
-        mechanisms.update(MECHANISMS_BY_FAMILY.get(family, set()))
-    return sorted(mechanisms)
-
-
-def _mechanisms_for_bottleneck(bottleneck_class: str) -> tuple[list[str], list[str], str]:
-    if bottleneck_class == "runtime_or_output_defect":
-        return (
-            ["runtime_defect_fix", "output_contract_fix"],
-            ["semantic_boundary_rewrite", "model_capability_probe"],
-            "Current evidence points first at runtime/output reliability before semantic specialization.",
-        )
-    if bottleneck_class == "output_contract":
-        return (
-            ["output_contract_fix"],
-            ["runtime_defect_fix", "semantic_boundary_rewrite"],
-            "Invalid or contract-shaped failures should be tested as output contract fixes first.",
-        )
-    if bottleneck_class == "semantic_boundary_confusion":
-        return (
-            ["semantic_boundary_rewrite", "representative_examples", "contrastive_examples"],
-            ["model_capability_probe", "ablation"],
-            "Label, slice, or semantic confusion calls for boundary rewrites and example anchoring experiments.",
-        )
-    if bottleneck_class == "efficiency_tradeoff":
-        return (
-            ["efficiency_probe", "model_capability_probe"],
-            ["ablation", "runtime_defect_fix"],
-            "Efficiency objectives should test cost/latency mechanisms while preserving quality.",
-        )
-    if bottleneck_class == "no_observed_failures":
-        return (
-            ["efficiency_probe", "ablation"],
-            ["model_capability_probe"],
-            "With no observed failures, useful experiments should reduce cost, latency, or complexity.",
-        )
-    return (
-        ["semantic_boundary_rewrite", "model_capability_probe", "representative_examples"],
-        ["output_contract_fix", "ablation"],
-        "General correctness gaps need semantic, capability, or example-anchoring experiments.",
-    )
+def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
+    return {
+        "affordance_id": affordance.affordance_id,
+        "target_name": affordance.target_name,
+        "target_kind": affordance.target_kind,
+        "transform_family": affordance.transform_family,
+        "mechanism_class": affordance.mechanism_class,
+        "allowed_ops": list(affordance.allowed_ops),
+        "value_schema": affordance.value_schema,
+        "expected_cost_impact": affordance.expected_cost_impact,
+        "expected_latency_impact": affordance.expected_latency_impact,
+        "risk_level": affordance.risk_level,
+        "required_measurements": list(affordance.required_measurements)[:5],
+    }
 
 
 def _audit_experiment_plan(
     *,
     raw_experiments: list[Any],
     parsed_candidates: list[CandidateProposal],
-    planner_guidance: dict[str, Any],
+    experiment_intents: list[ExperimentIntent],
     task_theory: TaskTheory,
     proposal_budget: int,
 ) -> dict[str, Any]:
     experiment_count = sum(1 for item in raw_experiments if isinstance(item, dict))
     mechanism_counts = Counter(candidate.mechanism_class for candidate in parsed_candidates)
     role_counts = Counter(candidate.candidate_role for candidate in parsed_candidates)
-    primary_mechanisms = [str(item) for item in planner_guidance.get("primary_mechanisms", [])]
+    primary_mechanisms = [intent.mechanism_class for intent in experiment_intents]
     opportunity_mechanisms = [
         str(item.get("mechanism_class"))
-        for item in planner_guidance.get("experiment_opportunities", [])
+        for item in task_theory.experiment_opportunities
         if isinstance(item, dict) and item.get("mechanism_class")
     ]
     candidate_mechanisms = set(mechanism_counts)
+    requested_intent_ids = {intent.intent_id for intent in experiment_intents}
+    returned_intent_ids = {
+        str(item.get("experiment_id") or "")
+        for item in raw_experiments
+        if isinstance(item, dict)
+    }
+    intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
+    mechanism_mismatch_ids = sorted(
+        str(item.get("experiment_id") or "")
+        for item in raw_experiments
+        if isinstance(item, dict)
+        and str(item.get("experiment_id") or "") in intent_by_id
+        and str(item.get("mechanism_class") or "")
+        and str(item.get("mechanism_class") or "")
+        != intent_by_id[str(item.get("experiment_id") or "")].mechanism_class
+    )
     missing_primary = [
         mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
     ]
@@ -939,6 +943,11 @@ def _audit_experiment_plan(
     ]
     if parsed_candidates and missing_opportunities and len(missing_opportunities) == min(2, len(opportunity_mechanisms)):
         warnings.append("no candidate directly tested a top experiment opportunity")
+    missing_intents = sorted(requested_intent_ids - returned_intent_ids)
+    if requested_intent_ids and not (requested_intent_ids & returned_intent_ids):
+        warnings.append("candidate implementer did not return any requested experiment intent IDs")
+    if mechanism_mismatch_ids:
+        warnings.append("returned experiment mechanism differed from requested intent mechanism")
     if task_theory.bottleneck_class == "semantic_boundary_confusion":
         has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
         has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
@@ -958,6 +967,10 @@ def _audit_experiment_plan(
         "parsed_candidate_count": len(parsed_candidates),
         "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
         "candidate_roles": dict(sorted(role_counts.items())),
+        "requested_intent_ids": sorted(requested_intent_ids),
+        "returned_intent_ids": sorted(item for item in returned_intent_ids if item),
+        "missing_intent_ids": missing_intents,
+        "mechanism_mismatch_intent_ids": mechanism_mismatch_ids,
         "primary_mechanisms": primary_mechanisms,
         "opportunity_mechanisms": opportunity_mechanisms,
         "missing_primary_mechanisms": missing_primary,
@@ -1370,7 +1383,7 @@ def _materialize_candidate_references(
                 op="add_few_shot",
                 target="few_shot",
                 value=[{"source_case_id": source_id} for source_id in parameter_source_ids],
-                rationale="Materialize proposer-selected train examples.",
+                rationale="Materialize implementer-selected train examples.",
             )
         ]
     for operation in candidate_operations:
@@ -1432,6 +1445,7 @@ def _materialize_candidate_references(
             experiment_id=candidate.experiment_id,
             candidate_role=candidate.candidate_role,
             comparison_group=candidate.comparison_group,
+            affordance_ids=list(candidate.affordance_ids),
             target_slice=candidate.target_slice,
             hypothesis=candidate.hypothesis,
             expected_effects=dict(candidate.expected_effects),

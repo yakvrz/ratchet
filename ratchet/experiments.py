@@ -26,6 +26,9 @@ MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
     "targeted_few_shot": {"representative_examples", "contrastive_examples", "semantic_boundary_rewrite", "ablation"},
     "model_substitution": {"runtime_defect_fix", "model_capability_probe", "efficiency_probe", "ablation"},
     "runtime_tuning": {"runtime_defect_fix", "efficiency_probe", "output_contract_fix", "ablation"},
+    "retrieval_tuning": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
+    "tool_policy_revision": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
+    "verifier_retry": {"runtime_defect_fix", "output_contract_fix", "semantic_boundary_rewrite", "ablation"},
 }
 
 
@@ -51,6 +54,55 @@ class TaskTheory:
 
 
 @dataclass(frozen=True)
+class ExperimentIntent:
+    intent_id: str
+    mechanism_class: str
+    hypothesis: str
+    target_slices: list[str] = field(default_factory=list)
+    candidate_roles: list[str] = field(default_factory=list)
+    measurements: list[str] = field(default_factory=list)
+    allowed_families: list[str] = field(default_factory=list)
+    affordance_ids: list[str] = field(default_factory=list)
+    success_criteria: str = ""
+    disconfirming_result: str = ""
+    priority: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.intent_id:
+            raise ValueError("intent_id must be non-empty")
+        if self.mechanism_class not in MECHANISM_CLASSES:
+            raise ValueError(f"unknown intent mechanism_class {self.mechanism_class!r}")
+        unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
+        if unknown_roles:
+            raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
+        if self.priority < 1:
+            raise ValueError("intent priority must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ExperimentIntent":
+        return cls(
+            intent_id=str(payload.get("intent_id") or ""),
+            mechanism_class=str(payload.get("mechanism_class") or ""),
+            hypothesis=str(payload.get("hypothesis") or ""),
+            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
+            candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
+            measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
+            allowed_families=[
+                str(item)
+                for item in payload.get("allowed_families", [])
+                if item and str(item).lower() not in {"all", "any", "*"}
+            ],
+            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
+            success_criteria=str(payload.get("success_criteria") or ""),
+            disconfirming_result=str(payload.get("disconfirming_result") or ""),
+            priority=int(payload.get("priority") or 1),
+        )
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     experiment_id: str
     mechanism: str
@@ -70,22 +122,11 @@ class ExperimentSpec:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, fallback_id: str) -> "ExperimentSpec":
+    def from_dict(cls, payload: dict[str, Any]) -> "ExperimentSpec":
         raw_mechanism = str(payload.get("mechanism") or "")
-        mechanism_class = str(payload.get("mechanism_class") or raw_mechanism)
-        if mechanism_class not in MECHANISM_CLASSES:
-            candidate_mechanisms = [
-                str(candidate.get("mechanism_class") or "")
-                for candidate in payload.get("candidates", [])
-                if isinstance(candidate, dict)
-            ]
-            valid_candidate_mechanisms = [
-                mechanism for mechanism in candidate_mechanisms if mechanism in MECHANISM_CLASSES
-            ]
-            if valid_candidate_mechanisms:
-                mechanism_class = valid_candidate_mechanisms[0]
+        mechanism_class = str(payload.get("mechanism_class") or "")
         return cls(
-            experiment_id=str(payload.get("experiment_id") or payload.get("id") or fallback_id),
+            experiment_id=str(payload.get("experiment_id") or ""),
             mechanism=mechanism_class,
             hypothesis=str(payload.get("hypothesis") or ""),
             mechanism_label=raw_mechanism if raw_mechanism != mechanism_class else "",
@@ -93,6 +134,49 @@ class ExperimentSpec:
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
         )
+
+
+@dataclass(frozen=True)
+class ResearchState:
+    objective: dict[str, Any]
+    budget: dict[str, Any]
+    parent: dict[str, Any]
+    task_theory: dict[str, Any]
+    behavior_profile: dict[str, Any]
+    affordances: list[dict[str, Any]]
+    prior_experiment_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    frontier: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CandidateImplementation:
+    intent_id: str
+    candidate_id: str
+    affordance_ids: list[str]
+    transform_family: str
+    mechanism_class: str
+    candidate_role: str
+    hypothesis: str
+    intervention: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MeasurementDecision:
+    stage: str
+    selected_candidate_ids: list[str]
+    rationale: str
+    expected_information: str = ""
+    risks: str = ""
+    skipped_candidate_reasons: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def build_task_theory(
@@ -189,6 +273,19 @@ def mechanism_error_for_family(family: str, mechanism: str) -> str | None:
     if mechanism not in allowed:
         return f"mechanism class {mechanism!r} is incompatible with transform family {family!r}"
     return None
+
+
+def compatible_families_for_mechanism(
+    mechanism: str,
+    *,
+    active_families: list[str] | None = None,
+) -> list[str]:
+    active = set(active_families or MECHANISMS_BY_FAMILY)
+    return sorted(
+        family
+        for family, mechanisms in MECHANISMS_BY_FAMILY.items()
+        if family in active and mechanism in mechanisms
+    )
 
 
 def _residual_failure_modes(
