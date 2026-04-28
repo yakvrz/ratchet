@@ -190,30 +190,78 @@ class ResearchController:
                 raise OptimizerModelError(
                     f"Research controller returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
-        raw_selected = payload.get("selected_candidate_ids", [])
-        if not isinstance(raw_selected, list):
-            raise OptimizerModelError("Research controller selected_candidate_ids is not an array")
-        raw_skipped = payload.get("skipped_candidate_reasons", {})
-        if not isinstance(raw_skipped, dict):
-            raise OptimizerModelError("Research controller skipped_candidate_reasons is not an object")
-        decision = ResearchDecision(
-            action_id=str(payload.get("action_id") or ""),
-            action_type=str(payload.get("action_type") or ""),
-            selected_candidate_ids=[
-                str(item)
-                for item in raw_selected
-                if isinstance(item, str)
-            ],
-            rationale=str(payload.get("rationale") or ""),
-            expected_information=str(payload.get("expected_information") or ""),
-            risks=str(payload.get("risks") or ""),
-            skipped_candidate_reasons={
-                str(key): str(value)
-                for key, value in raw_skipped.items()
-            },
-        )
-        validate_research_decision(decision, allowed_actions)
+        decision = _decision_from_payload(payload)
+        try:
+            validate_research_decision(decision, allowed_actions)
+        except OptimizerModelError as exc:
+            if (self.last_call_diagnostics or {}).get("repair_attempted"):
+                raise
+            primary_diagnostics = self.last_call_diagnostics or {}
+            repair_started_at = time.perf_counter()
+            try:
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous research-controller response was valid JSON but violated the allowed action "
+                        "contract. Return only a corrected JSON object matching the requested schema. "
+                        "Use exactly one allowed action_id/action_type, select only allowed candidate IDs, respect "
+                        "max_select, and include skipped_candidate_reasons for every unselected candidate.\n\n"
+                        f"Validation error:\n{exc}\n\n"
+                        f"Allowed actions:\n{json.dumps([action.to_dict() for action in allowed_actions], separators=(',', ':'), default=str)}\n\n"
+                        f"Invalid JSON object:\n{json.dumps(payload, separators=(',', ':'), default=str)[:9000]}"
+                    ),
+                    max_output_tokens=RESEARCH_CONTROLLER_MAX_OUTPUT_TOKENS,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="research_controller",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                decision = _decision_from_payload(extract_json_object(repair_response.output_text))
+                validate_research_decision(decision, allowed_actions)
+            except Exception as repair_exc:
+                self.last_call_diagnostics = {
+                    **primary_diagnostics,
+                    "component": "research_controller",
+                    "repair_attempted": True,
+                    "repair_error": str(repair_exc),
+                }
+                raise OptimizerModelError(
+                    f"Research controller returned invalid decision: {exc}; repair failed: {repair_exc}"
+                ) from repair_exc
         return decision
+
+
+def _decision_from_payload(payload: dict[str, Any]) -> ResearchDecision:
+    raw_selected = payload.get("selected_candidate_ids", [])
+    if not isinstance(raw_selected, list):
+        raise OptimizerModelError("Research controller selected_candidate_ids is not an array")
+    raw_skipped = payload.get("skipped_candidate_reasons", {})
+    if not isinstance(raw_skipped, dict):
+        raise OptimizerModelError("Research controller skipped_candidate_reasons is not an object")
+    return ResearchDecision(
+        action_id=str(payload.get("action_id") or ""),
+        action_type=str(payload.get("action_type") or ""),
+        selected_candidate_ids=[
+            str(item)
+            for item in raw_selected
+            if isinstance(item, str)
+        ],
+        rationale=str(payload.get("rationale") or ""),
+        expected_information=str(payload.get("expected_information") or ""),
+        risks=str(payload.get("risks") or ""),
+        skipped_candidate_reasons={
+            str(key): str(value)
+            for key, value in raw_skipped.items()
+        },
+    )
 
 
 def validate_research_decision(

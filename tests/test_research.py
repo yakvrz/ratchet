@@ -16,11 +16,14 @@ class _Response:
 
 
 class _RepairClient:
-    def __init__(self) -> None:
+    def __init__(self, outputs: list[str] | None = None) -> None:
         self.calls = 0
+        self.outputs = outputs
 
     def create_response(self, **_: object) -> _Response:
         self.calls += 1
+        if self.outputs is not None:
+            return _Response(self.outputs[self.calls - 1])
         if self.calls == 1:
             return _Response('{"action_id":"evaluate_full_dev","action_type":"evaluate_candidates","selected_candidate_ids":[')
         return _Response(
@@ -154,6 +157,33 @@ class ResearchControllerTests(unittest.TestCase):
         decision = controller.decide(state={}, allowed_actions=[action])
 
         self.assertEqual(decision.selected_candidate_ids, ["a"])
+        self.assertEqual(client.calls, 2)
+        self.assertTrue((controller.last_call_diagnostics or {}).get("repair_attempted"))
+
+    def test_research_controller_repairs_invalid_decision_contract(self) -> None:
+        controller = ResearchController(env_path=".env", model="fake", reasoning_effort="low")
+        client = _RepairClient(
+            [
+                '{"action_id":"evaluate_full_dev","action_type":"evaluate_candidates",'
+                '"selected_candidate_ids":["a"],"rationale":"bad","expected_information":"info",'
+                '"risks":"none","skipped_candidate_reasons":{}}',
+                '{"action_id":"evaluate_full_dev","action_type":"evaluate_candidates",'
+                '"selected_candidate_ids":["a"],"rationale":"fixed","expected_information":"info",'
+                '"risks":"none","skipped_candidate_reasons":{"b":"skip"}}',
+            ]
+        )
+        controller._client = client
+        action = ResearchAction(
+            action_id="evaluate_full_dev",
+            action_type="evaluate_candidates",
+            candidate_ids=["a", "b"],
+            max_select=1,
+        )
+
+        decision = controller.decide(state={}, allowed_actions=[action])
+
+        self.assertEqual(decision.selected_candidate_ids, ["a"])
+        self.assertEqual(decision.skipped_candidate_reasons, {"b": "skip"})
         self.assertEqual(client.calls, 2)
         self.assertTrue((controller.last_call_diagnostics or {}).get("repair_attempted"))
 
