@@ -13,6 +13,7 @@ from ratchet.eval_health import EvalHealthReport, render_eval_health_markdown, r
 from ratchet.errors import OptimizerModelError
 from ratchet.io import file_sha256, load_eval_cases
 from ratchet.optimizer import RatchetOptimizer
+from ratchet.partial import write_partial_run_outputs
 from ratchet.preflight import run_preflight_check
 from ratchet.scaffold import SUPPORTED_TEMPLATES, init_scaffold
 
@@ -88,7 +89,24 @@ def run_optimizer(
         },
         progress_callback=CliProgressPrinter(),
     )
-    result = optimizer.run(cases)
+    try:
+        result = optimizer.run(cases)
+    except KeyboardInterrupt:
+        write_partial_run_outputs(
+            config.out,
+            status="interrupted",
+            reason="KeyboardInterrupt received before run completion.",
+        )
+        print(f"Partial report: {config.out / 'partial_report.md'}", file=sys.stderr)
+        raise
+    except Exception as exc:
+        write_partial_run_outputs(
+            config.out,
+            status="failed",
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        print(f"Partial report: {config.out / 'partial_report.md'}", file=sys.stderr)
+        raise
     print(
         f"Selected patch: {result.selected_patch_hash} "
         f"({'promoted' if result.promoted else 'baseline kept'})"
