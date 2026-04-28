@@ -9,6 +9,7 @@ optimizer_model = "gemini-3-flash-preview"
 optimizer_reasoning = "medium"
 samples_per_case = 1
 case_concurrency = 8
+stage_case_concurrency = 12
 case_timeout_s = 90
 expensive_candidate_cost_ratio = 10.0
 max_expensive_full_dev_candidates = 1

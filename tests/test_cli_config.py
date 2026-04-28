@@ -208,12 +208,14 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 "dev_budget": 8,
                 "holdout_budget": 2,
                 "case_concurrency": 4,
+                "stage_case_concurrency": 12,
                 "proposal_example_count": 12,
             }
         )
         self.assertIsNotNone(run_line)
         self.assertIn("[ratchet 00:03] RUN", run_line)
         self.assertIn("train=20 dev=30 holdout=10", run_line)
+        self.assertIn("concurrency=4/12", run_line)
 
         proposal_line = printer.format(
             {
@@ -375,12 +377,14 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     adapter = "pkg.module:adapter"
                     evals = "evals.jsonl"
                     out = "results/run"
+                    stage_case_concurrency = 12
                     sanitize_examples = true
                     """
                 ).strip()
             )
             loaded = load_run_config(config_path)
             self.assertTrue(loaded.objective.constraints.sanitize_examples)
+            self.assertEqual(loaded.stage_case_concurrency, 12)
             overridden = resolve_run_config(
                 config_path=config_path,
                 adapter=None,
@@ -396,6 +400,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 optimizer_reasoning=None,
                 samples_per_case=None,
                 case_concurrency=None,
+                stage_case_concurrency=None,
                 max_case_retries=None,
                 case_timeout_s=None,
                 fail_fast=None,

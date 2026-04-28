@@ -982,6 +982,42 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(batch_rows[0]["concurrency"], 4)
             self.assertEqual([evaluation.case.id for evaluation in summary.evaluations], [case.id for case in cases])
 
+    def test_evaluate_patches_uses_stage_concurrency_across_patches(self) -> None:
+        cases = tuple(
+            EvalCase(id=f"dev-{index}", split="dev", input=str(index), expected=str(index))
+            for index in range(4)
+        )
+        patches = [
+            AgentPatch(operations=[PatchOperation(op="add_instruction", target="instructions.system_prompt", value="a")]),
+            AgentPatch(operations=[PatchOperation(op="add_instruction", target="instructions.system_prompt", value="b")]),
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            progress_rows: list[dict[str, object]] = []
+            optimizer = RatchetOptimizer(
+                adapter=SleepingAdapter(),
+                out_dir=Path(tmp) / "run",
+                env_path=".env",
+                dev_budget=0,
+                holdout_budget=0,
+                case_concurrency=2,
+                stage_case_concurrency=8,
+                progress_callback=progress_rows.append,
+            )
+            optimizer.out_dir.mkdir()
+            optimizer._progress_started_at = time.perf_counter()
+            optimizer._progress_path = Path(tmp) / "run" / "progress.jsonl"
+            optimizer._progress_path.write_text("")
+
+            started_at = time.perf_counter()
+            summaries = optimizer.evaluate_patches(patches, cases)
+            elapsed_s = time.perf_counter() - started_at
+
+            self.assertEqual({summary.pass_count for summary in summaries.values()}, {4})
+            self.assertLess(elapsed_s, 0.45)
+            batch_rows = [row for row in progress_rows if row.get("event") == "case_batch_started"]
+            self.assertEqual({row["concurrency"] for row in batch_rows}, {8})
+            self.assertEqual({row["parallel_patch_count"] for row in batch_rows}, {2})
+
     def test_rejected_batch_retry_does_not_run_when_dev_budget_is_exhausted(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

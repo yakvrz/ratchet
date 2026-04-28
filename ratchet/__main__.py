@@ -41,6 +41,7 @@ def run_optimizer(
     optimizer_reasoning: str | None = "medium",
     samples_per_case: int | None = 1,
     case_concurrency: int | None = 1,
+    stage_case_concurrency: int | None = None,
     max_case_retries: int | None = 2,
     case_timeout_s: int | None = 180,
     fail_fast: bool | None = False,
@@ -65,6 +66,7 @@ def run_optimizer(
         optimizer_reasoning=optimizer_reasoning,
         samples_per_case=samples_per_case,
         case_concurrency=case_concurrency,
+        stage_case_concurrency=stage_case_concurrency,
         max_case_retries=max_case_retries,
         case_timeout_s=case_timeout_s,
         fail_fast=fail_fast,
@@ -85,6 +87,7 @@ def run_optimizer(
         optimizer_reasoning=config.optimizer_reasoning,
         samples_per_case=config.samples_per_case,
         case_concurrency=config.case_concurrency,
+        stage_case_concurrency=config.stage_case_concurrency,
         max_case_retries=config.max_case_retries,
         case_timeout_s=config.case_timeout_s,
         fail_fast=config.fail_fast,
@@ -149,7 +152,8 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             "started "
             f"objective={row.get('objective')} train={row.get('train_cases')} dev={row.get('dev_cases')} "
             f"holdout={row.get('holdout_cases')} dev_budget={row.get('dev_budget')} "
-            f"holdout_budget={row.get('holdout_budget')} concurrency={row.get('case_concurrency')} "
+            f"holdout_budget={row.get('holdout_budget')} concurrency={row.get('case_concurrency')}"
+            f"/{row.get('stage_case_concurrency', row.get('case_concurrency'))} "
             f"examples={row.get('proposal_example_count')}",
         )
     if event == "baseline_dev_started":
@@ -586,6 +590,7 @@ def _apply_run_overrides(
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
         samples_per_case=getattr(args, "samples_per_case", None),
         case_concurrency=getattr(args, "case_concurrency", None),
+        stage_case_concurrency=getattr(args, "stage_case_concurrency", None),
         max_case_retries=getattr(args, "max_case_retries", None),
         case_timeout_s=getattr(args, "case_timeout_s", None),
         fail_fast=True if getattr(args, "fail_fast", False) else None,
@@ -616,6 +621,11 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's diagnosis/proposal loop")
     parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per patch/case")
     parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
+    parser.add_argument(
+        "--stage-case-concurrency",
+        type=int,
+        help="Maximum concurrent case evaluations across a multi-patch stage; defaults to --case-concurrency.",
+    )
     parser.add_argument("--max-case-retries", type=int, help="Per-case retry budget after the first attempt")
     parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds")
     parser.add_argument(

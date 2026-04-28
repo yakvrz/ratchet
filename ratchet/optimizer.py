@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import contextlib
 from dataclasses import dataclass, field
@@ -154,6 +155,7 @@ class RatchetOptimizer:
         optimizer_reasoning: str = "medium",
         samples_per_case: int = 1,
         case_concurrency: int = 1,
+        stage_case_concurrency: int | None = None,
         max_case_retries: int = 2,
         case_timeout_s: int = 180,
         fail_fast: bool = False,
@@ -187,6 +189,9 @@ class RatchetOptimizer:
         if case_concurrency <= 0:
             raise ValueError("case_concurrency must be positive.")
         self.case_concurrency = case_concurrency
+        if stage_case_concurrency is not None and stage_case_concurrency <= 0:
+            raise ValueError("stage_case_concurrency must be positive when set.")
+        self.stage_case_concurrency = stage_case_concurrency or case_concurrency
         self.max_case_retries = max_case_retries
         self.case_timeout_s = case_timeout_s
         self.fail_fast = fail_fast
@@ -239,6 +244,7 @@ class RatchetOptimizer:
             dev_budget=self.dev_budget,
             holdout_budget=self.holdout_budget,
             case_concurrency=self.case_concurrency,
+            stage_case_concurrency=self.stage_case_concurrency,
             objective=self.objective.mode,
         )
 
@@ -688,6 +694,7 @@ class RatchetOptimizer:
         runtime_diagnostics: list[dict[str, Any]] = []
         confirmation_results: list[dict[str, Any]] = []
         promotable: list[tuple[PatchSummary, Comparison]] = []
+        holdout_ready: list[tuple[PatchSummary, dict[str, Any]]] = []
         if self.holdout_budget <= 0 and accepted_dev_patches:
             decision_log.append(
                 {
@@ -753,16 +760,13 @@ class RatchetOptimizer:
                 )
                 sample_start = 1000 + len(confirmation_results) * 100
                 sample_indices = tuple(range(sample_start, sample_start + FINALIST_CONFIRMATION_SAMPLES))
-                confirmation_baseline = self.evaluate_patch(
-                    baseline_patch,
+                confirmation_summaries = self.evaluate_patches(
+                    [baseline_patch, dev_summary.patch],
                     confirmation_cases,
                     sample_indices=sample_indices,
                 )
-                confirmation_candidate = self.evaluate_patch(
-                    dev_summary.patch,
-                    confirmation_cases,
-                    sample_indices=sample_indices,
-                )
+                confirmation_baseline = confirmation_summaries[patch_hash(baseline_patch)]
+                confirmation_candidate = confirmation_summaries[dev_summary.patch_hash]
                 confirmation = confirmation_result(
                     reference=baseline_dev,
                     candidate=dev_summary,
@@ -818,7 +822,16 @@ class RatchetOptimizer:
                 patch_hash=dev_summary.patch_hash,
                 case_count=len(holdout_cases),
             )
-            holdout_summary = self.evaluate_patch(dev_summary.patch, holdout_cases)
+            holdout_ready.append((dev_summary, runtime_diagnostic))
+        if holdout_ready:
+            holdout_summaries = self.evaluate_patches(
+                [dev_summary.patch for dev_summary, _ in holdout_ready],
+                holdout_cases,
+            )
+        else:
+            holdout_summaries = {}
+        for dev_summary, runtime_diagnostic in holdout_ready:
+            holdout_summary = holdout_summaries[dev_summary.patch_hash]
             holdout_patches.append(holdout_summary)
             gate = final_gate_status(
                 baseline_holdout,
@@ -1424,9 +1437,13 @@ class RatchetOptimizer:
             )
             reference_summary = _summary_for_cases(reference, stage_cases) or self.evaluate_patch(reference.patch, stage_cases)
             baseline_summary = _summary_for_cases(baseline, stage_cases) or self.evaluate_patch(baseline.patch, stage_cases)
+            candidate_summaries = self.evaluate_patches(
+                [state.patch for state in active],
+                stage_cases,
+            )
             next_active: list[CandidateEvaluationState] = []
             for state in active:
-                candidate_summary = self.evaluate_patch(state.patch, stage_cases)
+                candidate_summary = candidate_summaries[state.patch_hash]
                 comparison = compare_summaries(reference_summary, candidate_summary)
                 flip_summary = behavior_flip_summary(reference_summary, candidate_summary)
                 constraint_warning = None
@@ -1625,54 +1642,77 @@ class RatchetOptimizer:
         *,
         sample_indices: Iterable[int] | None = None,
     ) -> PatchSummary:
-        digest = patch_hash(patch)
+        return self.evaluate_patches([patch], cases, sample_indices=sample_indices)[patch_hash(patch)]
+
+    def evaluate_patches(
+        self,
+        patches: Iterable[AgentPatch],
+        cases: tuple[EvalCase, ...],
+        *,
+        sample_indices: Iterable[int] | None = None,
+    ) -> dict[str, PatchSummary]:
+        patch_by_digest: dict[str, AgentPatch] = {}
+        for patch in patches:
+            patch_by_digest.setdefault(patch_hash(patch), patch)
+        if not patch_by_digest:
+            return {}
         indices = tuple(sample_indices) if sample_indices is not None else tuple(range(self.samples_per_case))
         if not indices:
             raise ValueError("sample_indices must not be empty.")
-        ordered: list[CaseEvaluation | None] = [None] * (len(cases) * len(indices))
-        uncached: list[tuple[int, EvalCase, int]] = []
-        order = 0
-        for case in cases:
-            for sample_index in indices:
-                with self._store_lock:
-                    cached = self.store.get(digest, case, sample_index=sample_index)
-                if cached is not None:
-                    with self._stats_lock:
-                        self.stats.cache_hits += 1
-                    ordered[order] = cached
-                    self._emit_progress(
-                        "case_cache_hit",
-                        patch_hash=digest,
-                        case_id=case.id,
-                        split=case.split,
-                        sample_index=sample_index,
-                    )
-                else:
-                    uncached.append((order, case, sample_index))
-                order += 1
+        ordered_by_digest: dict[str, list[CaseEvaluation | None]] = {
+            digest: [None] * (len(cases) * len(indices))
+            for digest in patch_by_digest
+        }
+        uncached: list[tuple[str, AgentPatch, int, EvalCase, int]] = []
+        fresh_by_digest: Counter[str] = Counter()
+        for digest, patch in patch_by_digest.items():
+            order = 0
+            ordered = ordered_by_digest[digest]
+            for case in cases:
+                for sample_index in indices:
+                    with self._store_lock:
+                        cached = self.store.get(digest, case, sample_index=sample_index)
+                    if cached is not None:
+                        with self._stats_lock:
+                            self.stats.cache_hits += 1
+                        ordered[order] = cached
+                        self._emit_progress(
+                            "case_cache_hit",
+                            patch_hash=digest,
+                            case_id=case.id,
+                            split=case.split,
+                            sample_index=sample_index,
+                        )
+                    else:
+                        fresh_by_digest[digest] += 1
+                        uncached.append((digest, patch, order, case, sample_index))
+                    order += 1
         if uncached:
-            effective_concurrency = 1 if self.fail_fast else min(self.case_concurrency, len(uncached))
-            self._emit_progress(
-                "case_batch_started",
-                patch_hash=digest,
-                split=cases[0].split,
-                case_count=len(cases),
-                sample_count=len(indices),
-                fresh_count=len(uncached),
-                concurrency=effective_concurrency,
-            )
+            concurrency_limit = self.stage_case_concurrency if len(patch_by_digest) > 1 else self.case_concurrency
+            effective_concurrency = 1 if self.fail_fast else min(concurrency_limit, len(uncached))
+            for digest, fresh_count in fresh_by_digest.items():
+                self._emit_progress(
+                    "case_batch_started",
+                    patch_hash=digest,
+                    split=cases[0].split,
+                    case_count=len(cases),
+                    sample_count=len(indices),
+                    fresh_count=fresh_count,
+                    concurrency=effective_concurrency,
+                    parallel_patch_count=len(patch_by_digest),
+                )
             if effective_concurrency == 1:
-                for item_order, case, sample_index in uncached:
-                    ordered[item_order] = self._run_uncached_case(
+                for digest, patch, item_order, case, sample_index in uncached:
+                    ordered_by_digest[digest][item_order] = self._run_uncached_case(
                         digest,
                         patch,
                         case,
                         sample_index=sample_index,
                     )
             else:
-                futures: dict[Future[CaseEvaluation], tuple[int, EvalCase, int]] = {}
+                futures: dict[Future[CaseEvaluation], tuple[str, AgentPatch, int, EvalCase, int]] = {}
                 with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
-                    for item_order, case, sample_index in uncached:
+                    for digest, patch, item_order, case, sample_index in uncached:
                         self._emit_progress(
                             "case_started",
                             patch_hash=digest,
@@ -1681,30 +1721,36 @@ class RatchetOptimizer:
                             sample_index=sample_index,
                         )
                         future = executor.submit(self._execute_case, patch, case, sample_index=sample_index)
-                        futures[future] = (item_order, case, sample_index)
+                        futures[future] = (digest, patch, item_order, case, sample_index)
                     for future in as_completed(futures):
-                        item_order, case, sample_index = futures[future]
+                        digest, patch, item_order, case, sample_index = futures[future]
                         evaluation = future.result()
                         with self._store_lock:
                             self.store.put(digest, patch, evaluation)
                         self._emit_case_completed(digest, evaluation)
-                        ordered[item_order] = evaluation
-            self._emit_progress(
-                "case_batch_completed",
+                        ordered_by_digest[digest][item_order] = evaluation
+            for digest, fresh_count in fresh_by_digest.items():
+                self._emit_progress(
+                    "case_batch_completed",
+                    patch_hash=digest,
+                    split=cases[0].split,
+                    fresh_count=fresh_count,
+                    concurrency=effective_concurrency,
+                    parallel_patch_count=len(patch_by_digest),
+                )
+        summaries: dict[str, PatchSummary] = {}
+        for digest, patch in patch_by_digest.items():
+            ordered = ordered_by_digest[digest]
+            evaluations = [evaluation for evaluation in ordered if evaluation is not None]
+            if len(evaluations) != len(ordered):
+                raise RuntimeError("internal evaluation error: missing case evaluation result")
+            summaries[digest] = PatchSummary(
                 patch_hash=digest,
+                patch=patch,
                 split=cases[0].split,
-                fresh_count=len(uncached),
-                concurrency=effective_concurrency,
+                evaluations=evaluations,
             )
-        evaluations = [evaluation for evaluation in ordered if evaluation is not None]
-        if len(evaluations) != len(ordered):
-            raise RuntimeError("internal evaluation error: missing case evaluation result")
-        return PatchSummary(
-            patch_hash=digest,
-            patch=patch,
-            split=cases[0].split,
-            evaluations=evaluations,
-        )
+        return summaries
 
     def _run_uncached_case(
         self,
@@ -1881,6 +1927,7 @@ class RatchetOptimizer:
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "samples_per_case": self.samples_per_case,
             "case_concurrency": self.case_concurrency,
+            "stage_case_concurrency": self.stage_case_concurrency,
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
             "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
             "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
