@@ -10,6 +10,9 @@ optimizer_reasoning = "medium"
 samples_per_case = 1
 case_concurrency = 8
 case_timeout_s = 90
+expensive_candidate_cost_ratio = 10.0
+max_expensive_full_dev_candidates = 1
+max_expensive_holdout_candidates = 1
 
 [ratchet.objective]
 mode = "correctness"

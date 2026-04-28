@@ -45,6 +45,9 @@ def run_optimizer(
     case_timeout_s: int | None = 180,
     fail_fast: bool | None = False,
     sanitize_examples: bool | None = None,
+    expensive_candidate_cost_ratio: float | None = None,
+    max_expensive_full_dev_candidates: int | None = None,
+    max_expensive_holdout_candidates: int | None = None,
     config: RatchetRunConfig | None = None,
 ) -> Path:
     config = config or resolve_run_config(
@@ -66,6 +69,9 @@ def run_optimizer(
         case_timeout_s=case_timeout_s,
         fail_fast=fail_fast,
         sanitize_examples=sanitize_examples,
+        expensive_candidate_cost_ratio=expensive_candidate_cost_ratio,
+        max_expensive_full_dev_candidates=max_expensive_full_dev_candidates,
+        max_expensive_holdout_candidates=max_expensive_holdout_candidates,
     )
     adapter, cases = load_runtime(config)
     optimizer = RatchetOptimizer(
@@ -82,6 +88,9 @@ def run_optimizer(
         max_case_retries=config.max_case_retries,
         case_timeout_s=config.case_timeout_s,
         fail_fast=config.fail_fast,
+        expensive_candidate_cost_ratio=config.expensive_candidate_cost_ratio,
+        max_expensive_full_dev_candidates=config.max_expensive_full_dev_candidates,
+        max_expensive_holdout_candidates=config.max_expensive_holdout_candidates,
         run_metadata={
             **config.to_manifest_dict(),
             "adapter_fingerprint": adapter_fingerprint(config.adapter),
@@ -285,7 +294,9 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "holdout_validation_skipped":
-        return "HOLDOUT", f"skipped reason={_short_reason(row.get('reason'))}"
+        patch = row.get("patch_hash")
+        patch_text = f" patch={_short_hash(patch)}" if patch else ""
+        return "HOLDOUT", f"skipped{patch_text} reason={_short_reason(row.get('reason'))}"
     if event == "case_batch_started":
         return (
             "BATCH",
@@ -579,6 +590,9 @@ def _apply_run_overrides(
         case_timeout_s=getattr(args, "case_timeout_s", None),
         fail_fast=True if getattr(args, "fail_fast", False) else None,
         sanitize_examples=True if getattr(args, "sanitize_examples", False) else None,
+        expensive_candidate_cost_ratio=getattr(args, "expensive_candidate_cost_ratio", None),
+        max_expensive_full_dev_candidates=getattr(args, "max_expensive_full_dev_candidates", None),
+        max_expensive_holdout_candidates=getattr(args, "max_expensive_holdout_candidates", None),
     )
 
 
@@ -604,6 +618,21 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
     parser.add_argument("--max-case-retries", type=int, help="Per-case retry budget after the first attempt")
     parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds")
+    parser.add_argument(
+        "--expensive-candidate-cost-ratio",
+        type=float,
+        help="Treat candidates above this cost ratio as expensive for evaluation-budget caps.",
+    )
+    parser.add_argument(
+        "--max-expensive-full-dev-candidates",
+        type=int,
+        help="Maximum expensive candidates to evaluate on full dev; omit for no cap.",
+    )
+    parser.add_argument(
+        "--max-expensive-holdout-candidates",
+        type=int,
+        help="Maximum expensive finalists to validate on holdout; omit for no cap.",
+    )
     parser.add_argument(
         "--fail-fast",
         action="store_true",

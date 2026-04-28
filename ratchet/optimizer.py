@@ -149,6 +149,9 @@ class RatchetOptimizer:
         max_case_retries: int = 2,
         case_timeout_s: int = 180,
         fail_fast: bool = False,
+        expensive_candidate_cost_ratio: float = 10.0,
+        max_expensive_full_dev_candidates: int | None = None,
+        max_expensive_holdout_candidates: int | None = None,
         run_metadata: dict[str, Any] | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
@@ -179,6 +182,17 @@ class RatchetOptimizer:
         self.max_case_retries = max_case_retries
         self.case_timeout_s = case_timeout_s
         self.fail_fast = fail_fast
+        if expensive_candidate_cost_ratio <= 0:
+            raise ValueError("expensive_candidate_cost_ratio must be positive.")
+        self.expensive_candidate_cost_ratio = expensive_candidate_cost_ratio
+        if max_expensive_full_dev_candidates is not None and max_expensive_full_dev_candidates < 0:
+            raise ValueError("max_expensive_full_dev_candidates must be non-negative when set.")
+        if max_expensive_holdout_candidates is not None and max_expensive_holdout_candidates < 0:
+            raise ValueError("max_expensive_holdout_candidates must be non-negative when set.")
+        self.max_expensive_full_dev_candidates = max_expensive_full_dev_candidates
+        self.max_expensive_holdout_candidates = max_expensive_holdout_candidates
+        self._expensive_full_dev_evaluations = 0
+        self._expensive_holdout_validations = 0
         self.run_metadata = dict(run_metadata or {})
         self.cache_namespace = build_cache_namespace(
             agent_spec=self.agent_spec,
@@ -203,6 +217,8 @@ class RatchetOptimizer:
         self._progress_path = self.out_dir / "progress.jsonl"
         self._progress_path.write_text("")
         self.optimizer_call_diagnostics = []
+        self._expensive_full_dev_evaluations = 0
+        self._expensive_holdout_validations = 0
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
         self._emit_progress(
@@ -678,6 +694,44 @@ class RatchetOptimizer:
                 finalist_count=len(accepted_dev_patches),
             )
         for dev_summary in finalist_dev_patches:
+            expensive_for_validation = _is_expensive_summary(
+                baseline=baseline_dev,
+                candidate=dev_summary,
+                cost_ratio=self.expensive_candidate_cost_ratio,
+            )
+            if expensive_for_validation and self.max_expensive_holdout_candidates is not None:
+                if self._expensive_holdout_validations >= self.max_expensive_holdout_candidates:
+                    reason = (
+                        "holdout skipped by expensive evaluation cap "
+                        f"(candidate dev cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
+                        f"cap {self.max_expensive_holdout_candidates})"
+                    )
+                    finalist_statuses.append(
+                        {
+                            "patch_hash": dev_summary.patch_hash,
+                            "status": "deferred",
+                            "stage": "holdout_skipped",
+                            "reason": reason,
+                            "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
+                            "dev_metrics": dev_summary.to_dict(),
+                            "passed_final_gate": False,
+                        }
+                    )
+                    decision_log.append(
+                        {
+                            "type": "holdout_validation_skipped",
+                            "patch_hash": dev_summary.patch_hash,
+                            "reason": reason,
+                            "dev_metrics": dev_summary.to_dict(),
+                        }
+                    )
+                    self._emit_progress(
+                        "holdout_validation_skipped",
+                        patch_hash=dev_summary.patch_hash,
+                        reason=reason,
+                    )
+                    continue
+                self._expensive_holdout_validations += 1
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
             if _requires_finalist_confirmation(dev_summary.patch, runtime_diagnostic):
@@ -1319,7 +1373,7 @@ class RatchetOptimizer:
             if not active:
                 break
             if stage_name == "full_dev":
-                active = _select_full_dev_candidates(active, self.objective)
+                active = self._select_full_dev_candidates_for_run(active, baseline)
                 if not active:
                     break
             self._emit_progress(
@@ -1397,6 +1451,34 @@ class RatchetOptimizer:
             state.rejection_reason = "screened out before full_dev by batch ranking"
             state.frontier_status = "screened_out"
             state.accepted = False
+
+    def _select_full_dev_candidates_for_run(
+        self,
+        states: list[CandidateEvaluationState],
+        baseline: PatchSummary,
+    ) -> list[CandidateEvaluationState]:
+        selected = _select_full_dev_candidates(states, self.objective)
+        if self.max_expensive_full_dev_candidates is None:
+            return selected
+        kept: list[CandidateEvaluationState] = []
+        for state in selected:
+            if _is_expensive_summary(
+                baseline=baseline,
+                candidate=state.summary,
+                cost_ratio=self.expensive_candidate_cost_ratio,
+            ):
+                if self._expensive_full_dev_evaluations >= self.max_expensive_full_dev_candidates:
+                    state.rejection_reason = (
+                        "screened out before full_dev by expensive evaluation cap "
+                        f"(candidate cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
+                        f"cap {self.max_expensive_full_dev_candidates})"
+                    )
+                    state.frontier_status = "screened_out"
+                    state.accepted = False
+                    continue
+                self._expensive_full_dev_evaluations += 1
+            kept.append(state)
+        return kept
 
     def _evaluate_candidate_progressively(
         self,
@@ -1754,6 +1836,11 @@ class RatchetOptimizer:
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "samples_per_case": self.samples_per_case,
             "case_concurrency": self.case_concurrency,
+            "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
+            "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
+            "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
+            "expensive_full_dev_evaluations": self._expensive_full_dev_evaluations,
+            "expensive_holdout_validations": self._expensive_holdout_validations,
             "selected_patch_hash": selected_patch_hash,
             "promoted": promoted,
             "progress_path": str(self.out_dir / "progress.jsonl"),
@@ -1872,6 +1959,17 @@ def _efficiency_improved(reference: PatchSummary, candidate: PatchSummary) -> bo
     cheaper = candidate.mean_cost_usd < reference.mean_cost_usd
     faster = candidate.median_latency_s < reference.median_latency_s
     return score_noninferior and (cheaper or faster)
+
+
+def _is_expensive_summary(
+    *,
+    baseline: PatchSummary,
+    candidate: PatchSummary | None,
+    cost_ratio: float,
+) -> bool:
+    if candidate is None or baseline.mean_cost_usd <= 0:
+        return False
+    return candidate.mean_cost_usd > baseline.mean_cost_usd * cost_ratio
 
 
 def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[str, Any]) -> bool:

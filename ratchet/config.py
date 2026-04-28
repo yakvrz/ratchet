@@ -34,6 +34,9 @@ RUN_CONFIG_KEYS = {
     "max_case_retries",
     "case_timeout_s",
     "fail_fast",
+    "expensive_candidate_cost_ratio",
+    "max_expensive_full_dev_candidates",
+    "max_expensive_holdout_candidates",
 }
 OBJECTIVE_KEYS = {"mode", "constraints", "tie_breakers"}
 EVAL_HEALTH_KEYS = {
@@ -155,8 +158,19 @@ class RatchetRunConfig:
     max_case_retries: int = 2
     case_timeout_s: int = 180
     fail_fast: bool = False
+    expensive_candidate_cost_ratio: float = 10.0
+    max_expensive_full_dev_candidates: int | None = None
+    max_expensive_holdout_candidates: int | None = None
     eval_health: EvalHealthConfig = field(default_factory=EvalHealthConfig)
     config_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        if self.expensive_candidate_cost_ratio <= 0:
+            raise RatchetConfigError("expensive_candidate_cost_ratio must be positive.")
+        for name in ("max_expensive_full_dev_candidates", "max_expensive_holdout_candidates"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise RatchetConfigError(f"{name} must be non-negative when set.")
 
     @property
     def search_path(self) -> Path | None:
@@ -180,6 +194,9 @@ class RatchetRunConfig:
             "max_case_retries": self.max_case_retries,
             "case_timeout_s": self.case_timeout_s,
             "fail_fast": self.fail_fast,
+            "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
+            "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
+            "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
             "eval_health": self.eval_health.to_dict(),
             "config_path": str(self.config_path) if self.config_path else None,
         }
@@ -256,6 +273,9 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         max_case_retries=int(payload.get("max_case_retries", 2)),
         case_timeout_s=int(payload.get("case_timeout_s", 180)),
         fail_fast=_as_bool(payload, "fail_fast", False),
+        expensive_candidate_cost_ratio=float(payload.get("expensive_candidate_cost_ratio", 10.0)),
+        max_expensive_full_dev_candidates=_optional_int(payload.get("max_expensive_full_dev_candidates")),
+        max_expensive_holdout_candidates=_optional_int(payload.get("max_expensive_holdout_candidates")),
         eval_health=_eval_health_from_payload(payload),
         config_path=config_path,
     )
@@ -305,6 +325,9 @@ def resolve_run_config(
     case_timeout_s: int | None,
     fail_fast: bool | None,
     sanitize_examples: bool | None = None,
+    expensive_candidate_cost_ratio: float | None = None,
+    max_expensive_full_dev_candidates: int | None = None,
+    max_expensive_holdout_candidates: int | None = None,
 ) -> RatchetRunConfig:
     if config_path is not None:
         base = load_run_config(config_path)
@@ -344,6 +367,22 @@ def resolve_run_config(
         max_case_retries=max_case_retries if max_case_retries is not None else base.max_case_retries,
         case_timeout_s=case_timeout_s if case_timeout_s is not None else base.case_timeout_s,
         fail_fast=fail_fast if fail_fast is not None else base.fail_fast,
+        expensive_candidate_cost_ratio=(
+            expensive_candidate_cost_ratio
+            if expensive_candidate_cost_ratio is not None
+            else base.expensive_candidate_cost_ratio
+        ),
+        max_expensive_full_dev_candidates=(
+            max_expensive_full_dev_candidates
+            if max_expensive_full_dev_candidates is not None
+            else base.max_expensive_full_dev_candidates
+        ),
+        max_expensive_holdout_candidates=(
+            max_expensive_holdout_candidates
+            if max_expensive_holdout_candidates is not None
+            else base.max_expensive_holdout_candidates
+        ),
+        eval_health=base.eval_health,
         config_path=base.config_path,
     )
 
@@ -355,3 +394,9 @@ def ensure_search_path(config: RatchetRunConfig) -> None:
     path_str = str(search_path)
     if path_str not in sys.path:
         sys.path.insert(0, path_str)
+
+
+def _optional_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
