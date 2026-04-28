@@ -119,6 +119,7 @@ class ProposalEngine:
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
+        research_brief: dict[str, Any] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
         analysis_parts: list[str] = []
@@ -150,6 +151,7 @@ class ProposalEngine:
             task_theory=task_theory,
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
+            research_brief=research_brief,
         )
         proposals.extend(llm_proposals)
         analysis_parts.append("LLM proposer returned transform candidate proposals.")
@@ -320,6 +322,7 @@ class ProposalEngine:
         task_theory: TaskTheory,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
+        research_brief: dict[str, Any] | None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
@@ -346,6 +349,7 @@ class ProposalEngine:
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
             "planner_guidance": planner_guidance,
+            "research_brief": research_brief or {},
             "proposal_policy": {
                 "empty_patches_allowed": (
                     "Only when no listed editable target can plausibly improve the objective without violating constraints."

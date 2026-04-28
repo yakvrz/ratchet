@@ -204,6 +204,27 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
     if event == "search_hypothesis_ready":
         families = _join_limited(row.get("active_families") or [], limit=5)
         return "HYPOTHESIS", f"active={families or 'none'} contexts={row.get('active_context_count')}"
+    if event == "research_controller_started":
+        return (
+            "RESEARCH",
+            f"started stage={row.get('stage')} candidates={row.get('candidate_count')} "
+            f"max_select={row.get('max_select')}",
+        )
+    if event == "research_controller_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        selected = _join_limited([_short_hash(item) for item in row.get("selected_candidate_ids") or []], limit=4)
+        return (
+            "RESEARCH",
+            " ".join(
+                part
+                for part in (
+                    f"complete stage={row.get('stage')} selected={selected or 'none'}",
+                    _call_summary(diagnostics),
+                    _short_reason(row.get("rationale")),
+                )
+                if part
+            ),
+        )
     if event == "proposal_started":
         families = _join_limited(row.get("active_families") or [], limit=5)
         retry = " retry" if row.get("proposal_retry") else ""

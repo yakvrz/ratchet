@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 
 from ratchet.__main__ import run_optimizer
 from ratchet.adapters import load_adapter
@@ -167,6 +168,50 @@ class FakePatchClient:
         if '"mode": "cost"' in prompt or '"mode":"cost"' in prompt:
             return experiment_response(candidates, mechanism="efficiency_probe")
         return experiment_response(candidates)
+
+
+class FakeResearchClient:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
+        payload = json.loads(prompt.split("\n\n", 1)[1])
+        action = payload["allowed_actions"][0]
+        state = payload["state"]
+        candidates = state.get("candidates", [])
+        max_select = int(action.get("max_select", len(candidates)))
+        max_per_group = int(action.get("max_select_per_group") or 0)
+        selected: list[str] = []
+        group_counts: dict[str, int] = {}
+        for candidate_row in candidates:
+            candidate_id = str(candidate_row["candidate_id"])
+            group = str(candidate_row.get("comparison_group_key") or "global")
+            if len(selected) >= max_select:
+                continue
+            if max_per_group and group_counts.get(group, 0) >= max_per_group:
+                continue
+            selected.append(candidate_id)
+            group_counts[group] = group_counts.get(group, 0) + 1
+        skipped = {
+            str(candidate_row["candidate_id"]): "fake controller skipped candidate under action limits"
+            for candidate_row in candidates
+            if str(candidate_row["candidate_id"]) not in set(selected)
+        }
+        return type(
+            "Response",
+            (),
+            {
+                "output_text": json.dumps(
+                    {
+                        "action_id": action["action_id"],
+                        "action_type": action["action_type"],
+                        "selected_candidate_ids": selected,
+                        "rationale": "Fake controller selects candidates within hard limits.",
+                        "expected_information": "Exercise staged evaluation.",
+                        "risks": "Test fixture only.",
+                        "skipped_candidate_reasons": skipped,
+                    }
+                )
+            },
+        )()
 
 
 class ShapeInvalidPatchClient:
@@ -423,6 +468,11 @@ class RetryPatchClient:
 class FakeAdapterIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         fake_adapter.reset()
+        self.research_client_patcher = patch("ratchet.research.ResponsesModelClient", lambda env_path=".env": FakeResearchClient())
+        self.research_client_patcher.start()
+
+    def tearDown(self) -> None:
+        self.research_client_patcher.stop()
 
     def write_evals(
         self,
@@ -905,7 +955,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertIn("smoke rejected", rejection_reason or "")
             self.assertLess(summary.case_count, len(cases))
 
-    def test_batch_progressive_evaluation_escalates_one_candidate_per_group(self) -> None:
+    def test_batch_progressive_evaluation_uses_research_controller_decision(self) -> None:
         dev_cases = tuple(
             [
                 *(
@@ -942,11 +992,14 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             ]
             self.assertEqual(len(proposal_rows), 2)
             full_dev_rows = [row for row in proposal_rows if row.get("full_dev_evaluated")]
-            screened_rows = [row for row in proposal_rows if row.get("frontier_status") == "screened_out"]
-            self.assertEqual(len(full_dev_rows), 1)
-            self.assertEqual(len(screened_rows), 1)
-            self.assertTrue(any(stage["stage"] == "small_dev" for stage in screened_rows[0]["evaluation_stages"]))
-            self.assertFalse(any(stage["stage"] == "full_dev" for stage in screened_rows[0]["evaluation_stages"]))
+            research_decisions = [
+                row for row in result.decision_log if row.get("type") == "research_decision"
+            ]
+            self.assertEqual(len(full_dev_rows), 2)
+            self.assertTrue(research_decisions)
+            self.assertTrue(
+                any(row.get("stage") == "full_dev" for row in research_decisions)
+            )
 
     def test_evaluate_patch_runs_cases_with_bounded_concurrency(self) -> None:
         cases = tuple(

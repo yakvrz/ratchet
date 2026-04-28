@@ -289,6 +289,10 @@ class RatchetReporter:
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
             f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
             "",
+            "## Research Decisions",
+            "",
+            *self._research_decision_rows(result),
+            "",
             "## Finalist Statuses",
             "",
             *self._finalist_status_rows(result),
@@ -477,6 +481,29 @@ class RatchetReporter:
             metric_text = f"; holdout={pass_count}/{case_count}" if pass_count is not None and case_count is not None else ""
             rows.append(f"- `{patch_hash_value}`: `{status}` at `{stage}`{metric_text}; {reason}")
         return rows
+
+    @staticmethod
+    def _research_decision_rows(result: RatchetResult) -> list[str]:
+        rows = [event for event in result.decision_log if event.get("type") == "research_decision"]
+        if not rows:
+            return ["No research controller decisions were recorded."]
+        table = [
+            "| Iteration | Stage | Selected | Rationale |",
+            "| ---: | --- | --- | --- |",
+        ]
+        for row in rows[-12:]:
+            decision = row.get("decision") or {}
+            selected = ", ".join(str(item)[:12] for item in decision.get("selected_candidate_ids", [])) or "none"
+            table.append(
+                "| "
+                f"{row.get('iteration')} | "
+                f"`{row.get('stage')}` | "
+                f"{selected} | "
+                f"{_short_reason(decision.get('rationale'))} |"
+            )
+        if len(rows) > 12:
+            table.append(f"- {len(rows) - 12} earlier research decisions omitted from this table.")
+        return table
 
     @staticmethod
     def _task_theory_rows(result: RatchetResult) -> list[str]:
