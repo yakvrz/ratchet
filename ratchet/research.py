@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import time
 from typing import Any
 
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentIntent
+from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -117,7 +117,10 @@ class ResearchController:
                                     "mechanism_class": {"type": "string", "maxLength": 80},
                                     "hypothesis": {"type": "string", "maxLength": 360},
                                     "target_slices": {"type": "array", "items": {"type": "string", "maxLength": 160}},
-                                    "candidate_roles": {"type": "array", "items": {"type": "string", "maxLength": 40}},
+                                    "candidate_roles": {
+                                        "type": "array",
+                                        "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
+                                    },
                                     "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
                                     "allowed_families": {"type": "array", "items": {"type": "string", "maxLength": 80}},
                                     "success_criteria": {"type": "string", "maxLength": 300},
@@ -223,12 +226,10 @@ class ResearchController:
                 raise OptimizerModelError(
                     f"Research controller returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
-        decision = _decision_from_payload(payload)
         try:
+            decision = _normalize_decision_for_action_type(_decision_from_payload(payload))
             validate_research_decision(decision, allowed_actions)
         except OptimizerModelError as exc:
-            if (self.last_call_diagnostics or {}).get("repair_attempted"):
-                raise
             primary_diagnostics = self.last_call_diagnostics or {}
             repair_started_at = time.perf_counter()
             try:
@@ -240,7 +241,8 @@ class ResearchController:
                         "The previous research-controller response was valid JSON but violated the allowed action "
                         "contract. Return only a corrected JSON object matching the requested schema. "
                         "Use exactly one allowed action_id/action_type, select only allowed candidate IDs, respect "
-                        "max_select, and include skipped_candidate_reasons for every unselected candidate.\n\n"
+                        "max_select, include skipped_candidate_reasons for every unselected candidate, and use only "
+                        "valid mechanism_class values in experiment_intents.\n\n"
                         f"Validation error:\n{exc}\n\n"
                         f"Allowed actions:\n{json.dumps([action.to_dict() for action in allowed_actions], separators=(',', ':'), default=str)}\n\n"
                         f"Invalid JSON object:\n{json.dumps(payload, separators=(',', ':'), default=str)[:9000]}"
@@ -257,7 +259,7 @@ class ResearchController:
                     primary=primary_diagnostics,
                     repair=repair_diagnostics,
                 )
-                decision = _decision_from_payload(extract_json_object(repair_response.output_text))
+                decision = _normalize_decision_for_action_type(_decision_from_payload(extract_json_object(repair_response.output_text)))
                 validate_research_decision(decision, allowed_actions)
             except Exception as repair_exc:
                 self.last_call_diagnostics = {
@@ -311,6 +313,12 @@ def _decision_from_payload(payload: dict[str, Any]) -> ResearchDecision:
     )
 
 
+def _normalize_decision_for_action_type(decision: ResearchDecision) -> ResearchDecision:
+    if decision.action_type == "plan_experiments" or not decision.experiment_intents:
+        return decision
+    return replace(decision, experiment_intents=[])
+
+
 def validate_research_decision(
     decision: ResearchDecision,
     allowed_actions: list[ResearchAction],
@@ -335,10 +343,21 @@ def validate_research_decision(
         raise OptimizerModelError(
             f"Research controller selected {len(selected)} candidates, above max_select={action.max_select}"
         )
-    if action.action_type != "plan_experiments" and decision.experiment_intents:
-        raise OptimizerModelError("Research controller returned experiment_intents for a non-planning action")
     if action.action_type == "plan_experiments" and decision.action_id != "stop_branch" and not decision.experiment_intents:
         raise OptimizerModelError("Research controller plan_experiments action must include experiment_intents")
+    active_families = {
+        str(item)
+        for item in (action.metadata.get("active_families") or [])
+        if item
+    }
+    if action.action_type == "plan_experiments" and active_families:
+        for intent in decision.experiment_intents:
+            unknown_families = sorted(set(intent.allowed_families) - active_families)
+            if unknown_families:
+                raise OptimizerModelError(
+                    f"Research controller experiment intent {intent.intent_id!r} used inactive or unknown "
+                    f"allowed_families: {unknown_families}"
+                )
     unselected = allowed_candidate_ids - set(selected)
     missing_reasons = sorted(candidate_id for candidate_id in unselected if not decision.skipped_candidate_reasons.get(candidate_id))
     if missing_reasons:

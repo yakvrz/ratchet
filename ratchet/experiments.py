@@ -68,6 +68,9 @@ class ExperimentIntent:
             raise ValueError("intent_id must be non-empty")
         if self.mechanism_class not in MECHANISM_CLASSES:
             raise ValueError(f"unknown intent mechanism_class {self.mechanism_class!r}")
+        unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
+        if unknown_roles:
+            raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
         if self.priority < 1:
             raise ValueError("intent priority must be positive")
 
@@ -83,7 +86,11 @@ class ExperimentIntent:
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
-            allowed_families=[str(item) for item in payload.get("allowed_families", []) if item],
+            allowed_families=[
+                str(item)
+                for item in payload.get("allowed_families", [])
+                if item and str(item).lower() not in {"all", "any", "*"}
+            ],
             success_criteria=str(payload.get("success_criteria") or ""),
             disconfirming_result=str(payload.get("disconfirming_result") or ""),
             priority=int(payload.get("priority") or 1),

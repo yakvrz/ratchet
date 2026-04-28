@@ -16,7 +16,7 @@ from ratchet.adapters import AdapterProtocol, checked_agent_spec
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import TaskTheory, build_task_theory
+from ratchet.experiments import CANDIDATE_ROLES, MECHANISM_CLASSES, TaskTheory, build_task_theory
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
 from ratchet.model_client import model_request_limits
 from ratchet.objectives import (
@@ -1608,7 +1608,11 @@ class RatchetOptimizer:
                     "Choose typed experiment intents for the proposer to implement. "
                     "Do not write patches; specify mechanisms, target slices, controls, and measurements."
                 ),
-                metadata={"proposal_budget": proposal_budget, "max_intents": min(proposal_budget, 4)},
+                metadata={
+                    "proposal_budget": proposal_budget,
+                    "max_intents": min(proposal_budget, 4),
+                    "active_families": list(search_hypothesis.active_families),
+                },
             ),
             ResearchAction(
                 action_id="stop_branch",
@@ -1640,6 +1644,8 @@ class RatchetOptimizer:
             "intent_policy": {
                 "planner_role": "Return experiment_intents, not patch content.",
                 "proposer_role": "The proposer will implement the selected intents as concrete legal candidates.",
+                "allowed_mechanism_classes": sorted(MECHANISM_CLASSES),
+                "allowed_candidate_roles": sorted(CANDIDATE_ROLES),
                 "intent_requirements": [
                     "Each intent tests one mechanism class.",
                     "Use allowed_families compatible with active_families.",

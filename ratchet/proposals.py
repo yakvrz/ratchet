@@ -8,7 +8,7 @@ from typing import Any
 
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentIntent, ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
+from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
 from ratchet.io import extract_json_object, patch_hash
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -456,7 +456,10 @@ class ProposalEngine:
                                             "hypothesis": {"type": "string", "maxLength": 360},
                                             "target_slices": {"type": "array", "items": {"type": "string"}},
                                             "measurements": {"type": "array", "items": {"type": "string"}},
-                                            "candidate_roles": {"type": "array", "items": {"type": "string"}},
+                                            "candidate_roles": {
+                                                "type": "array",
+                                                "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
+                                            },
                                             "candidates": {
                                                 "type": "array",
                                                 "items": {
@@ -464,7 +467,7 @@ class ProposalEngine:
                                                     "properties": {
                                                         "transform_family": {"type": "string", "maxLength": 80},
                                                         "mechanism_class": {"type": "string", "maxLength": 80},
-                                                        "candidate_role": {"type": "string", "maxLength": 40},
+                                                        "candidate_role": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
                                                         "comparison_group": {"type": "string", "maxLength": 80},
                                                         "transform_instance": {"type": "string", "maxLength": 160},
                                                         "target_slice": {"type": "string", "maxLength": 160},

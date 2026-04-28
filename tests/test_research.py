@@ -133,7 +133,11 @@ class ResearchControllerTests(unittest.TestCase):
             validate_research_decision(decision, [action])
 
     def test_plan_experiments_decision_requires_experiment_intents(self) -> None:
-        action = ResearchAction(action_id="plan_experiments", action_type="plan_experiments")
+        action = ResearchAction(
+            action_id="plan_experiments",
+            action_type="plan_experiments",
+            metadata={"active_families": ["prompt_rewrite"]},
+        )
         with self.assertRaises(OptimizerModelError):
             validate_research_decision(
                 ResearchDecision(action_id="plan_experiments", action_type="plan_experiments"),
@@ -148,11 +152,57 @@ class ResearchControllerTests(unittest.TestCase):
                     intent_id="intent_1",
                     mechanism_class="semantic_boundary_rewrite",
                     hypothesis="Test whether a boundary rewrite improves failed cases.",
+                    allowed_families=["prompt_rewrite"],
                 )
             ],
         )
 
         self.assertEqual(validate_research_decision(decision, [action]), action)
+
+    def test_plan_experiments_decision_rejects_unknown_allowed_families(self) -> None:
+        action = ResearchAction(
+            action_id="plan_experiments",
+            action_type="plan_experiments",
+            metadata={"active_families": ["prompt_rewrite"]},
+        )
+        decision = ResearchDecision(
+            action_id="plan_experiments",
+            action_type="plan_experiments",
+            experiment_intents=[
+                ExperimentIntent(
+                    intent_id="intent_1",
+                    mechanism_class="semantic_boundary_rewrite",
+                    hypothesis="Test whether a boundary rewrite improves failed cases.",
+                    allowed_families=["prompt_engineering"],
+                )
+            ],
+        )
+
+        with self.assertRaises(OptimizerModelError):
+            validate_research_decision(decision, [action])
+
+    def test_experiment_intent_normalizes_all_family_marker_and_rejects_unknown_roles(self) -> None:
+        intent = ExperimentIntent.from_dict(
+            {
+                "intent_id": "intent_1",
+                "mechanism_class": "runtime_defect_fix",
+                "hypothesis": "Test runtime.",
+                "allowed_families": ["all"],
+            },
+            fallback_id="fallback",
+        )
+
+        self.assertEqual(intent.allowed_families, [])
+        with self.assertRaises(ValueError):
+            ExperimentIntent.from_dict(
+                {
+                    "intent_id": "intent_2",
+                    "mechanism_class": "runtime_defect_fix",
+                    "hypothesis": "Test runtime.",
+                    "candidate_roles": ["generator"],
+                },
+                fallback_id="fallback",
+            )
 
     def test_late_full_dev_action_exposes_one_hard_selection_slot(self) -> None:
         action = _research_evaluate_action(
@@ -207,6 +257,31 @@ class ResearchControllerTests(unittest.TestCase):
 
         self.assertEqual(decision.selected_candidate_ids, ["a"])
         self.assertEqual(decision.skipped_candidate_reasons, {"b": "skip"})
+        self.assertEqual(client.calls, 2)
+        self.assertTrue((controller.last_call_diagnostics or {}).get("repair_attempted"))
+
+    def test_research_controller_repairs_malformed_experiment_intent(self) -> None:
+        controller = ResearchController(env_path=".env", model="fake", reasoning_effort="low")
+        client = _RepairClient(
+            [
+                '{"action_id":"plan_experiments","action_type":"plan_experiments",'
+                '"selected_candidate_ids":[],"experiment_intents":[{"intent_id":"intent_1",'
+                '"mechanism_class":"runtime_tuning","hypothesis":"bad family as mechanism"}],'
+                '"rationale":"bad","expected_information":"info","risks":"none",'
+                '"skipped_candidate_reasons":{}}',
+                '{"action_id":"plan_experiments","action_type":"plan_experiments",'
+                '"selected_candidate_ids":[],"experiment_intents":[{"intent_id":"intent_1",'
+                '"mechanism_class":"runtime_defect_fix","hypothesis":"fixed mechanism"}],'
+                '"rationale":"fixed","expected_information":"info","risks":"none",'
+                '"skipped_candidate_reasons":{}}',
+            ]
+        )
+        controller._client = client
+        action = ResearchAction(action_id="plan_experiments", action_type="plan_experiments")
+
+        decision = controller.decide(state={}, allowed_actions=[action])
+
+        self.assertEqual(decision.experiment_intents[0].mechanism_class, "runtime_defect_fix")
         self.assertEqual(client.calls, 2)
         self.assertTrue((controller.last_call_diagnostics or {}).get("repair_attempted"))
 
