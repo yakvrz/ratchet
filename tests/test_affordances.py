@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import unittest
 
-from ratchet.affordances import generate_optimization_affordances, validate_candidate_affordances
+from ratchet.affordances import generate_optimization_affordances, validate_candidate_applications
 from ratchet.surface import SurfaceGenerator
 from ratchet.types import AgentSpec, AgentTool, OptimizationObjective
 
@@ -29,7 +30,7 @@ class OptimizationAffordanceTests(unittest.TestCase):
         surface = SurfaceGenerator().generate(spec, OptimizationObjective())
 
         affordances = generate_optimization_affordances(surface)
-        keys = {(item.transform_family, item.target_kind) for item in affordances}
+        keys = {(item.family, item.target_kind) for item in affordances}
 
         self.assertIn(("prompt_rewrite", "instruction"), keys)
         self.assertIn(("output_contract_tightening", "output"), keys)
@@ -50,25 +51,31 @@ class OptimizationAffordanceTests(unittest.TestCase):
         affordance = next(
             item
             for item in affordances
-            if item.transform_family == "prompt_rewrite" and item.mechanism_class == "semantic_boundary_rewrite"
+            if item.family == "prompt_rewrite" and item.mechanism == "semantic_boundary_rewrite"
         )
 
         self.assertIsNone(
-            validate_candidate_affordances(
-                affordance_ids=[affordance.affordance_id],
-                transform_family="prompt_rewrite",
-                mechanism_class="semantic_boundary_rewrite",
-                operations=[{"op": "add_instruction", "target": "instructions.system_prompt"}],
+            validate_candidate_applications(
+                applications=[
+                    SimpleNamespace(
+                        affordance_id=affordance.affordance_id,
+                        operation=SimpleNamespace(op="add_instruction", target="instructions.system_prompt"),
+                        selection={},
+                    )
+                ],
                 affordances=affordances,
             )
         )
         self.assertIn(
-            "not covered",
-            validate_candidate_affordances(
-                affordance_ids=[affordance.affordance_id],
-                transform_family="prompt_rewrite",
-                mechanism_class="semantic_boundary_rewrite",
-                operations=[{"op": "add_output_constraint", "target": "output_contract"}],
+            "not allowed",
+            validate_candidate_applications(
+                applications=[
+                    SimpleNamespace(
+                        affordance_id=affordance.affordance_id,
+                        operation=SimpleNamespace(op="add_output_constraint", target="output_contract"),
+                        selection={},
+                    )
+                ],
                 affordances=affordances,
             )
             or "",

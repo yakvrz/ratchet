@@ -171,6 +171,7 @@ class RatchetReporter:
                 "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
+                "affordance_summaries": result.affordance_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -201,6 +202,7 @@ class RatchetReporter:
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
+                "affordance_summaries": result.affordance_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -348,6 +350,10 @@ class RatchetReporter:
                 f"{summary.get('reason')}"
                 for name, summary in sorted(result.transform_summaries.items())
             ],
+            "",
+            "## Optimization Affordances",
+            "",
+            *self._affordance_summary_rows(result),
             "",
             "## Transform Contexts",
             "",
@@ -619,6 +625,36 @@ class RatchetReporter:
         if len(rows) > 12:
             table.append(f"- {len(rows) - 12} additional screened candidates omitted from this table.")
         return table
+
+    @staticmethod
+    def _affordance_summary_rows(result: RatchetResult) -> list[str]:
+        if not result.affordance_summaries:
+            return ["No optimization affordance applications were recorded."]
+        rows = [
+            "| Affordance | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
+            "| --- | --- | ---: | ---: | ---: | ---: | --- |",
+        ]
+        ranked = sorted(
+            result.affordance_summaries.values(),
+            key=lambda item: (
+                str(item.get("state") or ""),
+                str(item.get("affordance_id") or ""),
+            ),
+        )
+        for item in ranked[:20]:
+            rows.append(
+                "| "
+                f"`{item.get('affordance_id')}` | "
+                f"`{item.get('state')}` | "
+                f"{item.get('proposed_count', 0)} | "
+                f"{item.get('evaluated_count', 0)} | "
+                f"{item.get('accepted_count', 0)} | "
+                f"{float(item.get('best_score_delta') or 0.0):+.3f} | "
+                f"{_short_reason(item.get('reason'))} |"
+            )
+        if len(ranked) > 20:
+            rows.append(f"- {len(ranked) - 20} additional affordance summaries omitted from this table.")
+        return rows
 
     @staticmethod
     def _frontier_variant_rows(result: RatchetResult) -> list[str]:

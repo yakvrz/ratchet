@@ -6,7 +6,7 @@ from ratchet.errors import OptimizerModelError
 from ratchet.experiments import ExperimentIntent, ResearchState
 from ratchet.optimizer import CandidateEvaluationState, _measurement_action
 from ratchet.research import MeasurementSelector, ResearchPlanner
-from ratchet.transforms import CandidateProposal, TransformContextKey
+from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal, TransformContextKey
 from ratchet.types import AgentPatch, PatchOperation
 
 
@@ -35,8 +35,6 @@ class _RepairClient:
 
 def _state(index: int) -> CandidateEvaluationState:
     candidate = CandidateProposal(
-        transform_family="prompt_rewrite",
-        mechanism_class="semantic_boundary_rewrite",
         comparison_group="same-group",
         patch=AgentPatch(
             operations=[
@@ -47,6 +45,16 @@ def _state(index: int) -> CandidateEvaluationState:
                 )
             ]
         ),
+        applications=[
+            CandidateAffordanceApplication(
+                affordance_id="prompt_rewrite.semantic_boundary_rewrite.instruction.instructions_system",
+                operation=PatchOperation(
+                    op="add_instruction",
+                    target="instructions.system",
+                    value=f"rule {index}",
+                ),
+            )
+        ],
     )
     return CandidateEvaluationState(
         candidate=candidate,

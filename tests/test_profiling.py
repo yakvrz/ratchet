@@ -14,7 +14,7 @@ from ratchet.optimizer import (
     _simplification_variants,
 )
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.transforms import CandidateProposal, Intervention
+from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal
 from ratchet.types import (
     AgentPatch,
     DiagnosticTrace,
@@ -27,6 +27,29 @@ from ratchet.types import (
     RunRecord,
 )
 from ratchet.validation import PatchValidator
+
+
+def few_shot_candidate(
+    source_case_ids: object,
+    *,
+    patch: AgentPatch | None = None,
+    strategy: str | None = None,
+    hypothesis: str = "Add selected examples.",
+) -> CandidateProposal:
+    selection: dict[str, object] = {"source_case_ids": source_case_ids}
+    if strategy:
+        selection["selection_strategy"] = strategy
+    return CandidateProposal(
+        patch=patch or AgentPatch.empty(),
+        applications=[
+            CandidateAffordanceApplication(
+                affordance_id="targeted_few_shot.representative_examples.few_shot.few_shot",
+                selection=selection,
+                rationale=hypothesis,
+            )
+        ],
+        hypothesis=hypothesis,
+    )
 
 
 def summary(
@@ -120,11 +143,8 @@ class ProfilingTests(unittest.TestCase):
             metadata_categories={"identity": 1},
             label_field="label",
         )
-        candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["train-1"]}),
-            transform_parameters={"source_case_ids": ["train-1"]},
-            hypothesis="Add a representative identity example.",
+        candidate = few_shot_candidate(
+            ["train-1"],
             patch=AgentPatch(
                 operations=[
                     PatchOperation(
@@ -134,6 +154,7 @@ class ProfilingTests(unittest.TestCase):
                     )
                 ]
             ),
+            hypothesis="Add a representative identity example.",
         )
 
         materialized, materialization = _materialize_candidate_references(candidate, bank)
@@ -165,19 +186,10 @@ class ProfilingTests(unittest.TestCase):
             metadata_categories={"card_payment_not_recognised": 1, "card_payment_fee_charged": 1},
             label_field="label",
         )
-        candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            transform_instance="contrastive_card_examples",
-            intervention=Intervention(
-                kind="example_selection",
-                payload={"source_case_ids": ["train-1", "train-2"], "selection_strategy": "contrastive"},
-            ),
-            transform_parameters={
-                "source_case_ids": ["train-1", "train-2"],
-                "selection_strategy": "contrastive",
-            },
+        candidate = few_shot_candidate(
+            ["train-1", "train-2"],
+            strategy="contrastive",
             hypothesis="Contrast unknown card payments against recognized card fees.",
-            patch=AgentPatch.empty(),
         )
 
         materialized, materialization = _materialize_candidate_references(candidate, bank)
@@ -192,20 +204,9 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(materialization["source_case_ids"], ["train-1", "train-2"])
 
     def test_few_shot_candidate_materializes_exact_selected_examples(self) -> None:
-        candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            transform_instance="contrastive_card_examples",
-            intervention=Intervention(
-                kind="example_selection",
-                payload={
-                    "source_case_ids": ["train-1", "train-2", "train-3", "train-4"],
-                    "selection_strategy": "contrastive",
-                },
-            ),
-            transform_parameters={
-                "source_case_ids": ["train-1", "train-2", "train-3", "train-4"],
-                "selection_strategy": "contrastive",
-            },
+        candidate = few_shot_candidate(
+            ["train-1", "train-2", "train-3", "train-4"],
+            strategy="contrastive",
             hypothesis="Compare several card payment intents.",
             patch=AgentPatch(
                 operations=[
@@ -248,13 +249,13 @@ class ProfilingTests(unittest.TestCase):
     def test_reference_only_few_shot_candidate_can_be_parsed_without_patch(self) -> None:
         candidate = CandidateProposal.from_dict(
             {
-                "transform_family": "targeted_few_shot",
-                "transform_instance": "identity_examples",
-                "intervention": {
-                    "kind": "example_selection",
-                    "payload": {"source_case_ids": ["train-1"]},
-                },
                 "hypothesis": "Use a representative train example.",
+                "applications": [
+                    {
+                        "affordance_id": "targeted_few_shot.representative_examples.few_shot.few_shot",
+                        "selection": {"source_case_ids": ["train-1"]},
+                    }
+                ],
             }
         )
 
@@ -262,11 +263,9 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(candidate.transform_parameters["source_case_ids"], ["train-1"])
 
     def test_candidate_parser_rejects_missing_intervention(self) -> None:
-        with self.assertRaisesRegex(ValueError, "explicit intervention"):
+        with self.assertRaisesRegex(ValueError, "applications"):
             CandidateProposal.from_dict(
                 {
-                    "transform_family": "targeted_few_shot",
-                    "transform_instance": "identity_examples",
                     "hypothesis": "Use a representative train example.",
                 }
             )
@@ -293,11 +292,8 @@ class ProfilingTests(unittest.TestCase):
             metadata_categories={},
             label_field="label",
         )
-        candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            intervention=Intervention(kind="example_selection", payload={"source_case_ids": ["missing"]}),
-            transform_parameters={"source_case_ids": ["missing"]},
-            hypothesis="Try a missing train example.",
+        candidate = few_shot_candidate(
+            ["missing"],
             patch=AgentPatch(
                 operations=[
                     PatchOperation(
@@ -307,6 +303,7 @@ class ProfilingTests(unittest.TestCase):
                     )
                 ]
             ),
+            hypothesis="Try a missing train example.",
         )
         materialized, _ = _materialize_candidate_references(candidate, bank)
         target = EditableTarget(
@@ -344,16 +341,14 @@ class ProfilingTests(unittest.TestCase):
             metadata_categories={},
             label_field="label",
         )
-        candidate = CandidateProposal(
-            transform_family="targeted_few_shot",
-            intervention=Intervention(kind="example_selection", payload={"source_case_ids": "train-1"}),
-            transform_parameters={"source_case_ids": "train-1"},
-            hypothesis="Malformed source_case_ids should be rejected, not repaired.",
+        candidate = few_shot_candidate(
+            "train-1",
             patch=AgentPatch(
                 operations=[
                     PatchOperation(op="add_few_shot", target="few_shot", value=[{}])
                 ]
             ),
+            hypothesis="Malformed source_case_ids should be rejected, not repaired.",
         )
 
         materialized, materialization = _materialize_candidate_references(candidate, bank)

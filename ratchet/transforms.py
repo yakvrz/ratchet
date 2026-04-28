@@ -355,21 +355,105 @@ class Intervention:
 
 
 @dataclass(frozen=True)
+class CandidateAffordanceApplication:
+    affordance_id: str
+    operation: PatchOperation | None = None
+    selection: dict[str, Any] = field(default_factory=dict)
+    rationale: str = ""
+
+    @property
+    def family(self) -> str:
+        parts = self.affordance_id.split(".")
+        return parts[0] if parts else ""
+
+    @property
+    def mechanism(self) -> str:
+        parts = self.affordance_id.split(".")
+        return parts[1] if len(parts) > 1 else ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "affordance_id": self.affordance_id,
+            "operation": self.operation.to_dict() if self.operation is not None else None,
+            "selection": dict(self.selection),
+            "rationale": self.rationale,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CandidateAffordanceApplication":
+        affordance_id = str(payload.get("affordance_id") or "")
+        if not affordance_id:
+            raise ValueError("application requires affordance_id")
+        raw_operation = payload.get("operation")
+        raw_selection = payload.get("selection")
+        if isinstance(raw_operation, dict) and isinstance(raw_selection, dict) and raw_selection:
+            raise ValueError("application must use operation or selection, not both")
+        operation = PatchOperation.from_dict(raw_operation) if isinstance(raw_operation, dict) else None
+        selection = dict(raw_selection) if isinstance(raw_selection, dict) else {}
+        if operation is None and not selection:
+            raise ValueError("application requires operation or selection")
+        return cls(
+            affordance_id=affordance_id,
+            operation=operation,
+            selection=selection,
+            rationale=str(payload.get("rationale") or ""),
+        )
+
+
+@dataclass(frozen=True)
 class CandidateProposal:
     patch: AgentPatch
-    transform_family: str
-    intervention: Intervention = field(default_factory=lambda: Intervention(kind="patch", payload={}))
-    transform_instance: str = ""
-    transform_parameters: dict[str, Any] = field(default_factory=dict)
-    mechanism_class: str = ""
+    applications: list[CandidateAffordanceApplication]
     experiment_id: str = ""
     candidate_role: str = "atomic"
     comparison_group: str = ""
-    affordance_ids: list[str] = field(default_factory=list)
     target_slice: str = "global"
     hypothesis: str = ""
     expected_effects: dict[str, Any] = field(default_factory=dict)
     evaluation_plan: str = "full_dev"
+
+    @property
+    def affordance_ids(self) -> list[str]:
+        return [application.affordance_id for application in self.applications]
+
+    @property
+    def transform_family(self) -> str:
+        return self.applications[0].family if self.applications else ""
+
+    @property
+    def mechanism_class(self) -> str:
+        return self.applications[0].mechanism if self.applications else ""
+
+    @property
+    def transform_instance(self) -> str:
+        return "; ".join(application.rationale for application in self.applications if application.rationale)[:240]
+
+    @property
+    def transform_parameters(self) -> dict[str, Any]:
+        source_ids: list[str] = []
+        strategies: list[str] = []
+        for application in self.applications:
+            raw_ids = application.selection.get("source_case_ids")
+            if isinstance(raw_ids, list):
+                source_ids.extend(str(item) for item in raw_ids if isinstance(item, str) and item)
+            if application.selection.get("selection_strategy"):
+                strategies.append(str(application.selection["selection_strategy"]))
+        row: dict[str, Any] = {}
+        if source_ids:
+            row["source_case_ids"] = source_ids
+        if strategies:
+            row["selection_strategies"] = sorted(set(strategies))
+        if "few_shot_example_count" in self.patch.metadata:
+            row["few_shot_example_count"] = self.patch.metadata["few_shot_example_count"]
+        return row
+
+    @property
+    def intervention(self) -> Intervention:
+        if self.patch.operations:
+            return Intervention(kind="patch", payload={"patch": self.patch.to_dict()})
+        if self.applications and self.applications[0].selection:
+            return Intervention(kind="example_selection", payload=dict(self.applications[0].selection))
+        return Intervention(kind="patch", payload={"patch": self.patch.to_dict()})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -387,6 +471,7 @@ class CandidateProposal:
             "hypothesis": self.hypothesis,
             "expected_effects": dict(self.expected_effects),
             "evaluation_plan": self.evaluation_plan,
+            "applications": [application.to_dict() for application in self.applications],
             "patch": self.patch.to_dict(),
         }
 
@@ -395,44 +480,36 @@ class CandidateProposal:
         if "patch" in payload:
             raise ValueError("candidate patch must be inside intervention.payload.patch")
         if payload.get("transform_parameters"):
-            raise ValueError("candidate transform_parameters are derived; put candidate-specific data in intervention.payload")
-        transform_family = str(payload.get("transform_family", ""))
-        transform_parameters: dict[str, Any] = {}
-        intervention = _candidate_intervention_from_payload(payload)
-        if intervention.kind == "example_selection":
-            source_ids = intervention.payload.get("source_case_ids")
-            if "source_case_ids" not in transform_parameters and isinstance(source_ids, list):
-                transform_parameters["source_case_ids"] = [str(item) for item in source_ids if isinstance(item, str)]
-            patch_payload = {"operations": []}
-        elif intervention.kind == "patch":
-            patch_payload = intervention.payload.get("patch")
-            if not isinstance(patch_payload, dict):
-                raise ValueError("patch intervention requires payload.patch")
-        else:
-            raise ValueError(f"unknown intervention kind {intervention.kind!r}")
+            raise ValueError("candidate transform_parameters are derived; put candidate-specific data in applications[]")
+        if payload.get("transform_family") or payload.get("mechanism_class") or payload.get("affordance_ids"):
+            raise ValueError("candidate must cite applications[]; family, mechanism, and affordance_ids are derived")
+        raw_applications = payload.get("applications")
+        if not isinstance(raw_applications, list) or not raw_applications:
+            raise ValueError("candidate requires non-empty applications[]")
+        applications = [
+            CandidateAffordanceApplication.from_dict(application)
+            for application in raw_applications
+            if isinstance(application, dict)
+        ]
+        if len(applications) != len(raw_applications):
+            raise ValueError("candidate applications must be objects")
+        operations = [application.operation for application in applications if application.operation is not None]
+        patch_payload = {
+            "operations": [operation.to_dict() for operation in operations],
+            "rationale": str(payload.get("hypothesis") or "Apply selected optimization affordances."),
+            "expected_effect": str((payload.get("expected_effects") or {}).get("summary") or payload.get("hypothesis") or ""),
+        }
         return cls(
             patch=AgentPatch.from_dict(dict(patch_payload)),
-            transform_family=transform_family,
-            intervention=intervention,
-            transform_instance=str(payload.get("transform_instance", "")),
-            transform_parameters=transform_parameters,
-            mechanism_class=str(payload.get("mechanism_class", "")),
+            applications=applications,
             experiment_id=str(payload.get("experiment_id", "")),
             candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
             comparison_group=str(payload.get("comparison_group", "")),
-            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
             target_slice=str(payload.get("target_slice", "global") or "global"),
             hypothesis=str(payload.get("hypothesis", "")),
             expected_effects=dict(payload.get("expected_effects", {})),
             evaluation_plan=str(payload.get("evaluation_plan", "full_dev") or "full_dev"),
         )
-
-
-def _candidate_intervention_from_payload(payload: dict[str, Any]) -> Intervention:
-    raw_intervention = payload.get("intervention")
-    if isinstance(raw_intervention, dict):
-        return Intervention.from_dict(raw_intervention)
-    raise ValueError("candidate requires explicit intervention")
 
 
 @dataclass(frozen=True)
@@ -865,82 +942,46 @@ def validate_candidate_transform(
     search_hypothesis: SearchHypothesis | None = None,
 ) -> str | None:
     registry = TRANSFORM_FAMILIES
-    family = registry.get(candidate.transform_family)
-    if family is None:
-        return f"unknown transform family {candidate.transform_family!r}"
     if not candidate.experiment_id:
         return "candidate must belong to an experiment"
     if candidate.candidate_role not in CANDIDATE_ROLES:
         return f"unknown candidate role {candidate.candidate_role!r}"
-    intervention_error = _candidate_intervention_error(candidate)
-    if intervention_error is not None:
-        return intervention_error
-    mechanism_error = mechanism_error_for_family(candidate.transform_family, candidate.mechanism_class)
-    if mechanism_error is not None:
-        return mechanism_error
-    parameter_error = _transform_parameter_contract_error(candidate, family)
-    if parameter_error is not None:
-        return parameter_error
-    if not candidate.patch.operations and candidate.transform_family != "targeted_few_shot":
-        return "candidate patch must include at least one operation"
+    if not candidate.applications:
+        return "candidate must include at least one affordance application"
     target_by_name = {target.name: target for target in surface}
     target_by_path = {target.path: target for target in surface}
-    for operation in candidate.patch.operations:
+    for application in candidate.applications:
+        family = registry.get(application.family)
+        if family is None:
+            return f"unknown transform family {application.family!r}"
+        mechanism_error = mechanism_error_for_family(application.family, application.mechanism)
+        if mechanism_error is not None:
+            return mechanism_error
+        if application.selection:
+            if application.family != "targeted_few_shot":
+                return f"transform family {application.family!r} does not support example selection"
+            source_ids = application.selection.get("source_case_ids")
+            if not isinstance(source_ids, list) or not all(isinstance(item, str) and item for item in source_ids):
+                return "targeted_few_shot requires selection.source_case_ids"
+            continue
+        if application.family == "targeted_few_shot":
+            if application.operation is None:
+                return "targeted_few_shot requires selection.source_case_ids"
+            return "targeted_few_shot affordance applications must use selection, not inline add_few_shot values"
+        if application.operation is None:
+            return "affordance application must include operation or selection"
+        operation = application.operation
         target = target_by_name.get(operation.target) or target_by_path.get(operation.target)
         if target is None:
             return f"unknown target {operation.target!r}"
         if target.kind not in family.supported_edit_kinds or operation.op not in family.supported_ops:
-            compatible_families = _compatible_operation_families(
-                operation=operation,
-                target=target,
-                mechanism_class=candidate.mechanism_class,
-                search_hypothesis=search_hypothesis,
-            )
-            if candidate.candidate_role != "composed" or not compatible_families:
-                if target.kind not in family.supported_edit_kinds:
-                    return f"target kind {target.kind!r} is incompatible with transform family {family.name!r}"
-                return f"operation {operation.op!r} is incompatible with transform family {family.name!r}"
+            if target.kind not in family.supported_edit_kinds:
+                return f"target kind {target.kind!r} is incompatible with transform family {family.name!r}"
+            return f"operation {operation.op!r} is incompatible with transform family {family.name!r}"
     if search_hypothesis is not None:
         eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
         if eligibility_error is not None:
             return eligibility_error
-    return None
-
-
-def _transform_parameter_contract_error(candidate: CandidateProposal, family: TransformFamily) -> str | None:
-    if candidate.transform_family == "targeted_few_shot" and candidate.patch.operations:
-        if not candidate.patch.metadata.get("materialized_few_shot"):
-            return "targeted_few_shot must use example_selection intervention, not inline add_few_shot values"
-    required = family.parameter_contract.get("required")
-    if not isinstance(required, dict):
-        return None
-    for key in required:
-        value = _candidate_parameter_value(candidate, key)
-        if value is None:
-            if candidate.intervention.kind == "example_selection":
-                return f"transform family {family.name!r} requires intervention.payload.{key}"
-            return f"transform family {family.name!r} requires transform_parameters.{key}"
-        if key.endswith("_ids") or key == "source_case_ids":
-            if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
-                return f"transform_parameters.{key} must be a non-empty string array"
-    return None
-
-
-def _candidate_intervention_error(candidate: CandidateProposal) -> str | None:
-    if candidate.transform_family == "targeted_few_shot":
-        if candidate.intervention.kind != "example_selection":
-            return "targeted_few_shot must use example_selection intervention"
-        return None
-    if candidate.intervention.kind != "patch":
-        return f"transform family {candidate.transform_family!r} does not support intervention kind {candidate.intervention.kind!r}"
-    return None
-
-
-def _candidate_parameter_value(candidate: CandidateProposal, key: str) -> Any:
-    if candidate.intervention.kind == "example_selection":
-        return candidate.intervention.payload.get(key)
-    if key in candidate.transform_parameters:
-        return candidate.transform_parameters[key]
     return None
 
 
@@ -950,9 +991,10 @@ def validate_candidate_context(
     search_hypothesis: SearchHypothesis,
     surface: list[EditableTarget] | None = None,
 ) -> str | None:
-    family_state = search_hypothesis.family_states.get(candidate.transform_family)
-    if family_state is None or candidate.transform_family not in search_hypothesis.active_families:
-        return f"inactive transform family {candidate.transform_family!r}"
+    for family_name in sorted({application.family for application in candidate.applications}):
+        family_state = search_hypothesis.family_states.get(family_name)
+        if family_state is None or family_name not in search_hypothesis.active_families:
+            return f"inactive transform family {family_name!r}"
     combined_key = TransformContextKey.from_candidate(candidate)
     exact_state = search_hypothesis.context_states.get(combined_key.id)
     if exact_state is not None and exact_state.state in {"paused", "available"}:
@@ -961,24 +1003,24 @@ def validate_candidate_context(
         return f"constrained transform context {combined_key.id!r} requires a materially distinct mechanism"
     target_by_name = {target.name: target for target in surface or []}
     target_by_path = {target.path: target for target in surface or []}
-    primary_family = TRANSFORM_FAMILIES.get(candidate.transform_family)
-    for operation in candidate.patch.operations:
-        operation_family = candidate.transform_family
-        target = target_by_name.get(operation.target) or target_by_path.get(operation.target)
-        if (
-            candidate.candidate_role == "composed"
-            and target is not None
-            and primary_family is not None
-            and (target.kind not in primary_family.supported_edit_kinds or operation.op not in primary_family.supported_ops)
-        ):
-            compatible_families = _compatible_operation_families(
-                operation=operation,
-                target=target,
-                mechanism_class=candidate.mechanism_class,
-                search_hypothesis=search_hypothesis,
+    for application in candidate.applications:
+        if application.selection:
+            operation_key = TransformContextKey(
+                family=application.family,
+                target_names=("few_shot",),
+                ops=("add_few_shot",),
+                target_slice=candidate.target_slice,
+                mechanism=(application.mechanism,),
+                transform_instance=application.rationale or candidate.hypothesis or "candidate",
             )
-            if compatible_families:
-                operation_family = compatible_families[0]
+            operation_error = _operation_context_error(operation_key, search_hypothesis)
+            if operation_error is not None:
+                return operation_error
+            continue
+        if application.operation is None:
+            continue
+        operation = application.operation
+        operation_family = application.family
         operation_key = TransformContextKey.from_operation(
             family=operation_family,
             operation=operation,
@@ -1136,6 +1178,82 @@ def summarize_transform_context_results(proposals: list[dict[str, Any]]) -> dict
             "reason": reason,
         }
     return summaries
+
+
+def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in proposals:
+        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        applications = row.get("applications") or candidate.get("applications") if isinstance(candidate, dict) else []
+        if not isinstance(applications, list):
+            continue
+        for application in applications:
+            if not isinstance(application, dict):
+                continue
+            affordance_id = str(application.get("affordance_id") or "")
+            if affordance_id:
+                grouped[affordance_id].append(row)
+
+    summaries: dict[str, dict[str, Any]] = {}
+    for affordance_id, rows in sorted(grouped.items()):
+        evaluated_rows = [row for row in rows if "accepted" in row]
+        valid_rows = [row for row in rows if row.get("valid") is not False]
+        accepted_rows = [row for row in evaluated_rows if row.get("accepted")]
+        comparisons = [row.get("comparison_to_parent") or {} for row in evaluated_rows]
+        score_deltas = [float(item["score_delta"]) for item in comparisons if "score_delta" in item]
+        cost_deltas = [float(item["cost_delta"]) for item in comparisons if "cost_delta" in item]
+        latency_deltas = [float(item["latency_delta"]) for item in comparisons if "latency_delta" in item]
+        invalid_reasons = Counter(
+            str(row.get("invalid_reason"))
+            for row in rows
+            if row.get("valid") is False and row.get("invalid_reason")
+        )
+        if accepted_rows:
+            state = "promoted"
+            reason = "At least one application of this affordance improved the configured objective on dev."
+        elif score_deltas and any(delta < 0 for delta in score_deltas):
+            state = "constrained"
+            reason = "At least one evaluated application regressed score."
+        elif len(evaluated_rows) >= 2:
+            state = "constrained"
+            reason = "Multiple evaluated applications failed the configured objective gate."
+        elif evaluated_rows:
+            state = "paused"
+            reason = "The evaluated application did not improve the configured objective."
+        elif invalid_reasons:
+            state = "invalid"
+            reason = "No application reached evaluation because implementation validation failed."
+        else:
+            state = "proposed"
+            reason = "Affordance was proposed but not evaluated."
+        summaries[affordance_id] = {
+            "affordance_id": affordance_id,
+            "family": _affordance_id_part(affordance_id, 0),
+            "mechanism": _affordance_id_part(affordance_id, 1),
+            "state": state,
+            "proposed_count": len(rows),
+            "valid_count": len(valid_rows),
+            "evaluated_count": len(evaluated_rows),
+            "accepted_count": len(accepted_rows),
+            "rejected_count": max(len(evaluated_rows) - len(accepted_rows), 0),
+            "invalid_count": max(len(rows) - len(valid_rows), 0),
+            "best_score_delta": max(score_deltas) if score_deltas else None,
+            "best_cost_delta": min(cost_deltas) if cost_deltas else None,
+            "best_latency_delta": min(latency_deltas) if latency_deltas else None,
+            "invalid_reasons": dict(sorted(invalid_reasons.items())),
+            "patch_hashes": [
+                str(row.get("patch_hash"))
+                for row in evaluated_rows
+                if row.get("patch_hash")
+            ][:8],
+            "reason": reason,
+        }
+    return summaries
+
+
+def _affordance_id_part(affordance_id: str, index: int) -> str:
+    parts = affordance_id.split(".")
+    return parts[index] if len(parts) > index else ""
 
 
 def observe_transform_result(

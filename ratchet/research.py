@@ -78,9 +78,9 @@ class ResearchPlanner:
             if affordance.get("affordance_id")
         }
         active_families = {
-            str(affordance.get("transform_family"))
+            str(affordance.get("family") or affordance.get("transform_family"))
             for affordance in state.affordances
-            if affordance.get("transform_family")
+            if affordance.get("family") or affordance.get("transform_family")
         }
         intents: list[ExperimentIntent] = []
         for index, raw_intent in enumerate(raw_intents, start=1):
@@ -273,7 +273,7 @@ def _experiment_intent_schema() -> dict[str, Any]:
             },
             "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
             "allowed_families": {"type": "array", "items": {"type": "string", "maxLength": 80}},
-            "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 80}},
+            "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 180}},
             "success_criteria": {"type": "string", "maxLength": 300},
             "disconfirming_result": {"type": "string", "maxLength": 300},
             "priority": {"type": "integer"},

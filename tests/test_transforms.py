@@ -5,6 +5,7 @@ import unittest
 from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.surface import SurfaceGenerator
 from ratchet.transforms import (
+    CandidateAffordanceApplication,
     CandidateProposal,
     Intervention,
     TransformContextKey,
@@ -73,12 +74,37 @@ def proposal(
     candidate_role: str = "atomic",
     **kwargs: object,
 ) -> CandidateProposal:
+    transform_instance = str(kwargs.pop("transform_instance", ""))
+    intervention = kwargs.pop("intervention", None)
+    transform_parameters = kwargs.pop("transform_parameters", {})
+    operations = list(patch.operations)
+    selection = dict(kwargs.pop("selection", {}))
+    explicit_example_selection = intervention is not None and getattr(intervention, "kind", "") == "example_selection"
+    if explicit_example_selection:
+        selection = dict(getattr(intervention, "payload", {}) or {})
+    if (
+        explicit_example_selection
+        and not selection
+        and isinstance(transform_parameters, dict)
+        and "source_case_ids" in transform_parameters
+    ):
+        selection = {"source_case_ids": transform_parameters["source_case_ids"]}
+    target_segment = "few_shot" if selection and not operations else (
+        operations[0].target.replace(".", "_") if operations else "instructions_system_prompt"
+    )
+    applications = [
+        CandidateAffordanceApplication(
+            affordance_id=f"{transform_family}.{mechanism_class}.candidate.{target_segment}",
+            operation=operations[0] if operations else None,
+            selection=selection,
+            rationale=transform_instance or str(patch.rationale or transform_family),
+        )
+    ]
     return CandidateProposal(
-        transform_family=transform_family,
-        mechanism_class=mechanism_class,
         experiment_id=experiment_id,
         candidate_role=candidate_role,
         patch=patch,
+        applications=applications,
         **kwargs,
     )
 
@@ -222,21 +248,21 @@ class TransformLibraryTests(unittest.TestCase):
             patch=AgentPatch.empty(),
         )
 
-        self.assertIn("example_selection intervention", validate_candidate_transform(missing, surface=surface) or "")
+        self.assertIn("must use selection", validate_candidate_transform(missing, surface=surface) or "")
         self.assertIn(
-            "requires intervention.payload.source_case_ids",
+            "requires selection.source_case_ids",
             validate_candidate_transform(missing_reference_only, surface=surface) or "",
         )
         self.assertIsNone(validate_candidate_transform(valid, surface=surface))
         self.assertIsNone(validate_candidate_transform(reference_only, surface=surface))
-        self.assertIn("must be a non-empty string array", validate_candidate_transform(malformed, surface=surface) or "")
+        self.assertIn("requires selection.source_case_ids", validate_candidate_transform(malformed, surface=surface) or "")
         inline = proposal(
             transform_family="targeted_few_shot",
             mechanism_class="representative_examples",
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=patch,
         )
-        self.assertIn("example_selection intervention", validate_candidate_transform(inline, surface=surface) or "")
+        self.assertIn("must use selection", validate_candidate_transform(inline, surface=surface) or "")
 
     def test_candidate_validation_rejects_unknown_and_incompatible_family(self) -> None:
         spec = AgentSpec(
@@ -285,14 +311,14 @@ class TransformLibraryTests(unittest.TestCase):
             ]
         )
         first = TransformContextKey.from_candidate(
-            CandidateProposal(
+            proposal(
                 transform_family="prompt_rewrite",
                 transform_instance="tighten output v1",
                 patch=patch,
             )
         )
         second = TransformContextKey.from_candidate(
-            CandidateProposal(
+            proposal(
                 transform_family="prompt_rewrite",
                 transform_instance="renamed but same mechanism",
                 patch=patch,

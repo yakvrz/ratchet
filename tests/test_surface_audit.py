@@ -32,17 +32,16 @@ class FakePatchClient:
         prompt = str(kwargs.get("input", ""))
         candidates = [
             {
-                "transform_family": _family_for_patch(patch),
-                "mechanism_class": _mechanism_for_family(_family_for_patch(patch)),
                 "experiment_id": "exp_1",
                 "candidate_role": "atomic",
                 "comparison_group": "exp_1",
-                "transform_instance": str(patch.get("rationale", "")) or _family_for_patch(patch),
                 "target_slice": "global",
                 "hypothesis": str(patch.get("rationale", "")),
                 "expected_effects": {"summary": patch.get("expected_effect", "")},
                 "evaluation_plan": "full_dev",
-                "intervention": {"kind": "patch", "payload": {"patch": patch}},
+                "_test_patch": patch,
+                "_test_family": _family_for_patch(patch),
+                "_test_mechanism": _mechanism_for_family(_family_for_patch(patch)),
             }
             for patch in self.patches
         ]
@@ -120,18 +119,31 @@ def _attach_affordance_ids(candidates: list[object], prompt: str) -> None:
             continue
         matches = _matching_affordance_ids(candidate, affordances)
         if matches:
-            candidate["affordance_ids"] = matches
+            candidate["applications"] = _candidate_applications(candidate, matches)
+            for key in (
+                "transform_family",
+                "mechanism_class",
+                "affordance_ids",
+                "intervention",
+                "transform_instance",
+                "_test_patch",
+                "_test_family",
+                "_test_mechanism",
+            ):
+                candidate.pop(key, None)
 
 
 def _matching_affordance_ids(candidate: dict[str, object], affordances: list[object]) -> list[str]:
-    family = str(candidate.get("transform_family") or "")
-    mechanism = str(candidate.get("mechanism_class") or "")
+    family = str(candidate.get("transform_family") or candidate.get("_test_family") or "")
+    mechanism = str(candidate.get("mechanism_class") or candidate.get("_test_mechanism") or "")
     operations = _candidate_operations(candidate)
     matches: list[str] = []
     for affordance in affordances:
         if not isinstance(affordance, dict):
             continue
-        if affordance.get("transform_family") != family or affordance.get("mechanism_class") != mechanism:
+        if (affordance.get("family") or affordance.get("transform_family")) != family:
+            continue
+        if (affordance.get("mechanism") or affordance.get("mechanism_class")) != mechanism:
             continue
         if not operations:
             if affordance.get("target_kind") == "few_shot":
@@ -139,15 +151,41 @@ def _matching_affordance_ids(candidate: dict[str, object], affordances: list[obj
             continue
         for operation in operations:
             if (
-                operation.get("op") in set(affordance.get("allowed_ops") or [])
+                operation.get("op") in set(affordance.get("ops") or affordance.get("allowed_ops") or [])
                 and operation.get("target") in {affordance.get("target_name"), affordance.get("target_path")}
             ):
                 matches.append(str(affordance.get("affordance_id") or ""))
     return [item for item in matches if item]
 
 
+def _candidate_applications(candidate: dict[str, object], affordance_ids: list[str]) -> list[dict[str, object]]:
+    intervention = candidate.get("intervention")
+    if isinstance(intervention, dict) and intervention.get("kind") == "example_selection":
+        payload = intervention.get("payload")
+        return [
+            {
+                "affordance_id": affordance_ids[0],
+                "selection": dict(payload) if isinstance(payload, dict) else {},
+                "rationale": str(candidate.get("hypothesis") or ""),
+            }
+        ]
+    operations = _candidate_operations(candidate)
+    return [
+        {
+            "affordance_id": affordance_ids[min(index, len(affordance_ids) - 1)],
+            "operation": operation,
+            "rationale": str(candidate.get("hypothesis") or ""),
+        }
+        for index, operation in enumerate(operations)
+    ]
+
+
 def _candidate_operations(candidate: dict[str, object]) -> list[dict[str, object]]:
     intervention = candidate.get("intervention")
+    if "_test_patch" in candidate:
+        patch = candidate.get("_test_patch")
+        operations = patch.get("operations") if isinstance(patch, dict) else None
+        return [operation for operation in operations or [] if isinstance(operation, dict)]
     if not isinstance(intervention, dict) or intervention.get("kind") == "example_selection":
         return []
     payload = intervention.get("payload")
@@ -759,7 +797,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertIn('"optimization_affordances"', client.input_text)
         self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)
-        self.assertIn("example_selection", client.input_text)
+        self.assertIn("selection.source_case_ids", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
 
     def test_candidate_implementer_rejects_experiments_outside_requested_intents(self) -> None:
@@ -1023,7 +1061,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
 
         self.assertEqual(proposals, [])
         reasons = engine.last_stats.invalid_reasons or {}
-        self.assertTrue(any("example_selection intervention" in reason for reason in reasons))
+        self.assertTrue(any("must use selection" in reason for reason in reasons))
         self.assertTrue(any("unknown few-shot source_case_ids" in reason for reason in reasons))
 
     def test_targeted_few_shot_rejects_legacy_source_ids_outside_intervention(self) -> None:

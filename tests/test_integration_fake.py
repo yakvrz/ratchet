@@ -37,17 +37,17 @@ def candidate(
     candidate_role: str = "atomic",
 ) -> dict[str, object]:
     return {
-        "transform_family": family,
-        "mechanism_class": mechanism_class or _mechanism_for_family(family),
         "experiment_id": experiment_id,
         "candidate_role": candidate_role,
         "comparison_group": experiment_id,
-        "transform_instance": transform_instance or str(patch.get("rationale", family)),
         "target_slice": target_slice,
         "hypothesis": str(patch.get("rationale", "")),
         "expected_effects": {"summary": patch.get("expected_effect", "")},
         "evaluation_plan": "full_dev",
-        "intervention": {"kind": "patch", "payload": {"patch": patch}},
+        "_test_patch": patch,
+        "_test_family": family,
+        "_test_mechanism": mechanism_class or _mechanism_for_family(family),
+        "_test_instance": transform_instance or str(patch.get("rationale", family)),
     }
 
 
@@ -108,18 +108,32 @@ def _attach_affordance_ids(candidates: list[dict[str, object]], prompt: str) -> 
             continue
         matches = _matching_affordance_ids(candidate_row, affordances)
         if matches:
-            candidate_row["affordance_ids"] = matches
+            candidate_row["applications"] = _candidate_applications(candidate_row, matches)
+            for key in (
+                "transform_family",
+                "mechanism_class",
+                "affordance_ids",
+                "intervention",
+                "transform_instance",
+                "_test_patch",
+                "_test_family",
+                "_test_mechanism",
+                "_test_instance",
+            ):
+                candidate_row.pop(key, None)
 
 
 def _matching_affordance_ids(candidate_row: dict[str, object], affordances: list[object]) -> list[str]:
-    family = str(candidate_row.get("transform_family") or "")
-    mechanism = str(candidate_row.get("mechanism_class") or "")
+    family = str(candidate_row.get("transform_family") or candidate_row.get("_test_family") or "")
+    mechanism = str(candidate_row.get("mechanism_class") or candidate_row.get("_test_mechanism") or "")
     operations = _candidate_operations(candidate_row)
     matches: list[str] = []
     for affordance in affordances:
         if not isinstance(affordance, dict):
             continue
-        if affordance.get("transform_family") != family or affordance.get("mechanism_class") != mechanism:
+        if (affordance.get("family") or affordance.get("transform_family")) != family:
+            continue
+        if (affordance.get("mechanism") or affordance.get("mechanism_class")) != mechanism:
             continue
         if not operations:
             if affordance.get("target_kind") == "few_shot":
@@ -127,14 +141,30 @@ def _matching_affordance_ids(candidate_row: dict[str, object], affordances: list
             continue
         for operation in operations:
             if (
-                operation.get("op") in set(affordance.get("allowed_ops") or [])
+                operation.get("op") in set(affordance.get("ops") or affordance.get("allowed_ops") or [])
                 and operation.get("target") in {affordance.get("target_name"), affordance.get("target_path")}
             ):
                 matches.append(str(affordance.get("affordance_id") or ""))
     return [item for item in matches if item]
 
 
+def _candidate_applications(candidate_row: dict[str, object], affordance_ids: list[str]) -> list[dict[str, object]]:
+    operations = _candidate_operations(candidate_row)
+    return [
+        {
+            "affordance_id": affordance_ids[min(index, len(affordance_ids) - 1)],
+            "operation": operation,
+            "rationale": str(candidate_row.get("hypothesis") or ""),
+        }
+        for index, operation in enumerate(operations)
+    ]
+
+
 def _candidate_operations(candidate_row: dict[str, object]) -> list[dict[str, object]]:
+    if "_test_patch" in candidate_row:
+        patch = candidate_row.get("_test_patch")
+        operations = patch.get("operations") if isinstance(patch, dict) else None
+        return [operation for operation in operations or [] if isinstance(operation, dict)]
     intervention = candidate_row.get("intervention")
     if not isinstance(intervention, dict) or intervention.get("kind") == "example_selection":
         return []
@@ -273,7 +303,7 @@ def _fake_research_plan_response(payload: dict[str, object]) -> object:
                             "affordance_ids": matching_affordances,
                             "allowed_families": sorted(
                                 {
-                                    str(affordance.get("transform_family"))
+                                    str(affordance.get("family") or affordance.get("transform_family"))
                                     for affordance in affordances
                                     if isinstance(affordance, dict) and affordance.get("affordance_id") in matching_affordances
                                 }

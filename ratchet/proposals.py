@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_affordances
+from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_applications
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
 from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, TaskTheory, build_task_theory
@@ -36,17 +36,15 @@ MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
-    "target_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
+    "affordance_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
     "research questions, mechanisms, target slices, controls, and measurements. Treat task_theory.experiment_opportunities "
-    "as supporting evidence only; they are not patch recipes. Each candidate must name an active "
-    "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
-    "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
-    "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
-    "proposal_example_bank. Do not inline few-shot examples. Each candidate must cite affordance_ids from "
-    "optimization_affordances. Patch operations must use editable_targets, "
-    "allowed_ops, value_schema, and the declared transform family's supported ops. Declare family by the "
-    "actual operation: instruction ops -> prompt_rewrite/output_contract_tightening, set_runtime_param -> "
-    "runtime_tuning, change_model -> model_substitution, source_case_ids/add_few_shot -> targeted_few_shot. "
+    "as supporting evidence only; they are not patch recipes. Each candidate must include applications[]. "
+    "Each application cites one optimization_affordance by affordance_id and supplies either operation or "
+    "selection. Use operation for patch edits and selection.source_case_ids for few-shot examples from "
+    "proposal_example_bank. Do not inline few-shot examples. Family, mechanism, measurements, and risks are "
+    "derived from cited affordances; do not emit candidate-level transform_family, mechanism_class, "
+    "affordance_ids, patch, or intervention fields. Patch operations must use editable target names, "
+    "allowed ops, and value schemas from the cited affordances. "
     "Do not copy diagnostic_only_examples into patch values; only proposal-safe train examples may be copied, "
     "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
     "preserve correctness and explore model/runtime/retrieval/tool efficiency even when failures are absent. "
@@ -63,7 +61,7 @@ class ProposalStats:
     duplicate_count: int = 0
     error: str | None = None
     invalid_reasons: dict[str, int] | None = None
-    target_considerations: list[dict[str, Any]] | None = None
+    affordance_considerations: list[dict[str, Any]] | None = None
     plan_audit: dict[str, Any] | None = None
     raw_output_text: str = ""
     call_diagnostics: dict[str, Any] | None = None
@@ -77,7 +75,7 @@ class ProposalStats:
             "duplicate_count": self.duplicate_count,
             "error": self.error,
             "invalid_reasons": dict(self.invalid_reasons or {}),
-            "target_considerations": list(self.target_considerations or []),
+            "affordance_considerations": list(self.affordance_considerations or []),
             "plan_audit": dict(self.plan_audit or {}),
             "raw_output_text": self.raw_output_text,
             "call_diagnostics": dict(self.call_diagnostics or {}),
@@ -144,8 +142,13 @@ class CandidateImplementer:
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
-        active_affordances = list(affordances or generate_optimization_affordances(surface, active_families=search_hypothesis.active_families))
-        llm_proposals, target_considerations = self._llm_proposals(
+        active_affordances = list(affordances or generate_optimization_affordances(
+            surface,
+            objective=objective,
+            active_families=search_hypothesis.active_families,
+            evidence=_affordance_evidence(task_theory, diagnosis_context),
+        ))
+        llm_proposals, affordance_considerations = self._llm_proposals(
             summary,
             surface,
             objective=objective,
@@ -203,14 +206,8 @@ class CandidateImplementer:
                 invalid_reasons[family_error] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, family_error, materialization=materialization))
                 continue
-            affordance_error = validate_candidate_affordances(
-                affordance_ids=candidate.affordance_ids,
-                transform_family=candidate.transform_family,
-                mechanism_class=candidate.mechanism_class,
-                operations=[
-                    {"op": operation.op, "target": operation.target}
-                    for operation in candidate.patch.operations
-                ],
+            affordance_error = validate_candidate_applications(
+                applications=candidate.applications,
                 affordances=active_affordances,
             )
             if affordance_error is not None:
@@ -277,6 +274,7 @@ class CandidateImplementer:
                         "patch_hash": digest,
                         "proposal": candidate.patch.to_dict(),
                         "candidate": candidate.to_dict(),
+                        "applications": [application.to_dict() for application in candidate.applications],
                         "transform_family": candidate.transform_family,
                         "mechanism_class": candidate.mechanism_class,
                         "experiment_id": candidate.experiment_id,
@@ -313,7 +311,7 @@ class CandidateImplementer:
             duplicate_count=invalid_reasons.get("duplicate patch", 0),
             error=None,
             invalid_reasons=dict(sorted(invalid_reasons.items())),
-            target_considerations=target_considerations,
+            affordance_considerations=affordance_considerations,
             plan_audit=self._last_plan_audit,
             raw_output_text=self._last_raw_output_text,
             call_diagnostics=self.last_call_diagnostics,
@@ -348,7 +346,6 @@ class CandidateImplementer:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
         self._last_plan_audit = {}
-        target_kinds = sorted({target.kind for target in surface})
         registry = transform_registry()
         active_family_rows = [
             _compact_transform_family(registry[name].to_dict())
@@ -360,7 +357,6 @@ class CandidateImplementer:
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
-            "target_kinds": target_kinds,
             "transform_library": active_family_rows,
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
@@ -372,11 +368,11 @@ class CandidateImplementer:
                     "intent_id. Each candidate must cite affordance_ids from that intent and from optimization_affordances."
                 ),
                 "empty_patches_allowed": (
-                    "Only when no listed editable target can plausibly improve the objective without violating constraints."
+                    "Only when no listed optimization affordance can plausibly improve the objective without violating constraints."
                 ),
                 "cost_or_latency_without_failures": (
                     "If correctness is currently saturated and the objective is cost or latency, still propose minimal "
-                    "efficiency patches from the generated surface so the eval loop can validate the tradeoff."
+                    "efficiency patches from the affordance surface so the eval loop can validate the tradeoff."
                 ),
                 "candidate_portfolio": (
                     "Generate an ordered portfolio of distinct, independently evaluable patches up to proposal_budget. "
@@ -398,7 +394,6 @@ class CandidateImplementer:
                 "median_latency_s": summary.median_latency_s,
             },
             "diagnoses": [_compact_diagnosis(diagnosis) for diagnosis in diagnoses[:3]],
-            "editable_targets": [_compact_editable_target(target) for target in surface],
             "diagnostic_only_examples": {
                 "usage": (
                     "dev examples for diagnosis only. Do not copy their case IDs, inputs, or expected outputs into patches."
@@ -442,17 +437,17 @@ class CandidateImplementer:
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "target_considerations": {
+                                "affordance_considerations": {
                                     "type": "array",
-                                    "maxItems": max(len(target_kinds), 1),
+                                    "maxItems": max(len(affordances), 1),
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "target_kind": {"type": "string", "maxLength": 80},
+                                            "affordance_id": {"type": "string", "maxLength": 180},
                                             "decision": {"type": "string", "maxLength": 40},
                                             "rationale": {"type": "string", "maxLength": 280},
                                         },
-                                        "required": ["target_kind", "decision", "rationale"],
+                                        "required": ["affordance_id", "decision", "rationale"],
                                     },
                                 },
                                 "experiments": {
@@ -476,22 +471,20 @@ class CandidateImplementer:
                                                 "items": {
                                                     "type": "object",
                                                     "properties": {
-                                                        "transform_family": {"type": "string", "maxLength": 80},
-                                                        "mechanism_class": {"type": "string", "maxLength": 80},
                                                         "candidate_role": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
                                                         "comparison_group": {"type": "string", "maxLength": 80},
-                                                        "transform_instance": {"type": "string", "maxLength": 160},
                                                         "target_slice": {"type": "string", "maxLength": 160},
                                                         "hypothesis": {"type": "string", "maxLength": 360},
                                                         "expected_effects": {"type": "object"},
                                                         "evaluation_plan": {"type": "string", "maxLength": 240},
-                                                        "affordance_ids": {
+                                                        "applications": {
                                                             "type": "array",
-                                                            "items": {"type": "string", "maxLength": 80},
+                                                            "minItems": 1,
+                                                            "maxItems": 3,
+                                                            "items": _application_schema(),
                                                         },
-                                                        "intervention": _intervention_schema(),
                                                     },
-                                                    "required": ["transform_family", "candidate_role", "hypothesis", "affordance_ids", "intervention"],
+                                                    "required": ["candidate_role", "hypothesis", "applications"],
                                                 },
                                             },
                                         },
@@ -549,7 +542,7 @@ class CandidateImplementer:
                             "schema": {
                                 "type": "object",
                                 "properties": {
-                                    "target_considerations": {"type": "array"},
+                                    "affordance_considerations": {"type": "array"},
                                     "experiments": {"type": "array"},
                                 },
                                 "required": ["experiments"],
@@ -558,7 +551,7 @@ class CandidateImplementer:
                     },
                     input=(
                         "The previous candidate-implementer response was invalid JSON. "
-                        "Return only a valid JSON object with target_considerations and experiments. "
+                        "Return only a valid JSON object with affordance_considerations and experiments. "
                         "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
                     ),
@@ -642,7 +635,6 @@ class CandidateImplementer:
                 candidate_payload = {
                     **raw_candidate,
                     "experiment_id": raw_candidate.get("experiment_id") or experiment.experiment_id,
-                    "mechanism_class": raw_candidate.get("mechanism_class") or experiment.mechanism,
                     "comparison_group": raw_candidate.get("comparison_group") or experiment.experiment_id,
                     "target_slice": raw_candidate.get("target_slice")
                     or (experiment.target_slices[0] if experiment.target_slices else "global"),
@@ -656,9 +648,10 @@ class CandidateImplementer:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
-                if intent is not None and intent.allowed_families and candidate.transform_family not in set(intent.allowed_families):
+                candidate_families = {application.family for application in candidate.applications}
+                if intent is not None and intent.allowed_families and not candidate_families <= set(intent.allowed_families):
                     reason = (
-                        f"candidate family {candidate.transform_family!r} is not allowed by experiment intent "
+                        f"candidate families {sorted(candidate_families)!r} are not allowed by experiment intent "
                         f"{intent.intent_id!r}"
                     )
                     self._last_parse_invalid_reasons[reason] += 1
@@ -688,65 +681,44 @@ class CandidateImplementer:
         )
         considerations = [
             {
-                "target_kind": str(item.get("target_kind", "")),
+                "affordance_id": str(item.get("affordance_id", "")),
                 "decision": str(item.get("decision", "")),
                 "rationale": str(item.get("rationale", "")),
             }
-            for item in payload.get("target_considerations", [])
+            for item in payload.get("affordance_considerations", [])
             if isinstance(item, dict)
         ]
         return candidates, considerations
 
 
-def _patch_schema() -> dict[str, Any]:
+def _application_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "operations": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 2,
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "op": {"type": "string"},
-                        "target": {"type": "string"},
-                        "value": {
-                            "anyOf": [
-                                {"type": "string", "maxLength": 1600},
-                                {"type": "number"},
-                                {"type": "integer"},
-                                {"type": "boolean"},
-                                {"type": "object", "additionalProperties": True, "maxProperties": 12},
-                                {"type": "array", "items": {}, "maxItems": 8},
-                                {"type": "null"},
-                            ]
-                        },
-                        "rationale": {"type": "string", "maxLength": 240},
-                    },
-                    "required": ["op", "target", "value"],
-                },
-            },
-            "rationale": {"type": "string", "maxLength": 360},
-            "expected_effect": {"type": "string", "maxLength": 240},
-            "metadata": {"type": "object"},
-        },
-        "required": ["operations", "rationale", "expected_effect"],
-    }
-
-
-def _intervention_schema() -> dict[str, Any]:
-    return {
-        "type": "object",
-        "properties": {
-            "kind": {
-                "type": "string",
-                "enum": ["patch", "example_selection"],
-            },
-            "payload": {
+            "affordance_id": {"type": "string", "maxLength": 180},
+            "operation": {
                 "type": "object",
                 "properties": {
-                    "patch": _patch_schema(),
+                    "op": {"type": "string", "maxLength": 80},
+                    "target": {"type": "string", "maxLength": 180},
+                    "value": {
+                        "anyOf": [
+                            {"type": "string", "maxLength": 1600},
+                            {"type": "number"},
+                            {"type": "integer"},
+                            {"type": "boolean"},
+                            {"type": "object", "additionalProperties": True, "maxProperties": 12},
+                            {"type": "array", "items": {}, "maxItems": 8},
+                            {"type": "null"},
+                        ]
+                    },
+                    "rationale": {"type": "string", "maxLength": 240},
+                },
+                "required": ["op", "target", "value"],
+            },
+            "selection": {
+                "type": "object",
+                "properties": {
                     "source_case_ids": {
                         "type": "array",
                         "items": {"type": "string", "maxLength": 160},
@@ -758,17 +730,11 @@ def _intervention_schema() -> dict[str, Any]:
                         "items": {"type": "string", "maxLength": 120},
                         "maxItems": 12,
                     },
-                    "affected_confusions": {
-                        "type": "array",
-                        "items": {"type": "string", "maxLength": 160},
-                        "maxItems": 12,
-                    },
                 },
-                "additionalProperties": True,
-                "maxProperties": 8,
             },
+            "rationale": {"type": "string", "maxLength": 240},
         },
-        "required": ["kind", "payload"],
+        "required": ["affordance_id"],
     }
 
 
@@ -881,16 +847,35 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
 def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
     return {
         "affordance_id": affordance.affordance_id,
+        "label": affordance.label,
         "target_name": affordance.target_name,
         "target_kind": affordance.target_kind,
-        "transform_family": affordance.transform_family,
-        "mechanism_class": affordance.mechanism_class,
-        "allowed_ops": list(affordance.allowed_ops),
+        "family": affordance.family,
+        "mechanism": affordance.mechanism,
+        "ops": list(affordance.ops),
         "value_schema": affordance.value_schema,
-        "expected_cost_impact": affordance.expected_cost_impact,
-        "expected_latency_impact": affordance.expected_latency_impact,
-        "risk_level": affordance.risk_level,
-        "required_measurements": list(affordance.required_measurements)[:5],
+        "semantic_role": affordance.semantic_role,
+        "behavioral_axes": list(affordance.behavioral_axes)[:5],
+        "expected_scope": affordance.expected_scope,
+        "risk": affordance.risk,
+        "measurements": list(affordance.measurements)[:5],
+        "composition": affordance.composition.to_dict(),
+        "suitability": affordance.suitability,
+        "evidence": list(affordance.evidence)[:4],
+        "budget_hint": affordance.budget_hint,
+    }
+
+
+def _affordance_evidence(task_theory: TaskTheory, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+    theory = task_theory.to_dict()
+    runtime = theory.get("runtime_defects") or {}
+    output = theory.get("output_defects") or {}
+    return {
+        "bottleneck_class": theory.get("bottleneck_class"),
+        "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
+        "invalid_output": bool(output.get("invalid_output_count")),
+        "example_coverage": bool((theory.get("example_coverage") or {}).get("example_count")),
+        "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }
 
 
@@ -1253,7 +1238,10 @@ def _invalid_candidate_row(
         "proposal_patch_hash": patch_hash(candidate.patch),
         "proposal": candidate.patch.to_dict(),
         "candidate": candidate.to_dict(),
+        "applications": [application.to_dict() for application in candidate.applications],
         "transform_family": candidate.transform_family,
+        "mechanism_class": candidate.mechanism_class,
+        "affordance_ids": list(candidate.affordance_ids),
         "transform_instance": candidate.transform_instance,
         "transform_parameters": candidate.transform_parameters,
         "target_slice": candidate.target_slice,
@@ -1328,12 +1316,13 @@ def _candidate_budget_group(candidate: CandidateProposal) -> str:
 
 
 def _targeted_few_shot_reference_error(candidate: CandidateProposal) -> str | None:
-    if candidate.transform_family != "targeted_few_shot":
-        return None
-    if candidate.intervention.kind != "example_selection":
-        return "targeted_few_shot must use example_selection intervention"
-    if candidate.patch.operations:
-        return "targeted_few_shot must use example_selection intervention, not inline add_few_shot values"
+    for application in candidate.applications:
+        if application.family != "targeted_few_shot":
+            continue
+        if not application.selection:
+            return "targeted_few_shot affordance applications must use selection, not inline add_few_shot values"
+    if any(operation.op == "add_few_shot" for operation in candidate.patch.operations):
+        return "few-shot examples must be selected by source_case_ids, not inlined as add_few_shot operations"
     return None
 
 
@@ -1342,7 +1331,7 @@ def _materialize_candidate_references(
     proposal_example_bank: ProposalExampleBank | None,
 ) -> tuple[CandidateProposal, dict[str, Any]]:
     if proposal_example_bank is None:
-        if candidate.transform_family == "targeted_few_shot":
+        if any(application.family == "targeted_few_shot" for application in candidate.applications):
             return (
                 candidate,
                 {
@@ -1363,7 +1352,7 @@ def _materialize_candidate_references(
         if isinstance(raw_parameter_source_ids, list)
         else []
     )
-    if candidate.transform_family == "targeted_few_shot" and parameter_source_ids:
+    if parameter_source_ids:
         unknown_source_ids = [source_id for source_id in parameter_source_ids if source_id not in example_by_id]
         if unknown_source_ids:
             return (
@@ -1377,14 +1366,15 @@ def _materialize_candidate_references(
                 },
             )
     candidate_operations = list(candidate.patch.operations)
-    if candidate.transform_family == "targeted_few_shot" and not candidate_operations and parameter_source_ids:
+    if parameter_source_ids and not any(operation.op == "add_few_shot" for operation in candidate_operations):
         candidate_operations = [
+            *candidate_operations,
             PatchOperation(
                 op="add_few_shot",
                 target="few_shot",
                 value=[{"source_case_id": source_id} for source_id in parameter_source_ids],
                 rationale="Materialize implementer-selected train examples.",
-            )
+            ),
         ]
     for operation in candidate_operations:
         if operation.op != "add_few_shot":
@@ -1437,15 +1427,10 @@ def _materialize_candidate_references(
     return (
         CandidateProposal(
             patch=patch,
-            transform_family=candidate.transform_family,
-            intervention=candidate.intervention,
-            transform_instance=candidate.transform_instance,
-            transform_parameters=transform_parameters,
-            mechanism_class=candidate.mechanism_class,
+            applications=list(candidate.applications),
             experiment_id=candidate.experiment_id,
             candidate_role=candidate.candidate_role,
             comparison_group=candidate.comparison_group,
-            affordance_ids=list(candidate.affordance_ids),
             target_slice=candidate.target_slice,
             hypothesis=candidate.hypothesis,
             expected_effects=dict(candidate.expected_effects),
@@ -1462,9 +1447,12 @@ def _materialize_candidate_references(
 
 
 def _example_selection_source_ids(candidate: CandidateProposal) -> Any:
-    if candidate.intervention.kind == "example_selection":
-        return candidate.intervention.payload.get("source_case_ids", [])
-    return []
+    rows: list[str] = []
+    for application in candidate.applications:
+        raw_ids = application.selection.get("source_case_ids")
+        if isinstance(raw_ids, list):
+            rows.extend(str(item) for item in raw_ids if isinstance(item, str) and item)
+    return rows
 
 
 def _few_shot_source_ids(raw_items: list[Any]) -> list[str]:

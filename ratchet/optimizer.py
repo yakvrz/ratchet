@@ -59,6 +59,7 @@ from ratchet.transforms import (
     TransformContextKey,
     build_search_hypothesis,
     observe_transform_result,
+    summarize_affordance_results,
     summarize_transform_context_results,
     summarize_transform_results,
 )
@@ -476,7 +477,9 @@ class RatchetOptimizer:
                 )
                 affordances = generate_optimization_affordances(
                     surface,
+                    objective=self.objective,
                     active_families=search_hypothesis.active_families,
+                    evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
                 )
                 decision_log.append(
                     {
@@ -631,7 +634,9 @@ class RatchetOptimizer:
                     )
                     retry_affordances = generate_optimization_affordances(
                         surface,
+                        objective=self.objective,
                         active_families=retry_search_hypothesis.active_families,
+                        evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
                     )
                     retry_experiment_intents = self._plan_parent_research_action(
                         current_dev=current_dev,
@@ -1005,6 +1010,7 @@ class RatchetOptimizer:
 
         transform_summaries = summarize_transform_results(proposals_log)
         transform_context_summaries = summarize_transform_context_results(proposals_log)
+        affordance_summaries = summarize_affordance_results(proposals_log)
         transform_final_statuses = _transform_final_status_summaries(finalist_statuses)
         cost_tradeoffs = quality_cost_tradeoffs(proposals_log)
         ideation_metrics = build_ideation_metrics(
@@ -1031,6 +1037,7 @@ class RatchetOptimizer:
             task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
+            affordance_summaries=affordance_summaries,
             transform_final_statuses=transform_final_statuses,
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
@@ -1066,6 +1073,7 @@ class RatchetOptimizer:
             task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
+            affordance_summaries=affordance_summaries,
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
             confirmation_results=confirmation_results,
@@ -1578,6 +1586,8 @@ class RatchetOptimizer:
                 "proposal": candidate.patch.to_dict(),
                 "candidate": candidate.to_dict(),
                 "materialization": materialization_by_proposal_hash.get(state.proposal_patch_hash, {}),
+                "applications": [application.to_dict() for application in candidate.applications],
+                "affordance_ids": list(candidate.affordance_ids),
                 "transform_family": candidate.transform_family,
                 "mechanism_class": candidate.mechanism_class,
                 "experiment_id": candidate.experiment_id,
@@ -2347,6 +2357,7 @@ class RatchetOptimizer:
         task_theories: list[dict[str, Any]],
         transform_summaries: dict[str, dict[str, Any]],
         transform_context_summaries: dict[str, dict[str, Any]],
+        affordance_summaries: dict[str, dict[str, Any]],
         transform_final_statuses: dict[str, dict[str, Any]],
         outcome_analysis: dict[str, Any],
         finalist_statuses: list[dict[str, Any]],
@@ -2381,6 +2392,7 @@ class RatchetOptimizer:
             "task_theories": task_theories,
             "transform_summaries": transform_summaries,
             "transform_context_summaries": transform_context_summaries,
+            "affordance_summaries": affordance_summaries,
             "transform_final_statuses": transform_final_statuses,
             "finalist_statuses": finalist_statuses,
             "runtime_reliability_diagnostics": runtime_reliability_diagnostics,
@@ -2881,4 +2893,17 @@ def _summary_progress_fields(summary: PatchSummary) -> dict[str, Any]:
         "mean_score": round(summary.mean_score, 4),
         "mean_cost_usd": summary.mean_cost_usd,
         "median_latency_s": summary.median_latency_s,
+    }
+
+
+def _affordance_evidence_from_theory(task_theory: TaskTheory, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+    row = task_theory.to_dict()
+    runtime = row.get("runtime_defects") or {}
+    output = row.get("output_defects") or {}
+    return {
+        "bottleneck_class": row.get("bottleneck_class"),
+        "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
+        "invalid_output": bool(output.get("invalid_output_count")),
+        "example_coverage": bool((row.get("example_coverage") or {}).get("example_count")),
+        "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }
