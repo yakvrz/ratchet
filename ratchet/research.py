@@ -6,6 +6,7 @@ import time
 from typing import Any
 
 from ratchet.errors import OptimizerModelError
+from ratchet.experiments import ExperimentIntent
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -38,13 +39,23 @@ class ResearchDecision:
     action_id: str
     action_type: str
     selected_candidate_ids: list[str] = field(default_factory=list)
+    experiment_intents: list[ExperimentIntent] = field(default_factory=list)
     rationale: str = ""
     expected_information: str = ""
     risks: str = ""
     skipped_candidate_reasons: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "action_id": self.action_id,
+            "action_type": self.action_type,
+            "selected_candidate_ids": list(self.selected_candidate_ids),
+            "experiment_intents": [intent.to_dict() for intent in self.experiment_intents],
+            "rationale": self.rationale,
+            "expected_information": self.expected_information,
+            "risks": self.risks,
+            "skipped_candidate_reasons": dict(self.skipped_candidate_reasons),
+        }
 
 
 class ResearchController:
@@ -73,11 +84,12 @@ class ResearchController:
             self._client = ResponsesModelClient(env_path=self.env_path)
         prompt = {
             "role": "Ratchet Research Controller",
-            "instruction": (
-                "Choose exactly one allowed action. You do not write patches. "
-                "You decide what Ratchet should learn next under budget. "
-                "Respect action limits, candidate IDs, split boundaries, and skipped-candidate accountability."
-            ),
+                "instruction": (
+                    "Choose exactly one allowed action. You do not write patches. "
+                    "You decide what Ratchet should learn next under budget. For plan_experiments actions, "
+                    "return typed experiment_intents that the proposer must implement. "
+                    "Respect action limits, candidate IDs, split boundaries, and skipped-candidate accountability."
+                ),
             "state": state,
             "allowed_actions": [action.to_dict() for action in allowed_actions],
         }
@@ -95,6 +107,26 @@ class ResearchController:
                             "type": "array",
                             "items": {"type": "string", "maxLength": 120},
                         },
+                        "experiment_intents": {
+                            "type": "array",
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "intent_id": {"type": "string", "maxLength": 80},
+                                    "mechanism_class": {"type": "string", "maxLength": 80},
+                                    "hypothesis": {"type": "string", "maxLength": 360},
+                                    "target_slices": {"type": "array", "items": {"type": "string", "maxLength": 160}},
+                                    "candidate_roles": {"type": "array", "items": {"type": "string", "maxLength": 40}},
+                                    "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
+                                    "allowed_families": {"type": "array", "items": {"type": "string", "maxLength": 80}},
+                                    "success_criteria": {"type": "string", "maxLength": 300},
+                                    "disconfirming_result": {"type": "string", "maxLength": 300},
+                                    "priority": {"type": "integer"},
+                                },
+                                "required": ["intent_id", "mechanism_class", "hypothesis"],
+                            },
+                        },
                         "rationale": {"type": "string", "maxLength": 600},
                         "expected_information": {"type": "string", "maxLength": 600},
                         "risks": {"type": "string", "maxLength": 500},
@@ -107,6 +139,7 @@ class ResearchController:
                         "action_id",
                         "action_type",
                         "selected_candidate_ids",
+                        "experiment_intents",
                         "rationale",
                         "expected_information",
                         "risks",
@@ -163,8 +196,8 @@ class ResearchController:
                     input=(
                         "The previous research-controller response was invalid JSON. "
                         "Return only a valid JSON object matching the requested schema. "
-                        "Preserve the same action choice, candidate IDs, rationale, expected_information, risks, "
-                        "and skipped_candidate_reasons where possible; do not add prose.\n\n"
+                        "Preserve the same action choice, candidate IDs, experiment_intents, rationale, "
+                        "expected_information, risks, and skipped_candidate_reasons where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
                     ),
                     max_output_tokens=RESEARCH_CONTROLLER_MAX_OUTPUT_TOKENS,
@@ -246,6 +279,19 @@ def _decision_from_payload(payload: dict[str, Any]) -> ResearchDecision:
     raw_skipped = payload.get("skipped_candidate_reasons", {})
     if not isinstance(raw_skipped, dict):
         raise OptimizerModelError("Research controller skipped_candidate_reasons is not an object")
+    raw_intents = payload.get("experiment_intents", [])
+    if raw_intents is None:
+        raw_intents = []
+    if not isinstance(raw_intents, list):
+        raise OptimizerModelError("Research controller experiment_intents is not an array")
+    intents: list[ExperimentIntent] = []
+    for index, raw_intent in enumerate(raw_intents, start=1):
+        if not isinstance(raw_intent, dict):
+            raise OptimizerModelError("Research controller experiment_intents entries must be objects")
+        try:
+            intents.append(ExperimentIntent.from_dict(raw_intent, fallback_id=f"intent_{index}"))
+        except Exception as exc:
+            raise OptimizerModelError(f"Research controller returned malformed experiment intent: {exc}") from exc
     return ResearchDecision(
         action_id=str(payload.get("action_id") or ""),
         action_type=str(payload.get("action_type") or ""),
@@ -254,6 +300,7 @@ def _decision_from_payload(payload: dict[str, Any]) -> ResearchDecision:
             for item in raw_selected
             if isinstance(item, str)
         ],
+        experiment_intents=intents,
         rationale=str(payload.get("rationale") or ""),
         expected_information=str(payload.get("expected_information") or ""),
         risks=str(payload.get("risks") or ""),
@@ -288,6 +335,10 @@ def validate_research_decision(
         raise OptimizerModelError(
             f"Research controller selected {len(selected)} candidates, above max_select={action.max_select}"
         )
+    if action.action_type != "plan_experiments" and decision.experiment_intents:
+        raise OptimizerModelError("Research controller returned experiment_intents for a non-planning action")
+    if action.action_type == "plan_experiments" and decision.action_id != "stop_branch" and not decision.experiment_intents:
+        raise OptimizerModelError("Research controller plan_experiments action must include experiment_intents")
     unselected = allowed_candidate_ids - set(selected)
     missing_reasons = sorted(candidate_id for candidate_id in unselected if not decision.skipped_candidate_reasons.get(candidate_id))
     if missing_reasons:

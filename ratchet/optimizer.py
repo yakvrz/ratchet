@@ -516,6 +516,7 @@ class RatchetOptimizer:
                     parent_summaries=parent_summaries,
                     proposal_budget=proposal_budget,
                     dev_evaluations_used=dev_evaluations,
+                    experiment_intents=parent_research_decision.experiment_intents,
                     research_brief=parent_research_decision.to_dict(),
                 )
                 dev_evaluations += evaluations_used
@@ -623,6 +624,7 @@ class RatchetOptimizer:
                             parent_summaries=parent_summaries,
                             proposal_budget=min(PROPOSAL_RETRY_BUDGET, self.dev_budget - dev_evaluations),
                             dev_evaluations_used=dev_evaluations,
+                            experiment_intents=retry_research_decision.experiment_intents,
                             research_brief=retry_research_decision.to_dict(),
                             proposal_retry=True,
                             retry_reason="no_accepted_candidates_from_parent",
@@ -1348,6 +1350,7 @@ class RatchetOptimizer:
         parent_summaries: list[PatchSummary],
         proposal_budget: int,
         dev_evaluations_used: int,
+        experiment_intents: list[Any] | None = None,
         research_brief: dict[str, Any] | None = None,
         proposal_retry: bool = False,
         retry_reason: str | None = None,
@@ -1379,6 +1382,7 @@ class RatchetOptimizer:
             proposal_example_bank=proposal_example_bank,
             proposal_example_cases=proposal_example_cases,
             proposal_budget=proposal_budget,
+            experiment_intents=experiment_intents or [],
             research_brief=research_brief,
         )
         if self.proposer.last_call_diagnostics is not None:
@@ -1600,8 +1604,11 @@ class RatchetOptimizer:
                 action_id="plan_experiments",
                 action_type="plan_experiments",
                 max_select=0,
-                rationale="Ask the proposer to design the next controlled experiment batch for this branch.",
-                metadata={"proposal_budget": proposal_budget},
+                rationale=(
+                    "Choose typed experiment intents for the proposer to implement. "
+                    "Do not write patches; specify mechanisms, target slices, controls, and measurements."
+                ),
+                metadata={"proposal_budget": proposal_budget, "max_intents": min(proposal_budget, 4)},
             ),
             ResearchAction(
                 action_id="stop_branch",
@@ -1630,6 +1637,16 @@ class RatchetOptimizer:
                 "latency_s": current_dev.median_latency_s,
             },
             "task_theory": task_theory.to_dict(),
+            "intent_policy": {
+                "planner_role": "Return experiment_intents, not patch content.",
+                "proposer_role": "The proposer will implement the selected intents as concrete legal candidates.",
+                "intent_requirements": [
+                    "Each intent tests one mechanism class.",
+                    "Use allowed_families compatible with active_families.",
+                    "Prefer controls or ablations when they clarify whether a composed mechanism is necessary.",
+                    "Include success_criteria and disconfirming_result when the task theory exposes them.",
+                ],
+            },
             "search_hypothesis": {
                 "active_families": list(search_hypothesis.active_families),
                 "active_context_count": len(search_hypothesis.active_contexts),
@@ -1679,6 +1696,7 @@ class RatchetOptimizer:
             parent_rank=parent_index + 1,
             stage="plan_experiments",
             selected_candidate_ids=[],
+            experiment_intents=[intent.to_dict() for intent in decision.experiment_intents],
             rationale=decision.rationale,
             call_diagnostics=self.research_controller.last_call_diagnostics or {},
         )

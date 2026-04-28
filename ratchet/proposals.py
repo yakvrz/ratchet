@@ -8,7 +8,7 @@ from typing import Any
 
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
+from ratchet.experiments import ExperimentIntent, ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
 from ratchet.io import extract_json_object, patch_hash
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -35,9 +35,9 @@ MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic patch proposer. Return JSON with experiments[] and optional "
-    "target_considerations[]. Keep text concise. Use planner_guidance and search_hypothesis to choose "
-    "mechanism_class values from the allowed mechanism list. Treat task_theory.experiment_opportunities "
-    "as evidence-backed hypotheses to test or explicitly skip; they are not patch recipes. Each candidate must name an active "
+    "target_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
+    "research questions, mechanisms, target slices, controls, and measurements. Treat task_theory.experiment_opportunities "
+    "as supporting evidence only; they are not patch recipes. Each candidate must name an active "
     "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
     "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
     "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
@@ -119,6 +119,7 @@ class ProposalEngine:
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
+        experiment_intents: list[ExperimentIntent] | None = None,
         research_brief: dict[str, Any] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
@@ -151,6 +152,7 @@ class ProposalEngine:
             task_theory=task_theory,
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
+            experiment_intents=experiment_intents or [],
             research_brief=research_brief,
         )
         proposals.extend(llm_proposals)
@@ -322,6 +324,7 @@ class ProposalEngine:
         task_theory: TaskTheory,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
+        experiment_intents: list[ExperimentIntent],
         research_brief: dict[str, Any] | None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
@@ -348,9 +351,15 @@ class ProposalEngine:
             "transform_library": active_family_rows,
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
+            "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
             "planner_guidance": planner_guidance,
             "research_brief": research_brief or {},
             "proposal_policy": {
+                "experiment_intents": (
+                    "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
+                    "intent_id, every experiment mechanism_class must match that intent, and candidates must use "
+                    "that intent's allowed_families when provided."
+                ),
                 "empty_patches_allowed": (
                     "Only when no listed editable target can plausibly improve the objective without violating constraints."
                 ),
@@ -560,6 +569,8 @@ class ProposalEngine:
                     f"Optimizer proposer returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
         candidates: list[CandidateProposal] = []
+        intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
+        intent_ids = set(intent_by_id)
         raw_experiments = payload.get("experiments")
         if not isinstance(raw_experiments, list):
             self._last_parse_invalid_reasons["experiments field is not an array"] += 1
@@ -586,6 +597,14 @@ class ProposalEngine:
                     _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
+            if intent_ids and experiment.experiment_id not in intent_ids:
+                reason = f"experiment_id {experiment.experiment_id!r} does not match any requested experiment_intent"
+                self._last_parse_invalid_reasons[reason] += 1
+                self._last_parse_invalid_candidate_rows.append(
+                    _invalid_raw_candidate_row(raw_experiment, reason)
+                )
+                continue
+            intent = intent_by_id.get(experiment.experiment_id)
             raw_candidates = raw_experiment.get("candidates")
             if not isinstance(raw_candidates, list):
                 reason = "experiment candidates field is not an array"
@@ -611,7 +630,7 @@ class ProposalEngine:
                     or (experiment.target_slices[0] if experiment.target_slices else "global"),
                 }
                 try:
-                    candidates.append(CandidateProposal.from_dict(candidate_payload))
+                    candidate = CandidateProposal.from_dict(candidate_payload)
                 except Exception as exc:
                     reason = f"malformed candidate: {exc}"
                     self._last_parse_invalid_reasons[reason] += 1
@@ -619,10 +638,22 @@ class ProposalEngine:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
+                if intent is not None and intent.allowed_families and candidate.transform_family not in set(intent.allowed_families):
+                    reason = (
+                        f"candidate family {candidate.transform_family!r} is not allowed by experiment intent "
+                        f"{intent.intent_id!r}"
+                    )
+                    self._last_parse_invalid_reasons[reason] += 1
+                    self._last_parse_invalid_candidate_rows.append(
+                        _invalid_raw_candidate_row(raw_candidate, reason)
+                    )
+                    continue
+                candidates.append(candidate)
         self._last_plan_audit = _audit_experiment_plan(
             raw_experiments=raw_experiments,
             parsed_candidates=candidates,
             planner_guidance=planner_guidance,
+            experiment_intents=experiment_intents,
             task_theory=task_theory,
             proposal_budget=proposal_budget,
         )
@@ -827,6 +858,21 @@ def _compact_experiment_opportunities(rows: list[dict[str, Any]], *, limit: int)
     return compact
 
 
+def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
+    return {
+        "intent_id": intent.intent_id,
+        "mechanism_class": intent.mechanism_class,
+        "hypothesis": intent.hypothesis[:360],
+        "target_slices": list(intent.target_slices)[:5],
+        "candidate_roles": list(intent.candidate_roles)[:5],
+        "measurements": list(intent.measurements)[:5],
+        "allowed_families": list(intent.allowed_families)[:5],
+        "success_criteria": intent.success_criteria[:240],
+        "disconfirming_result": intent.disconfirming_result[:240],
+        "priority": intent.priority,
+    }
+
+
 def _planner_guidance(
     *,
     task_theory: TaskTheory,
@@ -915,6 +961,7 @@ def _audit_experiment_plan(
     raw_experiments: list[Any],
     parsed_candidates: list[CandidateProposal],
     planner_guidance: dict[str, Any],
+    experiment_intents: list[ExperimentIntent],
     task_theory: TaskTheory,
     proposal_budget: int,
 ) -> dict[str, Any]:
@@ -928,6 +975,22 @@ def _audit_experiment_plan(
         if isinstance(item, dict) and item.get("mechanism_class")
     ]
     candidate_mechanisms = set(mechanism_counts)
+    requested_intent_ids = {intent.intent_id for intent in experiment_intents}
+    returned_intent_ids = {
+        str(item.get("experiment_id") or item.get("id") or "")
+        for item in raw_experiments
+        if isinstance(item, dict)
+    }
+    intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
+    mechanism_mismatch_ids = sorted(
+        str(item.get("experiment_id") or item.get("id") or "")
+        for item in raw_experiments
+        if isinstance(item, dict)
+        and str(item.get("experiment_id") or item.get("id") or "") in intent_by_id
+        and str(item.get("mechanism_class") or item.get("mechanism") or "")
+        and str(item.get("mechanism_class") or item.get("mechanism") or "")
+        != intent_by_id[str(item.get("experiment_id") or item.get("id") or "")].mechanism_class
+    )
     missing_primary = [
         mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
     ]
@@ -943,6 +1006,11 @@ def _audit_experiment_plan(
     ]
     if parsed_candidates and missing_opportunities and len(missing_opportunities) == min(2, len(opportunity_mechanisms)):
         warnings.append("no candidate directly tested a top experiment opportunity")
+    missing_intents = sorted(requested_intent_ids - returned_intent_ids)
+    if requested_intent_ids and not (requested_intent_ids & returned_intent_ids):
+        warnings.append("proposer did not return any requested experiment intent IDs")
+    if mechanism_mismatch_ids:
+        warnings.append("returned experiment mechanism differed from requested intent mechanism")
     if task_theory.bottleneck_class == "semantic_boundary_confusion":
         has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
         has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
@@ -962,6 +1030,10 @@ def _audit_experiment_plan(
         "parsed_candidate_count": len(parsed_candidates),
         "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
         "candidate_roles": dict(sorted(role_counts.items())),
+        "requested_intent_ids": sorted(requested_intent_ids),
+        "returned_intent_ids": sorted(item for item in returned_intent_ids if item),
+        "missing_intent_ids": missing_intents,
+        "mechanism_mismatch_intent_ids": mechanism_mismatch_ids,
         "primary_mechanisms": primary_mechanisms,
         "opportunity_mechanisms": opportunity_mechanisms,
         "missing_primary_mechanisms": missing_primary,

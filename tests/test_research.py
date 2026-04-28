@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ratchet.errors import OptimizerModelError
+from ratchet.experiments import ExperimentIntent
 from ratchet.optimizer import CandidateEvaluationState, _research_evaluate_action
 from ratchet.transforms import CandidateProposal, TransformContextKey
 from ratchet.types import AgentPatch, PatchOperation
@@ -130,6 +131,28 @@ class ResearchControllerTests(unittest.TestCase):
 
         with self.assertRaises(OptimizerModelError):
             validate_research_decision(decision, [action])
+
+    def test_plan_experiments_decision_requires_experiment_intents(self) -> None:
+        action = ResearchAction(action_id="plan_experiments", action_type="plan_experiments")
+        with self.assertRaises(OptimizerModelError):
+            validate_research_decision(
+                ResearchDecision(action_id="plan_experiments", action_type="plan_experiments"),
+                [action],
+            )
+
+        decision = ResearchDecision(
+            action_id="plan_experiments",
+            action_type="plan_experiments",
+            experiment_intents=[
+                ExperimentIntent(
+                    intent_id="intent_1",
+                    mechanism_class="semantic_boundary_rewrite",
+                    hypothesis="Test whether a boundary rewrite improves failed cases.",
+                )
+            ],
+        )
+
+        self.assertEqual(validate_research_decision(decision, [action]), action)
 
     def test_late_full_dev_action_exposes_one_hard_selection_slot(self) -> None:
         action = _research_evaluate_action(

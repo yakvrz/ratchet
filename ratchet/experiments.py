@@ -51,6 +51,46 @@ class TaskTheory:
 
 
 @dataclass(frozen=True)
+class ExperimentIntent:
+    intent_id: str
+    mechanism_class: str
+    hypothesis: str
+    target_slices: list[str] = field(default_factory=list)
+    candidate_roles: list[str] = field(default_factory=list)
+    measurements: list[str] = field(default_factory=list)
+    allowed_families: list[str] = field(default_factory=list)
+    success_criteria: str = ""
+    disconfirming_result: str = ""
+    priority: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.intent_id:
+            raise ValueError("intent_id must be non-empty")
+        if self.mechanism_class not in MECHANISM_CLASSES:
+            raise ValueError(f"unknown intent mechanism_class {self.mechanism_class!r}")
+        if self.priority < 1:
+            raise ValueError("intent priority must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any], *, fallback_id: str) -> "ExperimentIntent":
+        return cls(
+            intent_id=str(payload.get("intent_id") or payload.get("experiment_id") or payload.get("id") or fallback_id),
+            mechanism_class=str(payload.get("mechanism_class") or payload.get("mechanism") or ""),
+            hypothesis=str(payload.get("hypothesis") or ""),
+            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
+            candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
+            measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
+            allowed_families=[str(item) for item in payload.get("allowed_families", []) if item],
+            success_criteria=str(payload.get("success_criteria") or ""),
+            disconfirming_result=str(payload.get("disconfirming_result") or ""),
+            priority=int(payload.get("priority") or 1),
+        )
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     experiment_id: str
     mechanism: str
@@ -189,6 +229,19 @@ def mechanism_error_for_family(family: str, mechanism: str) -> str | None:
     if mechanism not in allowed:
         return f"mechanism class {mechanism!r} is incompatible with transform family {family!r}"
     return None
+
+
+def compatible_families_for_mechanism(
+    mechanism: str,
+    *,
+    active_families: list[str] | None = None,
+) -> list[str]:
+    active = set(active_families or MECHANISMS_BY_FAMILY)
+    return sorted(
+        family
+        for family, mechanisms in MECHANISMS_BY_FAMILY.items()
+        if family in active and mechanism in mechanisms
+    )
 
 
 def _residual_failure_modes(

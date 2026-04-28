@@ -6,6 +6,7 @@ import unittest
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
+from ratchet.experiments import ExperimentIntent
 from ratchet.proposals import ProposalEngine, prompt_size_profile
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.surface import SurfaceGenerator
@@ -696,6 +697,60 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertIn('"output_contract_fix"', client.input_text)
         self.assertIn("example_selection", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
+
+    def test_llm_proposer_rejects_experiments_outside_requested_intents(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        client = FakePatchClient(
+            [
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Clarify failed cases.",
+                        }
+                    ],
+                    "rationale": "Clarify behavior.",
+                    "expected_effect": "Improve correctness.",
+                }
+            ]
+        )
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = client
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0, 1.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            experiment_intents=[
+                ExperimentIntent(
+                    intent_id="requested_intent",
+                    mechanism_class="semantic_boundary_rewrite",
+                    hypothesis="Implement only this requested intent.",
+                )
+            ],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn("requested_intent", engine.last_stats.plan_audit["missing_intent_ids"])
+        self.assertTrue(
+            any("does not match any requested experiment_intent" in reason for reason in engine.last_stats.invalid_reasons or {})
+        )
 
     def test_llm_proposer_prompt_includes_experiment_opportunities(self) -> None:
         spec = AgentSpec(

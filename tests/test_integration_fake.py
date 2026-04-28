@@ -177,6 +177,31 @@ class FakeResearchClient:
         action = payload["allowed_actions"][0]
         state = payload["state"]
         candidates = state.get("candidates", []) or state.get("variants", [])
+        experiment_intents = []
+        if action.get("action_type") == "plan_experiments":
+            opportunities = ((state.get("task_theory") or {}).get("experiment_opportunities") or [])
+            mechanism = "semantic_boundary_rewrite"
+            target_slices = ["failed_cases"]
+            measurements = ["score_delta"]
+            if opportunities and isinstance(opportunities[0], dict):
+                mechanism = str(opportunities[0].get("mechanism_class") or mechanism)
+                target_slices = list(opportunities[0].get("target_slices") or target_slices)
+                measurements = list(opportunities[0].get("measurements") or measurements)
+            active_families = list(((state.get("search_hypothesis") or {}).get("active_families") or []))
+            experiment_intents = [
+                {
+                    "intent_id": "exp_1",
+                    "mechanism_class": mechanism,
+                    "hypothesis": "Fake controller asks proposer to implement the current top task-theory mechanism.",
+                    "target_slices": target_slices[:3],
+                    "candidate_roles": ["atomic", "control"],
+                    "measurements": measurements[:4],
+                    "allowed_families": active_families,
+                    "success_criteria": "Improve objective on dev without regressions.",
+                    "disconfirming_result": "No improvement on staged eval.",
+                    "priority": 1,
+                }
+            ]
         max_select = int(action.get("max_select", len(candidates)))
         max_per_group = int(action.get("max_select_per_group") or 0)
         selected: list[str] = []
@@ -204,6 +229,7 @@ class FakeResearchClient:
                         "action_id": action["action_id"],
                         "action_type": action["action_type"],
                         "selected_candidate_ids": selected,
+                        "experiment_intents": experiment_intents,
                         "rationale": "Fake controller selects candidates within hard limits.",
                         "expected_information": "Exercise staged evaluation.",
                         "risks": "Test fixture only.",
