@@ -153,6 +153,7 @@ class RatchetReporter:
         write_json(self.out_dir / "decision_log.json", result.decision_log)
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
         write_jsonl(self.out_dir / "diagnoses.jsonl", result.diagnoses)
+        write_jsonl(self.out_dir / "task_theories.jsonl", result.task_theories)
         write_jsonl(self.out_dir / "proposals.jsonl", result.proposals)
         write_json(
             self.out_dir / "patch_metrics.json",
@@ -165,6 +166,8 @@ class RatchetReporter:
                 "holdout_patches": [summary.to_dict() for summary in result.holdout_patches],
                 "pareto_frontier": result.pareto_frontier,
                 "generated_surface": result.generated_surface,
+                "task_theories": result.task_theories,
+                "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
@@ -183,10 +186,16 @@ class RatchetReporter:
             {
                 "promoted": result.promoted,
                 "selected_patch_hash": result.selected_patch_hash,
+                "selected_finalist_status": _selected_finalist_status(
+                    result.finalist_statuses,
+                    result.selected_patch_hash,
+                ),
                 "patch": result.selected_patch.to_dict(),
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
+                "task_theories": result.task_theories,
+                "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
                 "finalist_statuses": result.finalist_statuses,
@@ -222,6 +231,14 @@ class RatchetReporter:
             f"Outcome summary: {result.outcome_analysis['summary']}",
             f"Recommendation: {result.frontier_recommendation.get('reason', result.selection_reason)}",
             f"Recommendation policy: `{result.frontier_recommendation.get('recommendation_policy', 'n/a')}`",
+            "",
+            "## Task Theory",
+            "",
+            *self._task_theory_rows(result),
+            "",
+            "## Frontier Categories",
+            "",
+            *self._frontier_status_rows(result),
             "",
             "## Validated Frontier",
             "",
@@ -450,6 +467,43 @@ class RatchetReporter:
             case_count = holdout_metrics.get("case_count")
             metric_text = f"; holdout={pass_count}/{case_count}" if pass_count is not None and case_count is not None else ""
             rows.append(f"- `{patch_hash_value}`: `{status}` at `{stage}`{metric_text}; {reason}")
+        return rows
+
+    @staticmethod
+    def _task_theory_rows(result: RatchetResult) -> list[str]:
+        if not result.task_theories:
+            return ["No task theory snapshots were recorded."]
+        rows = []
+        for item in result.task_theories[-5:]:
+            theory = item.get("task_theory") or {}
+            rows.append(
+                "- "
+                f"iteration={item.get('iteration')} parent=`{item.get('parent_patch_hash')}` "
+                f"bottleneck=`{theory.get('bottleneck_class')}` "
+                f"residual={json.dumps(theory.get('residual_failure_modes', []))} "
+                f"weak={json.dumps(theory.get('weak_slices', [])[:6])} "
+                f"confidence={theory.get('confidence')}"
+            )
+        return rows
+
+    @staticmethod
+    def _frontier_status_rows(result: RatchetResult) -> list[str]:
+        summaries = _frontier_status_summaries(result.proposals)
+        if not summaries:
+            return ["No evaluated candidate frontier categories were recorded."]
+        rows = [
+            "| Status | Count | Best score delta | Best cost delta | Examples |",
+            "| --- | ---: | ---: | ---: | --- |",
+        ]
+        for status, item in sorted(summaries.items()):
+            rows.append(
+                "| "
+                f"`{status}` | "
+                f"{item.get('count', 0)} | "
+                f"{float(item.get('best_score_delta') or 0.0):+.3f} | "
+                f"${float(item.get('best_cost_delta') or 0.0):+.6f} | "
+                f"{', '.join(str(value) for value in item.get('patch_hashes', [])[:4])} |"
+            )
         return rows
 
     @staticmethod
@@ -732,3 +786,48 @@ class RatchetReporter:
     def _format_value(value: Any) -> str:
         text = json.dumps(value, sort_keys=True) if not isinstance(value, str) else value
         return text if len(text) <= 160 else text[:157] + "..."
+
+
+def _frontier_status_summaries(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for row in proposals:
+        status = row.get("frontier_status")
+        if not status:
+            continue
+        item = summaries.setdefault(
+            str(status),
+            {"count": 0, "best_score_delta": None, "best_cost_delta": None, "patch_hashes": []},
+        )
+        item["count"] += 1
+        comparison = row.get("comparison_to_parent") or {}
+        score_delta = comparison.get("score_delta")
+        cost_delta = comparison.get("cost_delta")
+        if score_delta is not None and (
+            item["best_score_delta"] is None or float(score_delta) > float(item["best_score_delta"])
+        ):
+            item["best_score_delta"] = float(score_delta)
+        if cost_delta is not None and (
+            item["best_cost_delta"] is None or float(cost_delta) < float(item["best_cost_delta"])
+        ):
+            item["best_cost_delta"] = float(cost_delta)
+        patch_hash_value = row.get("patch_hash")
+        if patch_hash_value and patch_hash_value not in item["patch_hashes"]:
+            item["patch_hashes"].append(str(patch_hash_value))
+    return summaries
+
+
+def _selected_finalist_status(
+    finalist_statuses: list[dict[str, Any]],
+    selected_patch_hash: str,
+) -> dict[str, Any] | None:
+    for row in finalist_statuses:
+        if row.get("patch_hash") == selected_patch_hash:
+            return {
+                "patch_hash": row.get("patch_hash"),
+                "status": row.get("status"),
+                "stage": row.get("stage"),
+                "reason": row.get("reason"),
+                "passed_final_gate": row.get("passed_final_gate"),
+                "comparison_to_baseline": row.get("comparison_to_baseline"),
+            }
+    return None

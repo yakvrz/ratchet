@@ -14,12 +14,15 @@ from typing import Any, Callable, Iterable
 from ratchet.adapters import AdapterProtocol, checked_agent_spec
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
+from ratchet.experiments import TaskTheory, build_task_theory
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
 from ratchet.objectives import (
     behavior_flip_summary,
+    constraint_rejection_reason,
     patch_rejection_reason,
     compare_summaries,
     final_gate_status,
+    objective_rejection_reason,
     objective_sort_key,
     pareto_frontier,
     select_recommended_patch,
@@ -73,6 +76,8 @@ PROPOSAL_RETRY_BUDGET = 1
 FINALIST_CONFIRMATION_SAMPLES = 2
 FRONTIER_PARENT_STALL_LIMIT = 2
 MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 2
+MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
+MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -210,14 +215,39 @@ class RatchetOptimizer:
         decision_log: list[dict[str, Any]] = []
         diagnoses_log: list[dict[str, Any]] = []
         proposals_log: list[dict[str, Any]] = []
+        task_theory_log: list[dict[str, Any]] = []
+        diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
+        task_theory_cache: dict[str, TaskTheory] = {}
         evaluated_patch_hashes = {baseline_dev.patch_hash}
         generated_surface_rows: list[dict[str, Any]] = [
             target.to_dict() for target in self.surface_generator.generate(self.agent_spec, self.objective)
         ]
         dev_evaluations = 0
         iteration = 0
+        consecutive_zero_eval_parent_attempts = 0
 
         while dev_evaluations < self.dev_budget and _has_selectable_frontier_parent(frontier_states):
+            if (
+                accepted_dev_patches
+                and self.dev_budget - dev_evaluations < MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND
+            ):
+                decision_log.append(
+                    {
+                        "type": "search_stopped",
+                        "iteration": iteration + 1,
+                        "reason": "remaining dev budget too small for another informative proposal round",
+                        "dev_evaluations": dev_evaluations,
+                        "dev_budget": self.dev_budget,
+                    }
+                )
+                self._emit_progress(
+                    "search_stopped",
+                    iteration=iteration + 1,
+                    reason="remaining dev budget too small for another informative proposal round",
+                    dev_evaluations=dev_evaluations,
+                    dev_budget=self.dev_budget,
+                )
+                break
             iteration += 1
             parent_summaries = _select_frontier_parents(
                 parent_pool_by_hash.values(),
@@ -262,23 +292,82 @@ class RatchetOptimizer:
                     parent_rank=parent_index + 1,
                     failure_count=current_dev.case_count - current_dev.pass_count,
                 )
-                diagnoses, diagnosis_analysis = self.diagnoser.diagnose(current_dev, surface, self.objective)
-                if self.diagnoser.last_call_diagnostics is not None:
-                    self.optimizer_call_diagnostics.append(
+                diagnosis_cached = current_dev.patch_hash in diagnosis_cache
+                if diagnosis_cached:
+                    diagnoses, diagnosis_analysis = diagnosis_cache[current_dev.patch_hash]
+                    diagnosis_call_diagnostics: dict[str, Any] = {}
+                    decision_log.append(
                         {
+                            "type": "optimizer_cache_hit",
+                            "cache": "diagnosis",
                             "iteration": iteration,
                             "parent_rank": parent_index + 1,
                             "parent_patch_hash": current_dev.patch_hash,
-                            **self.diagnoser.last_call_diagnostics,
+                            "patch_hash": current_dev.patch_hash,
                         }
                     )
+                else:
+                    diagnoses, diagnosis_analysis = self.diagnoser.diagnose(current_dev, surface, self.objective)
+                    diagnosis_cache[current_dev.patch_hash] = (diagnoses, diagnosis_analysis)
+                    diagnosis_call_diagnostics = self.diagnoser.last_call_diagnostics or {}
+                    if self.diagnoser.last_call_diagnostics is not None:
+                        self.optimizer_call_diagnostics.append(
+                            {
+                                "iteration": iteration,
+                                "parent_rank": parent_index + 1,
+                                "parent_patch_hash": current_dev.patch_hash,
+                                **self.diagnoser.last_call_diagnostics,
+                            }
+                        )
                 self._emit_progress(
                     "diagnosis_completed",
                     iteration=iteration,
                     parent_rank=parent_index + 1,
                     diagnosis_count=len(diagnoses),
                     analysis=diagnosis_analysis,
-                    call_diagnostics=self.diagnoser.last_call_diagnostics or {},
+                    cached=diagnosis_cached,
+                    call_diagnostics=diagnosis_call_diagnostics,
+                )
+                task_theory_cached = current_dev.patch_hash in task_theory_cache
+                if task_theory_cached:
+                    task_theory = task_theory_cache[current_dev.patch_hash]
+                    decision_log.append(
+                        {
+                            "type": "optimizer_cache_hit",
+                            "cache": "task_theory",
+                            "iteration": iteration,
+                            "parent_rank": parent_index + 1,
+                            "parent_patch_hash": current_dev.patch_hash,
+                            "patch_hash": current_dev.patch_hash,
+                        }
+                    )
+                else:
+                    task_theory = build_task_theory(
+                        summary=current_dev,
+                        diagnoses=diagnoses,
+                        objective=self.objective,
+                        proposal_example_bank=proposal_example_bank,
+                    )
+                    task_theory_cache[current_dev.patch_hash] = task_theory
+                task_theory_row = {
+                    "type": "task_theory",
+                    "iteration": iteration,
+                    "parent_rank": parent_index + 1,
+                    "parent_patch_hash": current_dev.patch_hash,
+                    "patch_hash": current_dev.patch_hash,
+                    "cached": task_theory_cached,
+                    "task_theory": task_theory.to_dict(),
+                }
+                decision_log.append(task_theory_row)
+                task_theory_log.append(task_theory_row)
+                self._emit_progress(
+                    "task_theory_ready",
+                    iteration=iteration,
+                    parent_rank=parent_index + 1,
+                    bottleneck_class=task_theory.bottleneck_class,
+                    residual_failure_modes=task_theory.residual_failure_modes,
+                    confidence=task_theory.confidence,
+                    cached=task_theory_cached,
                 )
                 search_hypothesis = build_search_hypothesis(
                     summary=current_dev,
@@ -344,6 +433,7 @@ class RatchetOptimizer:
                     dev_cases=dev_cases,
                     surface=surface,
                     diagnoses=diagnoses,
+                    task_theory=task_theory,
                     diagnosis_analysis=diagnosis_analysis,
                     search_hypothesis=search_hypothesis,
                     current_spec=current_spec,
@@ -359,6 +449,35 @@ class RatchetOptimizer:
                 )
                 dev_evaluations += evaluations_used
                 parent_evaluations_used = evaluations_used
+                if evaluations_used == 0 and not accepted_rows:
+                    consecutive_zero_eval_parent_attempts += 1
+                else:
+                    consecutive_zero_eval_parent_attempts = 0
+                if (
+                    consecutive_zero_eval_parent_attempts >= MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS
+                    and accepted_dev_patches
+                ):
+                    reason = "repeated proposal rounds produced no valid evaluable candidates"
+                    decision_log.append(
+                        {
+                            "type": "search_stopped",
+                            "iteration": iteration,
+                            "parent_rank": parent_index + 1,
+                            "parent_patch_hash": current_dev.patch_hash,
+                            "patch_hash": current_dev.patch_hash,
+                            "reason": reason,
+                            "consecutive_zero_eval_parent_attempts": consecutive_zero_eval_parent_attempts,
+                        }
+                    )
+                    self._emit_progress(
+                        "search_stopped",
+                        iteration=iteration,
+                        parent_rank=parent_index + 1,
+                        reason=reason,
+                        consecutive_zero_eval_parent_attempts=consecutive_zero_eval_parent_attempts,
+                    )
+                    search_complete = True
+                    break
                 if not accepted_rows and evaluations_used > 0 and dev_evaluations < self.dev_budget:
                     self._emit_progress(
                         "retry_started",
@@ -404,6 +523,7 @@ class RatchetOptimizer:
                         dev_cases=dev_cases,
                         surface=surface,
                         diagnoses=diagnoses,
+                        task_theory=task_theory,
                         diagnosis_analysis=diagnosis_analysis,
                         search_hypothesis=retry_search_hypothesis,
                         current_spec=current_spec,
@@ -708,6 +828,7 @@ class RatchetOptimizer:
             selected_patch_hash=selected_patch_hash,
             promoted=promoted,
             generated_surface=generated_surface_rows,
+            task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
             transform_final_statuses=transform_final_statuses,
@@ -736,6 +857,7 @@ class RatchetOptimizer:
             diagnoses=diagnoses_log,
             proposals=proposals_log,
             generated_surface=generated_surface_rows,
+            task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
             finalist_statuses=finalist_statuses,
@@ -906,6 +1028,7 @@ class RatchetOptimizer:
         dev_cases: tuple[EvalCase, ...],
         surface: list[EditableTarget],
         diagnoses: list[FailureDiagnosis],
+        task_theory: TaskTheory,
         diagnosis_analysis: str,
         search_hypothesis: Any,
         current_spec: AgentSpec | None,
@@ -940,6 +1063,7 @@ class RatchetOptimizer:
             objective=self.objective,
             diagnosis=target_diagnosis,
             diagnoses=diagnoses,
+            task_theory=task_theory,
             seen_hashes=evaluated_patch_hashes,
             current_spec=current_spec,
             history=proposals_log,
@@ -1045,7 +1169,16 @@ class RatchetOptimizer:
             )
             evaluations_used += 1
             evaluated_patch_hashes.add(digest)
-            accepted = rejection_reason is None
+            constraint_warning = constraint_rejection_reason(baseline_dev, summary, self.objective)
+            if rejection_reason is None and constraint_warning is None:
+                discovery_status = "promotable"
+            elif rejection_reason is None and constraint_warning is not None:
+                discovery_status = "quality_frontier"
+            elif _efficiency_improved(current_dev, summary):
+                discovery_status = "efficiency_frontier"
+            else:
+                discovery_status = "failed"
+            accepted = discovery_status in {"promotable", "quality_frontier", "efficiency_frontier"}
             proposal_row = {
                 "iteration": iteration,
                 "attempt": attempt,
@@ -1058,6 +1191,10 @@ class RatchetOptimizer:
                 "candidate": candidate.to_dict(),
                 "materialization": materialization_by_proposal_hash.get(patch_hash(candidate.patch), {}),
                 "transform_family": candidate.transform_family,
+                "mechanism_class": candidate.mechanism_class,
+                "experiment_id": candidate.experiment_id,
+                "candidate_role": candidate.candidate_role,
+                "comparison_group": candidate.comparison_group,
                 "transform_instance": candidate.transform_instance,
                 "transform_parameters": candidate.transform_parameters,
                 "transform_context": transform_context.to_dict(),
@@ -1072,7 +1209,9 @@ class RatchetOptimizer:
                 "behavior_flip_summary": flip_summary,
                 "metrics": summary.to_dict(),
                 "accepted": accepted,
+                "frontier_status": discovery_status,
                 "rejection_reason": rejection_reason,
+                "constraint_warning": constraint_warning,
                 "diagnosis_category": candidate.patch.metadata.get("diagnosis_category"),
             }
             proposals_log.append(proposal_row)
@@ -1095,7 +1234,9 @@ class RatchetOptimizer:
                 transform_context=transform_context.to_dict(),
                 patch_hash=digest,
                 accepted=accepted,
+                frontier_status=discovery_status,
                 rejection_reason=rejection_reason,
+                constraint_warning=constraint_warning,
                 score_delta=comparison.score_delta,
                 cost_delta=comparison.cost_delta,
                 latency_delta=comparison.latency_delta,
@@ -1103,6 +1244,16 @@ class RatchetOptimizer:
             )
             if accepted:
                 accepted_rows.append((candidate, summary, comparison))
+                if candidate.mechanism_class in {"runtime_defect_fix", "output_contract_fix"}:
+                    decision_log.append(
+                        {
+                            "type": "residual_rediagnosis_triggered",
+                            "patch_hash": digest,
+                            "parent_patch_hash": current_dev.patch_hash,
+                            "mechanism_class": candidate.mechanism_class,
+                            "reason": "structural/runtime fix accepted; child branch should be rediagnosed for residual failures",
+                        }
+                    )
         return _prefer_simple_few_shot_strategy(accepted_rows), evaluations_used
 
     def _evaluate_candidate_progressively(
@@ -1124,14 +1275,19 @@ class RatchetOptimizer:
             candidate_summary = self.evaluate_patch(patch, stage_cases)
             comparison = compare_summaries(reference_summary, candidate_summary)
             flip_summary = behavior_flip_summary(reference_summary, candidate_summary)
+            constraint_warning = None
             if stage_name == "smoke":
                 rejection_reason = _smoke_rejection_reason(reference_summary, candidate_summary)
             else:
-                rejection_reason = patch_rejection_reason(
-                    baseline=baseline_summary,
-                    reference=reference_summary,
-                    patch_summary=candidate_summary,
-                    objective=self.objective,
+                rejection_reason = objective_rejection_reason(
+                    reference_summary,
+                    candidate_summary,
+                    self.objective,
+                )
+                constraint_warning = constraint_rejection_reason(
+                    baseline_summary,
+                    candidate_summary,
+                    self.objective,
                 )
             stage_rows.append(
                 {
@@ -1143,6 +1299,7 @@ class RatchetOptimizer:
                     "comparison_to_parent": comparison.to_dict(),
                     "behavior_flip_summary": flip_summary,
                     "rejection_reason": rejection_reason,
+                    "constraint_warning": constraint_warning,
                     "passed": rejection_reason is None,
                 }
             )
@@ -1176,7 +1333,9 @@ class RatchetOptimizer:
             if case_passed and case_id in case_by_id
         ]
         smoke_ids = _ordered_unique([*(failed_ids[:1]), *(passed_ids[:1]), dev_cases[0].id])
-        small_target = min(len(dev_cases), max(3, (len(dev_cases) + 1) // 2))
+        # Keep exploration cheap: the small stage should cover failures and a
+        # representative stability sample without becoming an accidental full run.
+        small_target = min(len(dev_cases), max(6, min(24, len(failed_ids) + len(smoke_ids) + 4)))
         small_ids = _ordered_unique([*smoke_ids, *failed_ids, *(case.id for case in dev_cases)])[:small_target]
         raw_stages = [
             ("smoke", tuple(case_by_id[case_id] for case_id in smoke_ids)),
@@ -1408,6 +1567,7 @@ class RatchetOptimizer:
         selected_patch_hash: str,
         promoted: bool,
         generated_surface: list[dict[str, Any]],
+        task_theories: list[dict[str, Any]],
         transform_summaries: dict[str, dict[str, Any]],
         transform_context_summaries: dict[str, dict[str, Any]],
         transform_final_statuses: dict[str, dict[str, Any]],
@@ -1439,6 +1599,7 @@ class RatchetOptimizer:
             "agent_spec_hash": agent_spec_hash(self.agent_spec),
             "objective": self.objective.to_dict(),
             "generated_surface_count": len(generated_surface),
+            "task_theories": task_theories,
             "transform_summaries": transform_summaries,
             "transform_context_summaries": transform_context_summaries,
             "transform_final_statuses": transform_final_statuses,
@@ -1519,6 +1680,13 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
     if candidate.pass_count < reference.pass_count:
         return "smoke rejected candidate because pass count regressed"
     return None
+
+
+def _efficiency_improved(reference: PatchSummary, candidate: PatchSummary) -> bool:
+    score_noninferior = candidate.mean_score >= reference.mean_score - 0.01
+    cheaper = candidate.mean_cost_usd < reference.mean_cost_usd
+    faster = candidate.median_latency_s < reference.median_latency_s
+    return score_noninferior and (cheaper or faster)
 
 
 def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:

@@ -4,6 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ratchet.experiments import CANDIDATE_ROLES, mechanism_error_for_family
 from ratchet.results import Comparison, PatchSummary
 from ratchet.types import AgentPatch, EditableTarget, FailureDiagnosis, OptimizationObjective, PatchOperation
 
@@ -342,6 +343,10 @@ class CandidateProposal:
     transform_family: str
     transform_instance: str = ""
     transform_parameters: dict[str, Any] = field(default_factory=dict)
+    mechanism_class: str = ""
+    experiment_id: str = ""
+    candidate_role: str = "atomic"
+    comparison_group: str = ""
     target_slice: str = "global"
     hypothesis: str = ""
     expected_effects: dict[str, Any] = field(default_factory=dict)
@@ -352,6 +357,10 @@ class CandidateProposal:
             "transform_family": self.transform_family,
             "transform_instance": self.transform_instance,
             "transform_parameters": dict(self.transform_parameters),
+            "mechanism_class": self.mechanism_class,
+            "experiment_id": self.experiment_id,
+            "candidate_role": self.candidate_role,
+            "comparison_group": self.comparison_group,
             "target_slice": self.target_slice,
             "transform_context": TransformContextKey.from_candidate(self).to_dict(),
             "hypothesis": self.hypothesis,
@@ -373,6 +382,10 @@ class CandidateProposal:
             transform_family=str(payload.get("transform_family", "")),
             transform_instance=str(payload.get("transform_instance", "")),
             transform_parameters=dict(payload.get("transform_parameters", {})),
+            mechanism_class=str(payload.get("mechanism_class", "")),
+            experiment_id=str(payload.get("experiment_id", "")),
+            candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
+            comparison_group=str(payload.get("comparison_group", "")),
             target_slice=str(payload.get("target_slice", "global") or "global"),
             hypothesis=str(payload.get("hypothesis", "")),
             expected_effects=dict(payload.get("expected_effects", {})),
@@ -819,6 +832,13 @@ def validate_candidate_transform(
     family = registry.get(candidate.transform_family)
     if family is None:
         return f"unknown transform family {candidate.transform_family!r}"
+    if not candidate.experiment_id:
+        return "candidate must belong to an experiment"
+    if candidate.candidate_role not in CANDIDATE_ROLES:
+        return f"unknown candidate role {candidate.candidate_role!r}"
+    mechanism_error = mechanism_error_for_family(candidate.transform_family, candidate.mechanism_class)
+    if mechanism_error is not None:
+        return mechanism_error
     parameter_error = _transform_parameter_contract_error(candidate, family)
     if parameter_error is not None:
         return parameter_error
@@ -830,18 +850,28 @@ def validate_candidate_transform(
         target = target_by_name.get(operation.target) or target_by_path.get(operation.target)
         if target is None:
             return f"unknown target {operation.target!r}"
-        if target.kind not in family.supported_edit_kinds:
-            return f"target kind {target.kind!r} is incompatible with transform family {family.name!r}"
-        if operation.op not in family.supported_ops:
-            return f"operation {operation.op!r} is incompatible with transform family {family.name!r}"
+        if target.kind not in family.supported_edit_kinds or operation.op not in family.supported_ops:
+            compatible_families = _compatible_operation_families(
+                operation=operation,
+                target=target,
+                mechanism_class=candidate.mechanism_class,
+                search_hypothesis=search_hypothesis,
+            )
+            if candidate.candidate_role != "composed" or not compatible_families:
+                if target.kind not in family.supported_edit_kinds:
+                    return f"target kind {target.kind!r} is incompatible with transform family {family.name!r}"
+                return f"operation {operation.op!r} is incompatible with transform family {family.name!r}"
     if search_hypothesis is not None:
-        eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis)
+        eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
         if eligibility_error is not None:
             return eligibility_error
     return None
 
 
 def _transform_parameter_contract_error(candidate: CandidateProposal, family: TransformFamily) -> str | None:
+    if candidate.transform_family == "targeted_few_shot" and candidate.patch.operations:
+        if not candidate.patch.metadata.get("materialized_few_shot"):
+            return "targeted_few_shot must use transform_parameters.source_case_ids, not inline add_few_shot values"
     required = family.parameter_contract.get("required")
     if not isinstance(required, dict):
         return None
@@ -859,6 +889,7 @@ def validate_candidate_context(
     candidate: CandidateProposal,
     *,
     search_hypothesis: SearchHypothesis,
+    surface: list[EditableTarget] | None = None,
 ) -> str | None:
     family_state = search_hypothesis.family_states.get(candidate.transform_family)
     if family_state is None or candidate.transform_family not in search_hypothesis.active_families:
@@ -869,9 +900,28 @@ def validate_candidate_context(
         return f"inactive transform context {combined_key.id!r}"
     if exact_state is not None and exact_state.state == "constrained":
         return f"constrained transform context {combined_key.id!r} requires a materially distinct mechanism"
+    target_by_name = {target.name: target for target in surface or []}
+    target_by_path = {target.path: target for target in surface or []}
+    primary_family = TRANSFORM_FAMILIES.get(candidate.transform_family)
     for operation in candidate.patch.operations:
+        operation_family = candidate.transform_family
+        target = target_by_name.get(operation.target) or target_by_path.get(operation.target)
+        if (
+            candidate.candidate_role == "composed"
+            and target is not None
+            and primary_family is not None
+            and (target.kind not in primary_family.supported_edit_kinds or operation.op not in primary_family.supported_ops)
+        ):
+            compatible_families = _compatible_operation_families(
+                operation=operation,
+                target=target,
+                mechanism_class=candidate.mechanism_class,
+                search_hypothesis=search_hypothesis,
+            )
+            if compatible_families:
+                operation_family = compatible_families[0]
         operation_key = TransformContextKey.from_operation(
-            family=candidate.transform_family,
+            family=operation_family,
             operation=operation,
             target_slice=candidate.target_slice,
             transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
@@ -880,6 +930,27 @@ def validate_candidate_context(
         if operation_error is not None:
             return operation_error
     return None
+
+
+def _compatible_operation_families(
+    *,
+    operation: PatchOperation,
+    target: EditableTarget,
+    mechanism_class: str,
+    search_hypothesis: SearchHypothesis | None,
+) -> list[str]:
+    families: list[str] = []
+    for name, family in TRANSFORM_FAMILIES.items():
+        if target.kind not in family.supported_edit_kinds:
+            continue
+        if operation.op not in family.supported_ops:
+            continue
+        if mechanism_error_for_family(name, mechanism_class) is not None:
+            continue
+        if search_hypothesis is not None and name not in search_hypothesis.active_families:
+            continue
+        families.append(name)
+    return families
 
 
 def select_branch_history(history: list[dict[str, Any]], parent_patch_hash: str | None) -> list[dict[str, Any]]:

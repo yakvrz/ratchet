@@ -4,6 +4,7 @@ import json
 import unittest
 
 from ratchet.diagnosis import FailureDiagnoser
+from ratchet.evidence import build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
 from ratchet.proposals import ProposalEngine
 from ratchet.results import PatchSummary, CaseEvaluation
@@ -30,6 +31,10 @@ class FakePatchClient:
         candidates = [
             {
                 "transform_family": _family_for_patch(patch),
+                "mechanism_class": _mechanism_for_family(_family_for_patch(patch)),
+                "experiment_id": "exp_1",
+                "candidate_role": "atomic",
+                "comparison_group": "exp_1",
                 "transform_instance": str(patch.get("rationale", "")) or _family_for_patch(patch),
                 "target_slice": "global",
                 "hypothesis": str(patch.get("rationale", "")),
@@ -39,7 +44,31 @@ class FakePatchClient:
             }
             for patch in self.patches
         ]
-        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+        return experiment_response(candidates)
+
+
+def experiment_response(candidates: list[dict[str, object]], *, mechanism: str = "semantic_boundary_rewrite") -> object:
+    return type(
+        "Response",
+        (),
+        {
+            "output_text": json.dumps(
+                {
+                    "experiments": [
+                        {
+                            "experiment_id": "exp_1",
+                            "mechanism": mechanism,
+                            "hypothesis": "Test a controlled optimization mechanism.",
+                            "target_slices": ["global"],
+                            "measurements": ["score_delta", "cost_delta", "latency_delta"],
+                            "candidate_roles": ["atomic"],
+                            "candidates": candidates,
+                        }
+                    ]
+                }
+            )
+        },
+    )()
 
 
 def _family_for_patch(patch: dict[str, object]) -> str:
@@ -55,9 +84,25 @@ def _family_for_patch(patch: dict[str, object]) -> str:
         return "model_substitution"
     if op == "set_retrieval_param":
         return "retrieval_tuning"
+    if op == "add_few_shot":
+        return "targeted_few_shot"
     if target.startswith("output") or op == "add_output_constraint":
         return "output_contract_tightening"
     return "prompt_rewrite"
+
+
+def _mechanism_for_family(family: str) -> str:
+    if family == "model_substitution":
+        return "model_capability_probe"
+    if family == "retrieval_tuning":
+        return "efficiency_probe"
+    if family == "output_contract_tightening":
+        return "output_contract_fix"
+    if family == "targeted_few_shot":
+        return "representative_examples"
+    if family == "runtime_tuning":
+        return "runtime_defect_fix"
+    return "semantic_boundary_rewrite"
 
 
 def search_hypothesis_with_budget(budget_allocation: dict[str, float]) -> SearchHypothesis:
@@ -138,7 +183,24 @@ class RawCandidateClient:
         self.candidates = candidates
 
     def create_response(self, **_: object) -> object:
-        return type("Response", (), {"output_text": json.dumps({"candidates": self.candidates})})()
+        return type(
+            "Response",
+            (),
+            {
+                "output_text": json.dumps(
+                    {
+                        "experiments": [
+                            {
+                                "experiment_id": "exp_1",
+                                "mechanism": "semantic_boundary_rewrite",
+                                "hypothesis": "Malformed candidate test.",
+                                "candidates": self.candidates,
+                            }
+                        ]
+                    }
+                )
+            },
+        )()
 
 
 class CapturingPatchClient:
@@ -147,7 +209,7 @@ class CapturingPatchClient:
 
     def create_response(self, **kwargs: object) -> object:
         self.input_text = str(kwargs.get("input", ""))
-        return type("Response", (), {"output_text": json.dumps({"candidates": []})})()
+        return type("Response", (), {"output_text": json.dumps({"experiments": []})})()
 
 
 def make_summary(patch_hash: str, scores: list[float]) -> PatchSummary:
@@ -168,6 +230,35 @@ def make_summary(patch_hash: str, scores: list[float]) -> PatchSummary:
                     diagnostics=DiagnosticTrace(),
                 ),
                 grade=GradeResult(score=score, passed=score == 1.0),
+            )
+        )
+    return PatchSummary(
+        patch_hash=patch_hash,
+        patch=AgentPatch(),
+        split="dev",
+        evaluations=evaluations,
+    )
+
+
+def make_labeled_summary(patch_hash: str, labels: list[list[str]]) -> PatchSummary:
+    evaluations = []
+    for index, case_labels in enumerate(labels, start=1):
+        passed = not case_labels
+        evaluations.append(
+            CaseEvaluation(
+                case=EvalCase(id=f"case-{index}", split="dev", input=f"case {index}"),
+                record=RunRecord(
+                    output="ok" if passed else "wrong",
+                    metrics=OperationalMetrics(
+                        latency_s=1.0,
+                        input_tokens=10,
+                        output_tokens=5,
+                        total_tokens=15,
+                        cost_usd=0.001,
+                    ),
+                    diagnostics=DiagnosticTrace(),
+                ),
+                grade=GradeResult(score=1.0 if passed else 0.0, passed=passed, labels=case_labels),
             )
         )
     return PatchSummary(
@@ -514,6 +605,158 @@ class GeneratedSurfaceTests(unittest.TestCase):
 
         targets = [operation.target for candidate in proposals for operation in candidate.patch.operations]
         self.assertEqual(targets, ["retrieval.knowledge_mode"])
+
+    def test_llm_proposer_passes_task_theory_planner_guidance(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        client = CapturingPatchClient()
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = client
+
+        proposals, _ = engine.propose(
+            make_labeled_summary("baseline", [["invalid_output"], []]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn('"planner_guidance"', client.input_text)
+        self.assertIn('"output_contract_fix"', client.input_text)
+        self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
+
+    def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Classify."},
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        train_cases = (
+            EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
+            EvalCase(id="train-card-2", split="train", input="unknown card transaction", expected={"label": "card_payment_not_recognised"}),
+        )
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = RawCandidateClient(
+            [
+                {
+                    "transform_family": "targeted_few_shot",
+                    "mechanism_class": "representative_examples",
+                    "candidate_role": "atomic",
+                    "transform_parameters": {
+                        "source_case_ids": ["train-card-1", "train-card-2"],
+                        "selection_strategy": "representative",
+                    },
+                    "hypothesis": "Anchor the weak card payment label.",
+                }
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_labeled_summary("baseline", [["wrong_label"], []]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget({"targeted_few_shot": 1.0}),
+            proposal_example_bank=build_proposal_example_bank(train_cases),
+            proposal_example_cases=train_cases,
+            proposal_budget=3,
+        )
+
+        self.assertEqual(len(proposals), 2)
+        first_value = proposals[0].patch.operations[0].value
+        self.assertEqual(first_value[0]["source_case_id"], "train-card-1")
+        self.assertEqual(first_value[0]["input"], "card charge I do not know")
+        self.assertEqual(first_value[0]["output"], {"label": "card_payment_not_recognised"})
+        self.assertEqual(proposals[0].candidate_role, "compression")
+        self.assertEqual(engine.last_stats.valid_count, 2)
+        self.assertTrue(engine.last_candidate_rows[0]["materialization"]["materialized"])
+
+    def test_targeted_few_shot_rejects_inline_examples_and_unknown_ids(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Classify."},
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        train_cases = (
+            EvalCase(id="train-card-1", split="train", input="card charge I do not know", expected={"label": "card_payment_not_recognised"}),
+        )
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = RawCandidateClient(
+            [
+                {
+                    "transform_family": "targeted_few_shot",
+                    "mechanism_class": "representative_examples",
+                    "candidate_role": "atomic",
+                    "transform_parameters": {"source_case_ids": ["train-card-1"]},
+                    "hypothesis": "Inline examples should be rejected.",
+                    "patch": {
+                        "operations": [
+                            {
+                                "op": "add_few_shot",
+                                "target": "few_shot",
+                                "value": [{}],
+                            }
+                        ],
+                        "rationale": "Malformed inline example.",
+                        "expected_effect": "Should be rejected.",
+                    },
+                },
+                {
+                    "transform_family": "targeted_few_shot",
+                    "mechanism_class": "representative_examples",
+                    "candidate_role": "atomic",
+                    "transform_parameters": {"source_case_ids": ["missing-train-case"]},
+                    "hypothesis": "Unknown IDs should be rejected.",
+                },
+            ]
+        )
+
+        proposals, _ = engine.propose(
+            make_labeled_summary("baseline", [["wrong_label"], []]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget({"targeted_few_shot": 1.0}),
+            proposal_example_bank=build_proposal_example_bank(train_cases),
+            proposal_example_cases=train_cases,
+            proposal_budget=2,
+        )
+
+        self.assertEqual(proposals, [])
+        reasons = engine.last_stats.invalid_reasons or {}
+        self.assertTrue(any("not inline add_few_shot" in reason for reason in reasons))
+        self.assertTrue(any("unknown few-shot source_case_ids" in reason for reason in reasons))
 
     def test_llm_proposer_rejects_legacy_bare_patches(self) -> None:
         spec = AgentSpec(

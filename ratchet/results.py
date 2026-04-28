@@ -338,6 +338,7 @@ class RatchetResult:
     diagnoses: list[dict[str, Any]]
     proposals: list[dict[str, Any]]
     generated_surface: list[dict[str, Any]]
+    task_theories: list[dict[str, Any]]
     transform_summaries: dict[str, dict[str, Any]]
     transform_context_summaries: dict[str, dict[str, Any]]
     finalist_statuses: list[dict[str, Any]]

@@ -8,8 +8,14 @@ from typing import Any
 
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
+from ratchet.experiments import ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
 from ratchet.io import extract_json_object, patch_hash
-from ratchet.model_client import ResponsesModelClient, error_response_diagnostics, response_diagnostics
+from ratchet.model_client import (
+    ResponsesModelClient,
+    combine_response_diagnostics,
+    error_response_diagnostics,
+    response_diagnostics,
+)
 from ratchet.patches import compose_patches
 from ratchet.results import PatchSummary
 from ratchet.transforms import (
@@ -37,6 +43,7 @@ class ProposalStats:
     error: str | None = None
     invalid_reasons: dict[str, int] | None = None
     target_considerations: list[dict[str, Any]] | None = None
+    plan_audit: dict[str, Any] | None = None
     raw_output_text: str = ""
     call_diagnostics: dict[str, Any] | None = None
 
@@ -50,6 +57,7 @@ class ProposalStats:
             "error": self.error,
             "invalid_reasons": dict(self.invalid_reasons or {}),
             "target_considerations": list(self.target_considerations or []),
+            "plan_audit": dict(self.plan_audit or {}),
             "raw_output_text": self.raw_output_text,
             "call_diagnostics": dict(self.call_diagnostics or {}),
         }
@@ -74,6 +82,7 @@ class ProposalEngine:
         self._last_raw_candidate_count = 0
         self._last_parse_invalid_reasons: Counter[str] = Counter()
         self._last_parse_invalid_candidate_rows: list[dict[str, Any]] = []
+        self._last_plan_audit: dict[str, Any] = {}
 
     def propose(
         self,
@@ -87,6 +96,7 @@ class ProposalEngine:
         search_hypothesis: SearchHypothesis | None = None,
         diagnosis: FailureDiagnosis | None = None,
         diagnoses: list[FailureDiagnosis] | None = None,
+        task_theory: TaskTheory | None = None,
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
@@ -104,6 +114,13 @@ class ProposalEngine:
                 proposal_example_count=len(proposal_example_bank.examples) if proposal_example_bank else 0,
             )
         diagnosis_context = list(diagnoses or ([] if diagnosis is None else [diagnosis]))
+        if task_theory is None:
+            task_theory = build_task_theory(
+                summary=summary,
+                diagnoses=diagnosis_context,
+                objective=objective,
+                proposal_example_bank=proposal_example_bank,
+            )
         llm_proposals, target_considerations = self._llm_proposals(
             summary,
             surface,
@@ -111,6 +128,7 @@ class ProposalEngine:
             diagnoses=diagnosis_context,
             history=history,
             search_hypothesis=search_hypothesis,
+            task_theory=task_theory,
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
         )
@@ -130,7 +148,20 @@ class ProposalEngine:
         invalid_candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
         for raw_candidate in proposals:
+            reference_error = _targeted_few_shot_reference_error(raw_candidate)
+            if reference_error is not None:
+                invalid_reasons[reference_error] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(raw_candidate, reference_error))
+                continue
             materialized_candidate, materialization = _materialize_candidate_references(raw_candidate, proposal_example_bank)
+            materialization_error = materialization.get("error")
+            if materialization_error:
+                reason = str(materialization_error)
+                invalid_reasons[reason] += 1
+                invalid_candidate_rows.append(
+                    _invalid_candidate_row(raw_candidate, reason, materialization=materialization)
+                )
+                continue
             for candidate in _few_shot_count_variants(materialized_candidate):
                 variant_materialization = _few_shot_variant_materialization(candidate, materialization)
                 family_error = validate_candidate_transform(
@@ -194,6 +225,10 @@ class ProposalEngine:
                         "proposal": candidate.patch.to_dict(),
                         "candidate": candidate.to_dict(),
                         "transform_family": candidate.transform_family,
+                        "mechanism_class": candidate.mechanism_class,
+                        "experiment_id": candidate.experiment_id,
+                        "candidate_role": candidate.candidate_role,
+                        "comparison_group": candidate.comparison_group,
                         "transform_instance": candidate.transform_instance,
                         "target_slice": candidate.target_slice,
                         "hypothesis": candidate.hypothesis,
@@ -216,6 +251,7 @@ class ProposalEngine:
             error=None,
             invalid_reasons=dict(sorted(invalid_reasons.items())),
             target_considerations=target_considerations,
+            plan_audit=self._last_plan_audit,
             raw_output_text=self._last_raw_output_text,
             call_diagnostics=self.last_call_diagnostics,
         )
@@ -240,25 +276,35 @@ class ProposalEngine:
         diagnoses: list[FailureDiagnosis],
         history: list[dict[str, Any]],
         search_hypothesis: SearchHypothesis,
+        task_theory: TaskTheory,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
+        self._last_plan_audit = {}
         target_kinds = sorted({target.kind for target in surface})
         registry = transform_registry()
         active_family_rows = [
-            registry[name].to_dict()
+            _compact_transform_family(registry[name].to_dict())
             for name in search_hypothesis.active_families
             if name in registry
         ]
         behavior_diagnostics = build_behavior_diagnostics(summary)
+        compact_diagnostics = _compact_behavior_diagnostics(behavior_diagnostics)
+        planner_guidance = _planner_guidance(
+            task_theory=task_theory,
+            search_hypothesis=search_hypothesis,
+            proposal_budget=proposal_budget,
+        )
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
             "target_kinds": target_kinds,
             "transform_library": active_family_rows,
             "search_hypothesis": search_hypothesis.to_prompt_dict(),
+            "task_theory": _compact_task_theory(task_theory),
+            "planner_guidance": planner_guidance,
             "proposal_policy": {
                 "empty_patches_allowed": (
                     "Only when no listed editable target can plausibly improve the objective without violating constraints."
@@ -278,17 +324,17 @@ class ProposalEngine:
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,
                 "pass_rate": summary.pass_rate,
-                "failure_labels": summary.failure_labels,
+                "failure_labels": _top_mapping(summary.failure_labels, limit=12),
             },
-            "behavior_diagnostics": behavior_diagnostics,
+            "behavior_diagnostics": compact_diagnostics,
             "operational": {
                 "mean_cost_usd": summary.mean_cost_usd,
                 "mean_total_tokens": summary.mean_total_tokens,
                 "median_latency_s": summary.median_latency_s,
             },
-            "diagnoses": [diagnosis.to_dict() for diagnosis in diagnoses],
-            "primary_diagnosis": diagnoses[0].to_dict() if diagnoses else None,
-            "editable_targets": [target.to_dict() for target in surface],
+            "diagnoses": [_compact_diagnosis(diagnosis) for diagnosis in diagnoses[:4]],
+            "primary_diagnosis": _compact_diagnosis(diagnoses[0]) if diagnoses else None,
+            "editable_targets": [_compact_editable_target(target) for target in surface],
             "diagnostic_only_examples": {
                 "usage": (
                     "dev examples for diagnosis only. Do not copy their case IDs, inputs, or expected outputs into patches."
@@ -297,15 +343,17 @@ class ProposalEngine:
                 ),
                 "sanitized": objective.constraints.sanitize_examples,
                 "examples": summary.failed_examples(
-                    limit=8,
-                    max_text_chars=900,
+                    limit=5,
+                    max_text_chars=360,
                     sanitize_text=objective.constraints.sanitize_examples,
                 ),
             },
             "proposal_example_bank": (
-                proposal_example_bank.to_prompt_dict(
-                    target_labels=_target_labels_for_examples(behavior_diagnostics),
-                    max_examples=24,
+                _compact_proposal_example_bank(
+                    proposal_example_bank,
+                    target_labels=_target_labels_for_examples(compact_diagnostics),
+                    max_examples=12,
+                    max_per_label=2,
                 )
                 if proposal_example_bank is not None
                 else {
@@ -314,7 +362,7 @@ class ProposalEngine:
                     "examples": [],
                 }
             ),
-            "recent_history": _compact_recent_history(history, limit=10),
+            "recent_history": _compact_recent_history(history, limit=6),
         }
         try:
             started_at = time.perf_counter()
@@ -342,56 +390,88 @@ class ProposalEngine:
                                         "required": ["target_kind", "decision", "rationale"],
                                     },
                                 },
-                                "candidates": {
+                                "experiments": {
                                     "type": "array",
                                     "maxItems": max(proposal_budget, 0),
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "transform_family": {"type": "string", "maxLength": 80},
-                                            "transform_instance": {"type": "string", "maxLength": 160},
-                                            "transform_parameters": {
-                                                "type": "object",
-                                                "additionalProperties": True,
-                                                "maxProperties": 8,
-                                            },
-                                            "target_slice": {"type": "string", "maxLength": 160},
+                                            "experiment_id": {"type": "string", "maxLength": 80},
+                                            "mechanism_class": {"type": "string", "maxLength": 80},
+                                            "mechanism": {"type": "string", "maxLength": 160},
                                             "hypothesis": {"type": "string", "maxLength": 360},
-                                            "expected_effects": {"type": "object"},
-                                            "evaluation_plan": {"type": "string", "maxLength": 240},
-                                            "patch": _patch_schema(),
+                                            "target_slices": {"type": "array", "items": {"type": "string"}},
+                                            "measurements": {"type": "array", "items": {"type": "string"}},
+                                            "candidate_roles": {"type": "array", "items": {"type": "string"}},
+                                            "candidates": {
+                                                "type": "array",
+                                                "items": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "transform_family": {"type": "string", "maxLength": 80},
+                                                        "mechanism_class": {"type": "string", "maxLength": 80},
+                                                        "candidate_role": {"type": "string", "maxLength": 40},
+                                                        "comparison_group": {"type": "string", "maxLength": 80},
+                                                        "transform_instance": {"type": "string", "maxLength": 160},
+                                                        "transform_parameters": {
+                                                            "type": "object",
+                                                            "additionalProperties": True,
+                                                            "maxProperties": 8,
+                                                        },
+                                                        "target_slice": {"type": "string", "maxLength": 160},
+                                                        "hypothesis": {"type": "string", "maxLength": 360},
+                                                        "expected_effects": {"type": "object"},
+                                                        "evaluation_plan": {"type": "string", "maxLength": 240},
+                                                        "patch": _patch_schema(),
+                                                    },
+                                                    "required": ["transform_family", "candidate_role", "hypothesis"],
+                                                },
+                                            },
                                         },
-                                        "required": ["transform_family", "hypothesis"],
+                                        "required": ["experiment_id", "mechanism_class", "hypothesis", "candidates"],
                                     },
                                 },
                             },
-                            "required": ["candidates"],
+                            "required": ["experiments"],
                         },
                     }
                 },
                 input=(
                     "You are Ratchet's patch proposer inside a task-agnostic agent optimizer. "
-                    "Return JSON with a candidates array and, when possible, a target_considerations array. "
-                    f"The candidates array may contain at most {proposal_budget} candidates. "
+                    "Return JSON with an experiments array and, when possible, a target_considerations array. "
+                    f"The experiments should contain at most {proposal_budget} total candidates. "
                     "Keep all rationale, hypothesis, transform_instance, and evaluation_plan strings concise. "
                     "Do not include long examples, full transcripts, or repeated label lists in candidate fields. "
+                    "Each experiment must set experiment.mechanism_class to one mechanism class from the transform library; "
+                    "experiment.mechanism may be a short human-readable label. "
+                    "Use mechanism_class values only from: runtime_defect_fix, output_contract_fix, semantic_boundary_rewrite, "
+                    "representative_examples, contrastive_examples, model_capability_probe, efficiency_probe, ablation. "
+                    "Use planner_guidance.primary_mechanisms as the default experiment mechanisms unless the evidence, "
+                    "surface, or constraints make them unsuitable; if you skip all primary mechanisms, explain why in "
+                    "target_considerations. "
+                    "Candidate roles must be one of: atomic, composed, control, ablation, compression. "
+                    "For semantic-boundary or example-anchoring bottlenecks, include a composed candidate when compatible "
+                    "families need to work together, plus a control or ablation when budget allows. "
                     "Each candidate must name one active transform_family from search_hypothesis.active_families, "
-                    "state a hypothesis, include one patch object, and fill transform_parameters when the active "
+                    "name a compatible mechanism_class, state a hypothesis, include one patch object, and fill transform_parameters when the active "
                     "transform family's parameter_contract requests it. Prefer the listed active_contexts. "
                     "If a family's lifecycle state is constrained, it remains eligible, but only for candidates that are "
                     "materially distinct from constrained_or_paused_contexts; use different targets, operations, slices, "
                     "or concrete mechanism classes, and explain that distinction in transform_instance and hypothesis. "
                     "Each patch must have operations, rationale, expected_effect, and optional metadata. "
-                    "Exception: targeted_few_shot candidates should select examples with "
-                    "transform_parameters.source_case_ids and may omit patch; Ratchet will materialize the "
-                    "add_few_shot patch from proposal_example_bank. "
+                    "Exception: targeted_few_shot candidates must be ID-only: set "
+                    "transform_parameters.source_case_ids to a JSON array of proposal_example_bank case_id strings "
+                    "and omit patch or provide an empty patch. Ratchet will materialize the add_few_shot patch. "
+                    "Do not emit inline add_few_shot values, example objects, inputs, outputs, or placeholder objects. "
                     "Use only editable_targets listed in the prompt. Use only operations allowed by each target. "
                     "The patch operations must be compatible with the declared transform_family's supported_ops and "
                     "supported_edit_kinds. "
+                    "Declare transform_family by the actual patch operations: revise_instruction/add_instruction use "
+                    "prompt_rewrite or output_contract_tightening; set_runtime_param uses runtime_tuning; "
+                    "change_model uses model_substitution; add_few_shot or source_case_ids uses targeted_few_shot. "
+                    "Do not label instruction-only patches as targeted_few_shot or runtime_tuning. "
                     "Each operation value must satisfy the target value_schema exactly: respect type, enum, and maxLength. "
-                    "Few-shot operation values must be arrays of objects shaped by the few_shot target schema. "
-                    "For targeted_few_shot, prefer not to emit operation values at all; emit "
-                    "transform_parameters.source_case_ids as a JSON array of strings, for example "
+                    "For targeted_few_shot, emit transform_parameters.source_case_ids as a JSON array of strings, for example "
                     "{\"source_case_ids\":[\"train-example-1\",\"train-example-2\"],"
                     "\"selection_strategy\":\"contrastive\"}. Do not use a comma-separated string. "
                     "Do not invent few-shot examples when proposal_example_bank is empty. "
@@ -413,7 +493,7 @@ class ProposalEngine:
                     "or similarly relevant targets when the surface allows them. In cost or latency mode, do not require failing "
                     "examples before proposing patches; saturated correctness is a reason to explore cheaper or faster variants, "
                     "not a reason to return an empty patch list. "
-                    "Return an empty candidates array only after considering every active transform family and concluding "
+                    "Return an empty experiments array only after considering every active transform family and concluding "
                     "that no safe, evaluable candidate exists. "
                     "Do not alter, describe, or route around the eval scorer; it is frozen. "
                     "Do not memorize diagnostic-only examples: no literal case IDs, user inputs, private names, or expected "
@@ -449,30 +529,124 @@ class ProposalEngine:
         try:
             payload = extract_json_object(response.output_text)
         except Exception as exc:
-            raise OptimizerModelError(f"Optimizer proposer returned invalid JSON: {exc}") from exc
+            primary_diagnostics = self.last_call_diagnostics or {}
+            repair_started_at = time.perf_counter()
+            try:
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text={
+                        "format": {
+                            "type": "json_schema",
+                            "name": "ratchet_patch_proposals_repair",
+                            "strict": False,
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "target_considerations": {"type": "array"},
+                                    "experiments": {"type": "array"},
+                                },
+                                "required": ["experiments"],
+                            },
+                        }
+                    },
+                    input=(
+                        "The previous proposer response was invalid JSON. "
+                        "Return only a valid JSON object with target_considerations and experiments. "
+                        "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:16000]}"
+                    ),
+                    max_output_tokens=6000,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="proposer",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                payload = extract_json_object(repair_response.output_text)
+                self._last_raw_output_text = repair_response.output_text
+            except Exception as repair_exc:
+                self.last_call_diagnostics = {
+                    **primary_diagnostics,
+                    "component": "proposer",
+                    "repair_attempted": True,
+                    "repair_error": str(repair_exc),
+                }
+                raise OptimizerModelError(
+                    f"Optimizer proposer returned invalid JSON: {exc}; repair failed: {repair_exc}"
+                ) from repair_exc
         candidates: list[CandidateProposal] = []
-        raw_candidates = payload.get("candidates")
-        if not isinstance(raw_candidates, list):
-            self._last_parse_invalid_reasons["candidates field is not an array"] += 1
-            raw_candidates = []
-        self._last_raw_candidate_count = len(raw_candidates)
-        for raw_candidate in raw_candidates:
-            if not isinstance(raw_candidate, dict):
-                reason = "candidate entry is not an object"
+        raw_experiments = payload.get("experiments")
+        if not isinstance(raw_experiments, list):
+            self._last_parse_invalid_reasons["experiments field is not an array"] += 1
+            raw_experiments = []
+        self._last_raw_candidate_count = sum(
+            len(raw.get("candidates", []))
+            for raw in raw_experiments
+            if isinstance(raw, dict) and isinstance(raw.get("candidates"), list)
+        )
+        for experiment_index, raw_experiment in enumerate(raw_experiments, start=1):
+            if not isinstance(raw_experiment, dict):
+                reason = "experiment entry is not an object"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
-                    _invalid_raw_candidate_row(raw_candidate, reason)
+                    _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
             try:
-                candidates.append(CandidateProposal.from_dict(raw_candidate))
+                experiment = ExperimentSpec.from_dict(raw_experiment, fallback_id=f"exp_{experiment_index}")
             except Exception as exc:
-                reason = f"malformed candidate: {exc}"
+                reason = f"malformed experiment: {exc}"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
-                    _invalid_raw_candidate_row(raw_candidate, reason)
+                    _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
+            raw_candidates = raw_experiment.get("candidates")
+            if not isinstance(raw_candidates, list):
+                reason = "experiment candidates field is not an array"
+                self._last_parse_invalid_reasons[reason] += 1
+                self._last_parse_invalid_candidate_rows.append(
+                    _invalid_raw_candidate_row(raw_experiment, reason)
+                )
+                continue
+            for raw_candidate in raw_candidates:
+                if not isinstance(raw_candidate, dict):
+                    reason = "candidate entry is not an object"
+                    self._last_parse_invalid_reasons[reason] += 1
+                    self._last_parse_invalid_candidate_rows.append(
+                        _invalid_raw_candidate_row(raw_candidate, reason)
+                    )
+                    continue
+                candidate_payload = {
+                    **raw_candidate,
+                    "experiment_id": raw_candidate.get("experiment_id") or experiment.experiment_id,
+                    "mechanism_class": raw_candidate.get("mechanism_class") or experiment.mechanism,
+                    "comparison_group": raw_candidate.get("comparison_group") or experiment.experiment_id,
+                    "target_slice": raw_candidate.get("target_slice")
+                    or (experiment.target_slices[0] if experiment.target_slices else "global"),
+                }
+                try:
+                    candidates.append(CandidateProposal.from_dict(candidate_payload))
+                except Exception as exc:
+                    reason = f"malformed candidate: {exc}"
+                    self._last_parse_invalid_reasons[reason] += 1
+                    self._last_parse_invalid_candidate_rows.append(
+                        _invalid_raw_candidate_row(raw_candidate, reason)
+                    )
+                    continue
+        self._last_plan_audit = _audit_experiment_plan(
+            raw_experiments=raw_experiments,
+            parsed_candidates=candidates,
+            planner_guidance=planner_guidance,
+            task_theory=task_theory,
+            proposal_budget=proposal_budget,
+        )
         considerations = [
             {
                 "target_kind": str(item.get("target_kind", "")),
@@ -522,6 +696,283 @@ def _patch_schema() -> dict[str, Any]:
     }
 
 
+def _compact_transform_family(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "name": row.get("name"),
+        "category": row.get("category"),
+        "purpose": row.get("purpose"),
+        "supported_edit_kinds": row.get("supported_edit_kinds", []),
+        "supported_ops": row.get("supported_ops", []),
+        "activation_signals": row.get("activation_signals", [])[:6]
+        if isinstance(row.get("activation_signals"), list)
+        else row.get("activation_signals", []),
+        "required_measurements": row.get("required_measurements", [])[:6]
+        if isinstance(row.get("required_measurements"), list)
+        else row.get("required_measurements", []),
+        "complexity_cost": row.get("complexity_cost"),
+        "parameter_contract": row.get("parameter_contract", {}),
+    }
+
+
+def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
+    row = task_theory.to_dict()
+    return {
+        "bottleneck_class": row.get("bottleneck_class"),
+        "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:8],
+        "label_confusions": list(row.get("label_confusions") or [])[:8],
+        "weak_slices": list(row.get("weak_slices") or [])[:12],
+        "runtime_defects": row.get("runtime_defects", {}),
+        "output_defects": row.get("output_defects", {}),
+        "example_coverage": {
+            "example_count": (row.get("example_coverage") or {}).get("example_count"),
+            "weak_labels_without_examples": list(
+                (row.get("example_coverage") or {}).get("weak_labels_without_examples") or []
+            )[:12],
+            "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=20),
+        },
+        "cost_latency_profile": row.get("cost_latency_profile", {}),
+        "confidence": row.get("confidence"),
+        "evidence": list(row.get("evidence") or [])[:6],
+    }
+
+
+def _planner_guidance(
+    *,
+    task_theory: TaskTheory,
+    search_hypothesis: SearchHypothesis,
+    proposal_budget: int,
+) -> dict[str, Any]:
+    active_mechanisms = _active_mechanisms(search_hypothesis)
+    primary, secondary, rationale = _mechanisms_for_bottleneck(task_theory.bottleneck_class)
+    primary = [mechanism for mechanism in primary if mechanism in active_mechanisms]
+    secondary = [mechanism for mechanism in secondary if mechanism in active_mechanisms and mechanism not in primary]
+    if not primary:
+        primary = list(secondary[:2])
+        secondary = secondary[2:]
+    experiment_count = max(0, min(proposal_budget, 3))
+    return {
+        "bottleneck_class": task_theory.bottleneck_class,
+        "primary_mechanisms": primary[:3],
+        "secondary_mechanisms": secondary[:4],
+        "active_mechanisms": active_mechanisms,
+        "recommended_experiment_count": experiment_count,
+        "rationale": rationale,
+        "planning_rules": [
+            "Each experiment should test one mechanism, not a grab bag of unrelated edits.",
+            "Prefer one strong experiment with controls over many shallow single-candidate variants.",
+            "Use composed candidates only when the mechanism needs multiple compatible transform families.",
+            "If few-shot is proposed, use proposal-safe source_case_ids and make the target labels/slices explicit.",
+        ],
+    }
+
+
+def _active_mechanisms(search_hypothesis: SearchHypothesis) -> list[str]:
+    mechanisms: set[str] = set()
+    for family in search_hypothesis.active_families:
+        mechanisms.update(MECHANISMS_BY_FAMILY.get(family, set()))
+    return sorted(mechanisms)
+
+
+def _mechanisms_for_bottleneck(bottleneck_class: str) -> tuple[list[str], list[str], str]:
+    if bottleneck_class == "runtime_or_output_defect":
+        return (
+            ["runtime_defect_fix", "output_contract_fix"],
+            ["semantic_boundary_rewrite", "model_capability_probe"],
+            "Current evidence points first at runtime/output reliability before semantic specialization.",
+        )
+    if bottleneck_class == "output_contract":
+        return (
+            ["output_contract_fix"],
+            ["runtime_defect_fix", "semantic_boundary_rewrite"],
+            "Invalid or contract-shaped failures should be tested as output contract fixes first.",
+        )
+    if bottleneck_class == "semantic_boundary_confusion":
+        return (
+            ["semantic_boundary_rewrite", "representative_examples", "contrastive_examples"],
+            ["model_capability_probe", "ablation"],
+            "Label, slice, or semantic confusion calls for boundary rewrites and example anchoring experiments.",
+        )
+    if bottleneck_class == "efficiency_tradeoff":
+        return (
+            ["efficiency_probe", "model_capability_probe"],
+            ["ablation", "runtime_defect_fix"],
+            "Efficiency objectives should test cost/latency mechanisms while preserving quality.",
+        )
+    if bottleneck_class == "no_observed_failures":
+        return (
+            ["efficiency_probe", "ablation"],
+            ["model_capability_probe"],
+            "With no observed failures, useful experiments should reduce cost, latency, or complexity.",
+        )
+    return (
+        ["semantic_boundary_rewrite", "model_capability_probe", "representative_examples"],
+        ["output_contract_fix", "ablation"],
+        "General correctness gaps need semantic, capability, or example-anchoring experiments.",
+    )
+
+
+def _audit_experiment_plan(
+    *,
+    raw_experiments: list[Any],
+    parsed_candidates: list[CandidateProposal],
+    planner_guidance: dict[str, Any],
+    task_theory: TaskTheory,
+    proposal_budget: int,
+) -> dict[str, Any]:
+    experiment_count = sum(1 for item in raw_experiments if isinstance(item, dict))
+    mechanism_counts = Counter(candidate.mechanism_class for candidate in parsed_candidates)
+    role_counts = Counter(candidate.candidate_role for candidate in parsed_candidates)
+    primary_mechanisms = [str(item) for item in planner_guidance.get("primary_mechanisms", [])]
+    candidate_mechanisms = set(mechanism_counts)
+    missing_primary = [
+        mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
+    ]
+    warnings: list[str] = []
+    if proposal_budget > 0 and experiment_count == 0:
+        warnings.append("no experiments returned")
+    if experiment_count > 0 and not parsed_candidates:
+        warnings.append("experiments contained no parseable candidates")
+    if parsed_candidates and missing_primary and len(missing_primary) == len(primary_mechanisms):
+        warnings.append("no candidate used a primary mechanism from planner guidance")
+    if task_theory.bottleneck_class == "semantic_boundary_confusion":
+        has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
+        has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
+        if has_examples and not has_rewrite:
+            warnings.append("example experiment lacks a semantic-boundary rewrite control")
+    if role_counts.get("composed", 0) and not (role_counts.get("control", 0) or role_counts.get("ablation", 0)):
+        warnings.append("composed candidate lacks a control or ablation in the returned plan")
+    return {
+        "experiment_count": experiment_count,
+        "raw_candidate_count": sum(
+            len(item.get("candidates", []))
+            for item in raw_experiments
+            if isinstance(item, dict) and isinstance(item.get("candidates"), list)
+        ),
+        "parsed_candidate_count": len(parsed_candidates),
+        "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
+        "candidate_roles": dict(sorted(role_counts.items())),
+        "primary_mechanisms": primary_mechanisms,
+        "missing_primary_mechanisms": missing_primary,
+        "warnings": warnings,
+    }
+
+
+def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "label_field": diagnostics.get("label_field"),
+        "per_label": list(diagnostics.get("per_label") or [])[:16],
+        "weak_labels": list(diagnostics.get("weak_labels") or [])[:12],
+        "confusions": list(diagnostics.get("confusions") or [])[:8],
+        "overpredicted_labels": list(diagnostics.get("overpredicted_labels") or [])[:8],
+        "invalid_output_case_ids": list(diagnostics.get("invalid_output_case_ids") or [])[:8],
+        "runtime_reliability": diagnostics.get("runtime_reliability", {}),
+        "category_metrics": _compact_category_metrics(diagnostics.get("category_metrics") or {}),
+    }
+
+
+def _compact_category_metrics(metrics: dict[str, Any], *, limit: int = 16) -> dict[str, Any]:
+    rows = sorted(
+        (
+            (name, value)
+            for name, value in metrics.items()
+            if isinstance(value, dict)
+        ),
+        key=lambda item: (
+            float(item[1].get("pass_rate", item[1].get("mean_score", 1.0)) or 1.0),
+            str(item[0]),
+        ),
+    )
+    return {str(name): value for name, value in rows[:limit]}
+
+
+def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
+    return {
+        "case_ids": diagnosis.case_ids[:8],
+        "category": diagnosis.category,
+        "root_cause": diagnosis.root_cause[:500],
+        "target_names": diagnosis.target_names[:8],
+        "evidence": diagnosis.evidence[:4],
+    }
+
+
+def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
+    current_value = target.current_value
+    if isinstance(current_value, str):
+        compact_value: Any = current_value[:700]
+    elif isinstance(current_value, list):
+        compact_value = {"type": "list", "count": len(current_value), "sample": current_value[:2]}
+    elif isinstance(current_value, dict):
+        compact_value = {"type": "object", "keys": sorted(str(key) for key in current_value.keys())[:16]}
+    else:
+        compact_value = current_value
+    return {
+        "name": target.name,
+        "kind": target.kind,
+        "path": target.path,
+        "current_value": compact_value,
+        "allowed_ops": list(target.allowed_ops),
+        "description": target.description[:240],
+        "choices": list(target.choices),
+        "max_chars": target.max_chars,
+        "value_schema": dict(target.value_schema),
+    }
+
+
+def _compact_proposal_example_bank(
+    bank: ProposalExampleBank,
+    *,
+    target_labels: set[str],
+    max_examples: int,
+    max_per_label: int,
+) -> dict[str, Any]:
+    label_counts: Counter[str] = Counter()
+    selected = []
+    for example in sorted(
+        bank.examples,
+        key=lambda item: (
+            0 if item.label in target_labels else 1,
+            item.label or "",
+            item.case_id,
+        ),
+    ):
+        label = example.label or "unlabeled"
+        if label_counts[label] >= max_per_label:
+            continue
+        label_counts[label] += 1
+        selected.append(example)
+        if len(selected) >= max_examples:
+            break
+    return {
+        "usage": (
+            "proposal-safe train examples. For targeted_few_shot, select source_case_ids only; "
+            "Ratchet materializes inputs and expected outputs."
+        ),
+        "label_field": bank.label_field,
+        "example_count": len(bank.examples),
+        "included_example_count": len(selected),
+        "label_counts": dict(bank.label_counts),
+        "metadata_categories": _top_mapping(bank.metadata_categories, limit=20),
+        "examples": [example.to_dict() for example in selected],
+    }
+
+
+def _top_mapping(mapping: dict[str, Any], *, limit: int) -> dict[str, Any]:
+    return {
+        str(key): value
+        for key, value in sorted(
+            mapping.items(),
+            key=lambda item: (-_numeric_value(item[1]), str(item[0])),
+        )[:limit]
+    }
+
+
+def _numeric_value(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for row in history[-limit:]:
@@ -534,8 +985,12 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
                 "attempt": row.get("attempt"),
                 "parent_patch_hash": row.get("parent_patch_hash"),
                 "patch_hash": row.get("patch_hash"),
-                "transform_family": row.get("transform_family"),
-                "transform_instance": row.get("transform_instance"),
+            "transform_family": row.get("transform_family"),
+            "mechanism_class": row.get("mechanism_class"),
+            "experiment_id": row.get("experiment_id"),
+            "candidate_role": row.get("candidate_role"),
+            "comparison_group": row.get("comparison_group"),
+            "transform_instance": row.get("transform_instance"),
                 "transform_parameters": _value_summary(
                     (row.get("candidate") or {}).get("transform_parameters") or row.get("transform_parameters")
                 ),
@@ -648,11 +1103,28 @@ def _family_budget_quotas(
     return quotas
 
 
+def _targeted_few_shot_reference_error(candidate: CandidateProposal) -> str | None:
+    if candidate.transform_family != "targeted_few_shot":
+        return None
+    if candidate.patch.operations:
+        return "targeted_few_shot must use transform_parameters.source_case_ids, not inline add_few_shot values"
+    return None
+
+
 def _materialize_candidate_references(
     candidate: CandidateProposal,
     proposal_example_bank: ProposalExampleBank | None,
 ) -> tuple[CandidateProposal, dict[str, Any]]:
     if proposal_example_bank is None:
+        if candidate.transform_family == "targeted_few_shot":
+            return (
+                candidate,
+                {
+                    "type": "few_shot_reference_expansion",
+                    "materialized": False,
+                    "error": "targeted_few_shot requires a proposal example bank",
+                },
+            )
         return candidate, {}
     example_by_id = {example.case_id: example for example in proposal_example_bank.examples}
     operations: list[PatchOperation] = []
@@ -665,6 +1137,19 @@ def _materialize_candidate_references(
         if isinstance(raw_parameter_source_ids, list)
         else []
     )
+    if candidate.transform_family == "targeted_few_shot" and parameter_source_ids:
+        unknown_source_ids = [source_id for source_id in parameter_source_ids if source_id not in example_by_id]
+        if unknown_source_ids:
+            return (
+                candidate,
+                {
+                    "type": "few_shot_reference_expansion",
+                    "materialized": False,
+                    "source_case_ids": parameter_source_ids,
+                    "unknown_source_case_ids": unknown_source_ids,
+                    "error": "unknown few-shot source_case_ids: " + ", ".join(unknown_source_ids[:6]),
+                },
+            )
     candidate_operations = list(candidate.patch.operations)
     if candidate.transform_family == "targeted_few_shot" and not candidate_operations and parameter_source_ids:
         candidate_operations = [
@@ -727,6 +1212,10 @@ def _materialize_candidate_references(
             transform_family=candidate.transform_family,
             transform_instance=candidate.transform_instance,
             transform_parameters=transform_parameters,
+            mechanism_class=candidate.mechanism_class,
+            experiment_id=candidate.experiment_id,
+            candidate_role=candidate.candidate_role,
+            comparison_group=candidate.comparison_group,
             target_slice=candidate.target_slice,
             hypothesis=candidate.hypothesis,
             expected_effects=dict(candidate.expected_effects),
@@ -779,6 +1268,10 @@ def _few_shot_count_variants(candidate: CandidateProposal) -> list[CandidateProp
                     transform_family=candidate.transform_family,
                     transform_instance=candidate.transform_instance,
                     transform_parameters=dict(candidate.transform_parameters),
+                    mechanism_class=candidate.mechanism_class,
+                    experiment_id=candidate.experiment_id,
+                    candidate_role=candidate.candidate_role,
+                    comparison_group=candidate.comparison_group,
                     target_slice=candidate.target_slice,
                     hypothesis=candidate.hypothesis,
                     expected_effects=dict(candidate.expected_effects),
@@ -826,6 +1319,10 @@ def _annotated_few_shot_variant(
         transform_family=candidate.transform_family,
         transform_instance=f"{candidate.transform_instance or 'few_shot'}_{keep_count}_shot",
         transform_parameters=transform_parameters,
+        mechanism_class=candidate.mechanism_class,
+        experiment_id=candidate.experiment_id,
+        candidate_role="compression" if keep_count < original_count else candidate.candidate_role,
+        comparison_group=candidate.comparison_group,
         target_slice=candidate.target_slice,
         hypothesis=candidate.hypothesis,
         expected_effects={

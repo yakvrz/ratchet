@@ -63,6 +63,25 @@ def make_summary(labels: list[list[str]], *, mode: str = "dev") -> PatchSummary:
     )
 
 
+def proposal(
+    *,
+    transform_family: str,
+    patch: AgentPatch,
+    mechanism_class: str = "semantic_boundary_rewrite",
+    experiment_id: str = "exp_1",
+    candidate_role: str = "atomic",
+    **kwargs: object,
+) -> CandidateProposal:
+    return CandidateProposal(
+        transform_family=transform_family,
+        mechanism_class=mechanism_class,
+        experiment_id=experiment_id,
+        candidate_role=candidate_role,
+        patch=patch,
+        **kwargs,
+    )
+
+
 class TransformLibraryTests(unittest.TestCase):
     def test_registry_exposes_valid_transform_families(self) -> None:
         registry = transform_registry()
@@ -167,30 +186,53 @@ class TransformLibraryTests(unittest.TestCase):
                 )
             ]
         )
-        missing = CandidateProposal(
+        missing = proposal(
             transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
             patch=patch,
         )
-        valid = CandidateProposal(
+        missing_reference_only = proposal(
             transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
+            patch=AgentPatch.empty(),
+        )
+        valid = proposal(
+            transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
             transform_parameters={"source_case_ids": ["train-1"]},
-            patch=patch,
+            patch=AgentPatch(
+                operations=list(patch.operations),
+                metadata={"materialized_few_shot": True},
+            ),
         )
-        reference_only = CandidateProposal(
+        reference_only = proposal(
             transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
             transform_parameters={"source_case_ids": ["train-1"]},
             patch=AgentPatch.empty(),
         )
-        malformed = CandidateProposal(
+        malformed = proposal(
             transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
             transform_parameters={"source_case_ids": "train-1"},
             patch=AgentPatch.empty(),
         )
 
-        self.assertIn("requires transform_parameters.source_case_ids", validate_candidate_transform(missing, surface=surface) or "")
+        self.assertIn("not inline add_few_shot", validate_candidate_transform(missing, surface=surface) or "")
+        self.assertIn(
+            "requires transform_parameters.source_case_ids",
+            validate_candidate_transform(missing_reference_only, surface=surface) or "",
+        )
         self.assertIsNone(validate_candidate_transform(valid, surface=surface))
         self.assertIsNone(validate_candidate_transform(reference_only, surface=surface))
         self.assertIn("must be a non-empty string array", validate_candidate_transform(malformed, surface=surface) or "")
+        inline = proposal(
+            transform_family="targeted_few_shot",
+            mechanism_class="representative_examples",
+            transform_parameters={"source_case_ids": ["train-1"]},
+            patch=patch,
+        )
+        self.assertIn("not inline add_few_shot", validate_candidate_transform(inline, surface=surface) or "")
 
     def test_candidate_validation_rejects_unknown_and_incompatible_family(self) -> None:
         spec = AgentSpec(
@@ -199,7 +241,7 @@ class TransformLibraryTests(unittest.TestCase):
             instructions={"system_prompt": "Answer."},
         )
         surface = SurfaceGenerator().generate(spec, OptimizationObjective())
-        unknown = CandidateProposal(
+        unknown = proposal(
             transform_family="not_real",
             patch=AgentPatch(
                 operations=[
@@ -211,8 +253,9 @@ class TransformLibraryTests(unittest.TestCase):
                 ]
             ),
         )
-        incompatible = CandidateProposal(
+        incompatible = proposal(
             transform_family="model_substitution",
+            mechanism_class="model_capability_probe",
             patch=AgentPatch(
                 operations=[
                     PatchOperation(
@@ -271,7 +314,7 @@ class TransformLibraryTests(unittest.TestCase):
                 )
             ]
         )
-        rejected_candidate = CandidateProposal(
+        rejected_candidate = proposal(
             transform_family="prompt_rewrite",
             transform_instance="failed format tightening",
             patch=rejected_patch,
@@ -292,12 +335,12 @@ class TransformLibraryTests(unittest.TestCase):
                 }
             ],
         )
-        renamed_same_context = CandidateProposal(
+        renamed_same_context = proposal(
             transform_family="prompt_rewrite",
             transform_instance="same idea with a new name",
             patch=rejected_patch,
         )
-        distinct_mechanism = CandidateProposal(
+        distinct_mechanism = proposal(
             transform_family="prompt_rewrite",
             transform_instance="grounded answer mechanism",
             patch=AgentPatch(

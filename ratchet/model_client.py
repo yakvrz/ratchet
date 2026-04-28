@@ -79,6 +79,31 @@ def error_response_diagnostics(error: Exception, *, model: str, elapsed_s: float
     }
 
 
+def combine_response_diagnostics(
+    *,
+    component: str,
+    primary: dict[str, Any],
+    repair: dict[str, Any],
+) -> dict[str, Any]:
+    cost_values = [item.get("cost_usd") for item in (primary, repair)]
+    cost_usd = None
+    if any(value is not None for value in cost_values):
+        cost_usd = sum(float(value or 0.0) for value in cost_values)
+    return {
+        "component": component,
+        "model": repair.get("model") or primary.get("model"),
+        "elapsed_s": float(primary.get("elapsed_s") or 0.0) + float(repair.get("elapsed_s") or 0.0),
+        "input_tokens": int(primary.get("input_tokens") or 0) + int(repair.get("input_tokens") or 0),
+        "output_tokens": int(primary.get("output_tokens") or 0) + int(repair.get("output_tokens") or 0),
+        "total_tokens": int(primary.get("total_tokens") or 0) + int(repair.get("total_tokens") or 0),
+        "cost_usd": cost_usd,
+        "finish_reason": repair.get("finish_reason") or primary.get("finish_reason") or "",
+        "repair_attempted": True,
+        "primary_call": primary,
+        "repair_call": repair,
+    }
+
+
 def validate_optimizer_model_access(
     *,
     env_path: str,

@@ -7,7 +7,12 @@ from typing import Any
 from ratchet.evidence import build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
 from ratchet.io import extract_json_object
-from ratchet.model_client import ResponsesModelClient, error_response_diagnostics, response_diagnostics
+from ratchet.model_client import (
+    ResponsesModelClient,
+    combine_response_diagnostics,
+    error_response_diagnostics,
+    response_diagnostics,
+)
 from ratchet.results import PatchSummary
 from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
 
@@ -34,6 +39,7 @@ class FailureDiagnoser:
     ) -> tuple[list[FailureDiagnosis], str]:
         failed_examples = summary.failed_examples(limit=12, max_text_chars=900)
         if not failed_examples:
+            self.last_call_diagnostics = None
             return [], "No failing cases on the current eval set."
         diagnoses = self._llm_diagnoses(summary, surface, failed_examples, objective or OptimizationObjective())
         if not diagnoses:
@@ -68,51 +74,52 @@ class FailureDiagnoser:
             "editable_targets": [target.to_dict() for target in surface],
             "failed_examples": failed_examples,
         }
+        response_format = {
+            "format": {
+                "type": "json_schema",
+                "name": "ratchet_failure_diagnoses",
+                "strict": False,
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "diagnoses": {
+                            "type": "array",
+                            "maxItems": 4,
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "case_ids": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "category": {"type": "string"},
+                                    "root_cause": {"type": "string"},
+                                    "target_names": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                    },
+                                    "evidence": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "additionalProperties": True,
+                                        },
+                                    },
+                                },
+                                "required": ["case_ids", "category", "root_cause", "target_names", "evidence"],
+                            },
+                        }
+                    },
+                    "required": ["diagnoses"],
+                },
+            }
+        }
         try:
             started_at = time.perf_counter()
             response = self._client.create_response(
                 model=self.model,
                 reasoning={"effort": self.reasoning_effort},
-                text={
-                    "format": {
-                        "type": "json_schema",
-                        "name": "ratchet_failure_diagnoses",
-                        "strict": False,
-                        "schema": {
-                            "type": "object",
-                            "properties": {
-                                "diagnoses": {
-                                    "type": "array",
-                                    "maxItems": 4,
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "case_ids": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                            },
-                                            "category": {"type": "string"},
-                                            "root_cause": {"type": "string"},
-                                            "target_names": {
-                                                "type": "array",
-                                                "items": {"type": "string"},
-                                            },
-                                            "evidence": {
-                                                "type": "array",
-                                                "items": {
-                                                    "type": "object",
-                                                    "additionalProperties": True,
-                                                },
-                                            },
-                                        },
-                                        "required": ["case_ids", "category", "root_cause", "target_names", "evidence"],
-                                    },
-                                }
-                            },
-                            "required": ["diagnoses"],
-                        },
-                    }
-                },
+                text=response_format,
                 input=(
                     "You are Ratchet's failure diagnoser inside a task-agnostic agent optimizer. "
                     "Return strict JSON with exactly one top-level key, diagnoses, whose value is an array. "
@@ -151,7 +158,44 @@ class FailureDiagnoser:
         try:
             payload = extract_json_object(response.output_text)
         except Exception as exc:
-            raise OptimizerModelError(f"Optimizer diagnoser returned invalid JSON: {exc}") from exc
+            primary_diagnostics = self.last_call_diagnostics or {}
+            repair_started_at = time.perf_counter()
+            try:
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous diagnoser response was invalid JSON. "
+                        "Return only a valid JSON object matching the requested schema. "
+                        "Preserve the intended diagnoses where possible and do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:12000]}"
+                    ),
+                    max_output_tokens=5000,
+                )
+                repair_diagnostics = {
+                    **response_diagnostics(
+                        repair_response,
+                        model=self.model,
+                        elapsed_s=time.perf_counter() - repair_started_at,
+                    )
+                }
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="diagnoser",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                payload = extract_json_object(repair_response.output_text)
+            except Exception as repair_exc:
+                self.last_call_diagnostics = {
+                    **primary_diagnostics,
+                    "component": "diagnoser",
+                    "repair_attempted": True,
+                    "repair_error": str(repair_exc),
+                }
+                raise OptimizerModelError(
+                    f"Optimizer diagnoser returned invalid JSON: {exc}; repair failed: {repair_exc}"
+                ) from repair_exc
         case_ids = {str(item["case_id"]) for item in failed_examples}
         target_names = {target.name for target in surface}
         diagnoses: list[FailureDiagnosis] = []

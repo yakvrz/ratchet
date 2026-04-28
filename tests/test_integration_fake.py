@@ -31,9 +31,16 @@ def candidate(
     *,
     transform_instance: str | None = None,
     target_slice: str = "global",
+    mechanism_class: str | None = None,
+    experiment_id: str = "exp_1",
+    candidate_role: str = "atomic",
 ) -> dict[str, object]:
     return {
         "transform_family": family,
+        "mechanism_class": mechanism_class or _mechanism_for_family(family),
+        "experiment_id": experiment_id,
+        "candidate_role": candidate_role,
+        "comparison_group": experiment_id,
         "transform_instance": transform_instance or str(patch.get("rationale", family)),
         "target_slice": target_slice,
         "hypothesis": str(patch.get("rationale", "")),
@@ -41,6 +48,51 @@ def candidate(
         "evaluation_plan": "full_dev",
         "patch": patch,
     }
+
+
+def experiment_response(
+    candidates: list[dict[str, object]],
+    *,
+    experiment_id: str = "exp_1",
+    mechanism: str = "semantic_boundary_rewrite",
+) -> object:
+    return type(
+        "Response",
+        (),
+        {
+            "output_text": json.dumps(
+                {
+                    "experiments": [
+                        {
+                            "experiment_id": experiment_id,
+                            "mechanism": mechanism,
+                            "hypothesis": "Test a controlled optimization mechanism.",
+                            "target_slices": ["global"],
+                            "measurements": ["score_delta", "cost_delta", "latency_delta"],
+                            "candidate_roles": sorted(
+                                {str(candidate.get("candidate_role", "atomic")) for candidate in candidates}
+                            ),
+                            "candidates": candidates,
+                        }
+                    ]
+                }
+            )
+        },
+    )()
+
+
+def _mechanism_for_family(family: str) -> str:
+    if family == "targeted_few_shot":
+        return "representative_examples"
+    if family == "model_substitution":
+        return "model_capability_probe"
+    if family == "runtime_tuning":
+        return "runtime_defect_fix"
+    if family == "output_contract_tightening":
+        return "output_contract_fix"
+    if family in {"tool_policy_revision", "retrieval_tuning"}:
+        return "efficiency_probe"
+    return "semantic_boundary_rewrite"
 
 
 class InvalidJsonClient:
@@ -114,7 +166,9 @@ class FakePatchClient:
                 ),
             ]
 
-        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+        if '"mode": "cost"' in prompt:
+            return experiment_response(candidates, mechanism="efficiency_probe")
+        return experiment_response(candidates)
 
 
 class ShapeInvalidPatchClient:
@@ -131,7 +185,7 @@ class ShapeInvalidPatchClient:
                 "tool_policy_revision",
             )
         ]
-        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+        return experiment_response(candidates, mechanism="efficiency_probe")
 
 
 BRANCH_SPEC = AgentSpec(
@@ -285,7 +339,7 @@ class BranchingPatchClient:
             ]
         else:
             candidates = []
-        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+        return experiment_response(candidates)
 
 
 class RetryPatchClient:
@@ -330,7 +384,7 @@ class RetryPatchClient:
                     transform_instance="distinct retry prompt rewrite",
                 )
             ]
-        return type("Response", (), {"output_text": json.dumps({"candidates": candidates})})()
+        return experiment_response(candidates)
 
 
 class FakeAdapterIntegrationTests(unittest.TestCase):

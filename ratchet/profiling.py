@@ -145,6 +145,16 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
         "cache_events": {
             "case_cache_hits": sum(1 for row in progress_rows if row.get("event") == "case_cache_hit"),
             "case_completed": sum(1 for row in progress_rows if row.get("event") == "case_completed"),
+            "diagnosis_cache_hits": sum(
+                1
+                for row in progress_rows
+                if row.get("event") == "diagnosis_completed" and row.get("cached")
+            ),
+            "task_theory_cache_hits": sum(
+                1
+                for row in progress_rows
+                if row.get("event") == "task_theory_ready" and row.get("cached")
+            ),
         },
         "cache_hit_rate": _cache_hit_rate(progress_rows),
     }
