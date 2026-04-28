@@ -1,0 +1,20 @@
+{
+  "task_id": "banking77_sanity",
+  "mechanisms_of_interest": [
+    "runtime_defect_fix",
+    "output_contract_fix",
+    "semantic_boundary_rewrite",
+    "representative_examples",
+    "contrastive_examples",
+    "model_capability_probe"
+  ],
+  "pivotal_mechanisms": [
+    "runtime_defect_fix",
+    "semantic_boundary_rewrite",
+    "model_capability_probe"
+  ],
+  "min_valid_implementation_rate": 0.6,
+  "frontier_quality": {
+    "min_holdout_score_delta": 0.0
+  }
+}

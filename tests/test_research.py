@@ -4,7 +4,7 @@ import unittest
 
 from ratchet.errors import OptimizerModelError
 from ratchet.experiments import ExperimentIntent, ResearchState
-from ratchet.optimizer import CandidateEvaluationState, _research_evaluate_action
+from ratchet.optimizer import CandidateEvaluationState, _measurement_action
 from ratchet.research import MeasurementSelector, ResearchPlanner
 from ratchet.transforms import CandidateProposal, TransformContextKey
 from ratchet.types import AgentPatch, PatchOperation
@@ -117,7 +117,6 @@ class ResearchRoleTests(unittest.TestCase):
                 "hypothesis": "Test runtime.",
                 "allowed_families": ["all"],
             },
-            fallback_id="fallback",
         )
 
         self.assertEqual(intent.allowed_families, [])
@@ -129,11 +128,10 @@ class ResearchRoleTests(unittest.TestCase):
                     "hypothesis": "Test runtime.",
                     "candidate_roles": ["generator"],
                 },
-                fallback_id="fallback",
             )
 
     def test_late_full_dev_action_exposes_one_hard_selection_slot(self) -> None:
-        action = _research_evaluate_action(
+        action = _measurement_action(
             stage_name="full_dev",
             states=[_state(1), _state(2), _state(3)],
             dev_evaluations_used=4,

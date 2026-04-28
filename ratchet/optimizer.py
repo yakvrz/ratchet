@@ -40,8 +40,8 @@ from ratchet.profiling import (
     quality_cost_tradeoffs,
     runtime_reliability_diagnostics,
 )
-from ratchet.proposals import ProposalEngine
-from ratchet.research import MeasurementSelector, ResearchAction, ResearchPlanner
+from ratchet.proposals import CandidateImplementer
+from ratchet.research import MeasurementSelector, MeasurementAction, ResearchPlanner
 from ratchet.reporting import RatchetReporter, build_outcome_analysis
 from ratchet.results import (
     PatchSummary,
@@ -154,6 +154,14 @@ class RatchetOptimizer:
         objective: OptimizationObjective | None = None,
         optimizer_model: str = "gpt-5.4",
         optimizer_reasoning: str = "medium",
+        diagnoser_model: str | None = None,
+        diagnoser_reasoning: str | None = None,
+        research_planner_model: str | None = None,
+        research_planner_reasoning: str | None = None,
+        candidate_implementer_model: str | None = None,
+        candidate_implementer_reasoning: str | None = None,
+        measurement_selector_model: str | None = None,
+        measurement_selector_reasoning: str | None = None,
         samples_per_case: int = 1,
         case_concurrency: int = 1,
         stage_case_concurrency: int | None = None,
@@ -174,25 +182,37 @@ class RatchetOptimizer:
         self.objective = objective or OptimizationObjective()
         self.agent_spec = checked_agent_spec(adapter)
         self.surface_generator = SurfaceGenerator()
+        self.optimizer_role_models = {
+            "diagnoser": diagnoser_model or optimizer_model,
+            "research_planner": research_planner_model or optimizer_model,
+            "candidate_implementer": candidate_implementer_model or optimizer_model,
+            "measurement_selector": measurement_selector_model or optimizer_model,
+        }
+        self.optimizer_role_reasoning = {
+            "diagnoser": diagnoser_reasoning or optimizer_reasoning,
+            "research_planner": research_planner_reasoning or optimizer_reasoning,
+            "candidate_implementer": candidate_implementer_reasoning or optimizer_reasoning,
+            "measurement_selector": measurement_selector_reasoning or optimizer_reasoning,
+        }
         self.diagnoser = FailureDiagnoser(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["diagnoser"],
+            reasoning_effort=self.optimizer_role_reasoning["diagnoser"],
         )
-        self.proposer = ProposalEngine(
+        self.candidate_implementer = CandidateImplementer(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["candidate_implementer"],
+            reasoning_effort=self.optimizer_role_reasoning["candidate_implementer"],
         )
         self.research_planner = ResearchPlanner(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["research_planner"],
+            reasoning_effort=self.optimizer_role_reasoning["research_planner"],
         )
         self.measurement_selector = MeasurementSelector(
             env_path=env_path,
-            model=optimizer_model,
-            reasoning_effort=optimizer_reasoning,
+            model=self.optimizer_role_models["measurement_selector"],
+            reasoning_effort=self.optimizer_role_reasoning["measurement_selector"],
         )
         if samples_per_case <= 0:
             raise ValueError("samples_per_case must be positive.")
@@ -1019,10 +1039,10 @@ class RatchetOptimizer:
             frontier_recommendation=frontier_recommendation,
             optimizer_call_diagnostics=self.optimizer_call_diagnostics,
             quality_cost_tradeoffs=cost_tradeoffs,
-            research_decisions=[
+            measurement_decisions=[
                 row
                 for row in decision_log
-                if row.get("type") in {"research_decision", "research_plan", "measurement_decision"}
+                if row.get("type") in {"research_plan", "measurement_decision"}
             ],
             ideation_metrics=ideation_metrics,
             outcome_analysis=outcome_analysis,
@@ -1209,7 +1229,7 @@ class RatchetOptimizer:
     ) -> tuple[set[str], dict[str, str]]:
         if not variants:
             return set(), {}
-        action = ResearchAction(
+        action = MeasurementAction(
             action_id=f"simplify_{parent.patch_hash}",
             action_type="simplify_candidate",
             stage="simplification",
@@ -1410,7 +1430,7 @@ class RatchetOptimizer:
             proposal_budget=proposal_budget,
             active_families=search_hypothesis.active_families,
         )
-        proposals, proposal_analysis = self.proposer.propose(
+        proposals, proposal_analysis = self.candidate_implementer.propose(
             current_dev,
             surface,
             objective=self.objective,
@@ -1427,7 +1447,7 @@ class RatchetOptimizer:
             experiment_intents=experiment_intents or [],
             affordances=affordances or [],
         )
-        if self.proposer.last_call_diagnostics is not None:
+        if self.candidate_implementer.last_call_diagnostics is not None:
             self.optimizer_call_diagnostics.append(
                 {
                     "iteration": iteration,
@@ -1435,7 +1455,7 @@ class RatchetOptimizer:
                     "proposal_retry": proposal_retry,
                     "parent_rank": parent_index + 1,
                     "parent_patch_hash": current_dev.patch_hash,
-                    **self.proposer.last_call_diagnostics,
+                    **self.candidate_implementer.last_call_diagnostics,
                 }
             )
         self._emit_progress(
@@ -1444,12 +1464,12 @@ class RatchetOptimizer:
             attempt=attempt,
             proposal_retry=proposal_retry,
             parent_rank=parent_index + 1,
-            raw_count=self.proposer.last_stats.raw_count,
-            valid_count=self.proposer.last_stats.valid_count,
-            returned_count=self.proposer.last_stats.returned_count,
-            invalid_count=self.proposer.last_stats.invalid_count,
-            duplicate_count=self.proposer.last_stats.duplicate_count,
-            call_diagnostics=self.proposer.last_call_diagnostics or {},
+            raw_count=self.candidate_implementer.last_stats.raw_count,
+            valid_count=self.candidate_implementer.last_stats.valid_count,
+            returned_count=self.candidate_implementer.last_stats.returned_count,
+            invalid_count=self.candidate_implementer.last_stats.invalid_count,
+            duplicate_count=self.candidate_implementer.last_stats.duplicate_count,
+            call_diagnostics=self.candidate_implementer.last_call_diagnostics or {},
         )
         decision_log.append(
             {
@@ -1465,16 +1485,16 @@ class RatchetOptimizer:
                 "active_frontier": [summary.patch_hash for summary in parent_summaries],
                 "diagnosis_analysis": diagnosis_analysis,
                 "proposal_analysis": proposal_analysis,
-                "proposal_stats": self.proposer.last_stats.to_dict(),
+                "proposal_stats": self.candidate_implementer.last_stats.to_dict(),
                 "search_hypothesis": search_hypothesis.to_dict(),
                 "diagnoses": [diagnosis.to_dict() for diagnosis in diagnoses],
                 "diagnosis": target_diagnosis.to_dict() if target_diagnosis else None,
                 "proposal_hashes": [patch_hash(proposal.patch) for proposal in proposals],
-                "candidate_proposals": self.proposer.last_candidate_rows,
-                "invalid_candidate_proposals": self.proposer.last_invalid_candidate_rows,
+                "candidate_proposals": self.candidate_implementer.last_candidate_rows,
+                "invalid_candidate_proposals": self.candidate_implementer.last_invalid_candidate_rows,
             }
         )
-        for invalid_row in self.proposer.last_invalid_candidate_rows:
+        for invalid_row in self.candidate_implementer.last_invalid_candidate_rows:
             proposal_row = {
                 "type": "candidate_proposal",
                 "iteration": iteration,
@@ -1493,7 +1513,7 @@ class RatchetOptimizer:
 
         materialization_by_proposal_hash = {
             str(row.get("proposal_patch_hash")): dict(row.get("materialization") or {})
-            for row in self.proposer.last_candidate_rows
+            for row in self.candidate_implementer.last_candidate_rows
             if row.get("proposal_patch_hash")
         }
         accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
@@ -1856,7 +1876,7 @@ class RatchetOptimizer:
         attempt: int,
         parent_index: int,
     ) -> list[CandidateEvaluationState]:
-        action = _research_evaluate_action(
+        action = _measurement_action(
             stage_name=stage_name,
             states=states,
             dev_evaluations_used=dev_evaluations_used,
@@ -1955,7 +1975,7 @@ class RatchetOptimizer:
     def _validate_research_candidate_groups(
         self,
         decision: Any,
-        action: ResearchAction,
+        action: MeasurementAction,
         states: list[CandidateEvaluationState],
     ) -> None:
         if action.max_select_per_group <= 0:
@@ -1974,7 +1994,7 @@ class RatchetOptimizer:
         }
         if over:
             raise OptimizerModelError(
-                "Research controller exceeded max_select_per_group "
+                "Measurement selector exceeded max_select_per_group "
                 f"{action.max_select_per_group}: {over}"
             )
 
@@ -2336,7 +2356,7 @@ class RatchetOptimizer:
         frontier_recommendation: dict[str, Any],
         optimizer_call_diagnostics: list[dict[str, Any]],
         quality_cost_tradeoffs: list[dict[str, Any]],
-        research_decisions: list[dict[str, Any]],
+        measurement_decisions: list[dict[str, Any]],
         ideation_metrics: dict[str, Any],
     ) -> dict[str, Any]:
         ended_at = datetime.now(timezone.utc)
@@ -2368,7 +2388,9 @@ class RatchetOptimizer:
             "simplification_results": simplification_results,
             "frontier_recommendation": frontier_recommendation,
             "optimizer_call_diagnostics": optimizer_call_diagnostics,
-            "research_decisions": research_decisions,
+            "optimizer_role_models": self.optimizer_role_models,
+            "optimizer_role_reasoning": self.optimizer_role_reasoning,
+            "measurement_decisions": measurement_decisions,
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "ideation_metrics": ideation_metrics,
             "samples_per_case": self.samples_per_case,
@@ -2453,13 +2475,13 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
     return None
 
 
-def _research_evaluate_action(
+def _measurement_action(
     *,
     stage_name: str,
     states: list[CandidateEvaluationState],
     dev_evaluations_used: int,
     dev_budget: int | None,
-) -> ResearchAction:
+) -> MeasurementAction:
     if stage_name == "full_dev":
         late_budget = dev_budget is not None and dev_budget > 0 and dev_evaluations_used >= dev_budget / 2
         group_cap = (
@@ -2490,7 +2512,7 @@ def _research_evaluate_action(
         group_count = len({_candidate_research_group(state) for state in states})
         max_select = len(states)
         rationale = f"Choose candidates for {stage_name} measurement."
-    return ResearchAction(
+    return MeasurementAction(
         action_id=f"evaluate_{stage_name}",
         action_type="evaluate_candidates",
         stage=stage_name,

@@ -29,4 +29,12 @@ Run the short optimizer sanity check:
 python3 -m ratchet optimize --config samples/clinc150_intent_agent/ratchet.sanity.toml
 ```
 
+Assess ideation quality from a completed run:
+
+```bash
+python3 -m ratchet assess-ideation \
+  --run-dir samples/clinc150_intent_agent/results/sanity \
+  --spec samples/clinc150_intent_agent/ideation_assessment.json
+```
+
 This is not a full CLINC150 benchmark. It is meant to inspect Ratchet behavior on a second intent-classification dataset: whether it diagnoses weak labels, proposes distinct transform families, accepts dev improvements cautiously, and validates finalists on holdout.

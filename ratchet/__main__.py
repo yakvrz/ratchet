@@ -11,6 +11,7 @@ from ratchet.adapters import adapter_fingerprint, load_adapter
 from ratchet.config import RatchetConfigError, RatchetRunConfig, ensure_search_path, resolve_run_config
 from ratchet.eval_health import EvalHealthReport, render_eval_health_markdown, run_eval_health_check
 from ratchet.errors import OptimizerModelError
+from ratchet.ideation_benchmark import write_ideation_assessment
 from ratchet.io import file_sha256, load_eval_cases
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.partial import write_partial_run_outputs
@@ -39,6 +40,14 @@ def run_optimizer(
     allowed_edits: list[str] | None = None,
     optimizer_model: str | None = "gpt-5.4",
     optimizer_reasoning: str | None = "medium",
+    diagnoser_model: str | None = None,
+    diagnoser_reasoning: str | None = None,
+    research_planner_model: str | None = None,
+    research_planner_reasoning: str | None = None,
+    candidate_implementer_model: str | None = None,
+    candidate_implementer_reasoning: str | None = None,
+    measurement_selector_model: str | None = None,
+    measurement_selector_reasoning: str | None = None,
     samples_per_case: int | None = 1,
     case_concurrency: int | None = 1,
     stage_case_concurrency: int | None = None,
@@ -64,6 +73,14 @@ def run_optimizer(
         allowed_edits=allowed_edits,
         optimizer_model=optimizer_model,
         optimizer_reasoning=optimizer_reasoning,
+        diagnoser_model=diagnoser_model,
+        diagnoser_reasoning=diagnoser_reasoning,
+        research_planner_model=research_planner_model,
+        research_planner_reasoning=research_planner_reasoning,
+        candidate_implementer_model=candidate_implementer_model,
+        candidate_implementer_reasoning=candidate_implementer_reasoning,
+        measurement_selector_model=measurement_selector_model,
+        measurement_selector_reasoning=measurement_selector_reasoning,
         samples_per_case=samples_per_case,
         case_concurrency=case_concurrency,
         stage_case_concurrency=stage_case_concurrency,
@@ -85,6 +102,14 @@ def run_optimizer(
         objective=config.objective,
         optimizer_model=config.optimizer_model,
         optimizer_reasoning=config.optimizer_reasoning,
+        diagnoser_model=config.diagnoser_model,
+        diagnoser_reasoning=config.diagnoser_reasoning,
+        research_planner_model=config.research_planner_model,
+        research_planner_reasoning=config.research_planner_reasoning,
+        candidate_implementer_model=config.candidate_implementer_model,
+        candidate_implementer_reasoning=config.candidate_implementer_reasoning,
+        measurement_selector_model=config.measurement_selector_model,
+        measurement_selector_reasoning=config.measurement_selector_reasoning,
         samples_per_case=config.samples_per_case,
         case_concurrency=config.case_concurrency,
         stage_case_concurrency=config.stage_case_concurrency,
@@ -249,14 +274,14 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         families = _join_limited(row.get("active_families") or [], limit=5)
         retry = " retry" if row.get("proposal_retry") else ""
         return (
-            "PROPOSE",
+            "IMPLEMENT",
             f"started{retry} parent={row.get('parent_rank')} budget={row.get('proposal_budget')} "
             f"families={families or 'none'}",
         )
     if event == "proposal_completed":
         diagnostics = row.get("call_diagnostics") or {}
         return (
-            "PROPOSE",
+            "IMPLEMENT",
             " ".join(
                 part
                 for part in (
@@ -629,6 +654,14 @@ def _apply_run_overrides(
         allowed_edits=_split_csv(getattr(args, "allowed_edits", None)),
         optimizer_model=getattr(args, "optimizer_model", None),
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
+        diagnoser_model=getattr(args, "diagnoser_model", None),
+        diagnoser_reasoning=getattr(args, "diagnoser_reasoning", None),
+        research_planner_model=getattr(args, "research_planner_model", None),
+        research_planner_reasoning=getattr(args, "research_planner_reasoning", None),
+        candidate_implementer_model=getattr(args, "candidate_implementer_model", None),
+        candidate_implementer_reasoning=getattr(args, "candidate_implementer_reasoning", None),
+        measurement_selector_model=getattr(args, "measurement_selector_model", None),
+        measurement_selector_reasoning=getattr(args, "measurement_selector_reasoning", None),
         samples_per_case=getattr(args, "samples_per_case", None),
         case_concurrency=getattr(args, "case_concurrency", None),
         stage_case_concurrency=getattr(args, "stage_case_concurrency", None),
@@ -658,8 +691,16 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--mode", choices=["correctness", "cost", "latency"], help="Primary optimization objective")
     parser.add_argument("--allowed-models", help="Comma-separated model allowlist for change_model patches")
     parser.add_argument("--allowed-edits", help="Comma-separated edit kinds to allow")
-    parser.add_argument("--optimizer-model", help="Model used by Ratchet's diagnosis/proposal loop")
-    parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's diagnosis/proposal loop")
+    parser.add_argument("--optimizer-model", help="Model used by Ratchet's research loop")
+    parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's research loop")
+    parser.add_argument("--diagnoser-model", help="Override model for Ratchet's failure diagnoser")
+    parser.add_argument("--diagnoser-reasoning", help="Override reasoning effort for Ratchet's failure diagnoser")
+    parser.add_argument("--research-planner-model", help="Override model for Ratchet's research planner")
+    parser.add_argument("--research-planner-reasoning", help="Override reasoning effort for Ratchet's research planner")
+    parser.add_argument("--candidate-implementer-model", help="Override model for Ratchet's candidate implementer")
+    parser.add_argument("--candidate-implementer-reasoning", help="Override reasoning effort for Ratchet's candidate implementer")
+    parser.add_argument("--measurement-selector-model", help="Override model for Ratchet's measurement selector")
+    parser.add_argument("--measurement-selector-reasoning", help="Override reasoning effort for Ratchet's measurement selector")
     parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per patch/case")
     parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
     parser.add_argument(
@@ -712,6 +753,12 @@ def add_eval_health_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_ideation_assessment_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--run-dir", required=True, help="Completed Ratchet run output directory")
+    parser.add_argument("--spec", help="Optional ideation assessment spec JSON")
+    parser.add_argument("--out", help="Output JSON path; defaults to RUN_DIR/ideation_assessment.json")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Ratchet: eval-backed agent optimizer")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -732,6 +779,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_health_parser = subparsers.add_parser("eval-health", help="Check eval-set and grader health before optimization.")
     add_eval_health_arguments(eval_health_parser)
+
+    assess_parser = subparsers.add_parser(
+        "assess-ideation",
+        help="Assess optimizer ideation quality from an existing run directory.",
+    )
+    add_ideation_assessment_arguments(assess_parser)
 
     return parser
 
@@ -766,6 +819,22 @@ def main(argv: list[str] | None = None) -> int:
             )
             if report.fatal or (bool(getattr(args, "strict", False)) and report.warning):
                 return 5
+            return 0
+
+        if args.command == "assess-ideation":
+            assessment = write_ideation_assessment(
+                args.run_dir,
+                spec_path=getattr(args, "spec", None),
+                out_path=getattr(args, "out", None),
+            )
+            summary = assessment.get("summary") or {}
+            print(
+                "Ideation assessment: "
+                f"{summary.get('passed_checks')}/{summary.get('total_checks')} checks passed; "
+                f"valid_impl_rate={float(summary.get('valid_implementation_rate') or 0.0):.3f}; "
+                f"selected_holdout_delta={float(summary.get('selected_holdout_score_delta') or 0.0):+.3f}"
+            )
+            print(f"JSON: {getattr(args, 'out', None) or Path(args.run_dir) / 'ideation_assessment.json'}")
             return 0
 
         raise ValueError(f"Unsupported command: {args.command}")

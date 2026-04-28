@@ -106,6 +106,14 @@ Helper utilities:
 - `holdout_budget`
 - `optimizer_model`
 - `optimizer_reasoning`
+- `diagnoser_model`
+- `diagnoser_reasoning`
+- `research_planner_model`
+- `research_planner_reasoning`
+- `candidate_implementer_model`
+- `candidate_implementer_reasoning`
+- `measurement_selector_model`
+- `measurement_selector_reasoning`
 - `samples_per_case`
 - `max_case_retries`
 - `case_timeout_s`
@@ -160,7 +168,7 @@ Each run writes:
 
 - `case_results.jsonl`: resumable per-case cache keyed by patch, case digest, eval digest, adapter fingerprint, objective, and baseline `AgentSpec`
 - `patch_metrics.json`: true baseline, best dev patch, selected holdout patch, accepted dev patches, holdout validations, typed generated surface, and Pareto frontier
-- `decision_log.json`: diagnosis/proposal iterations, holdout validation, and final selection
+- `decision_log.json`: diagnosis, planning, implementation, measurement, holdout validation, and final selection
 - `outcome_analysis.json`: explicit reason for promotion or baseline retention
 - `diagnoses.jsonl`: structured diagnosis buckets per iteration
 - `proposals.jsonl`: proposed patches with acceptance/rejection outcomes
@@ -181,4 +189,4 @@ Each run writes:
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
-Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` for the diagnosis/proposal loop; the agent may move to allowed models through generated `change_model` patches.
+Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through generated `change_model` patches.

@@ -66,6 +66,7 @@ def experiment_response(
                     "experiments": [
                         {
                             "experiment_id": experiment_id,
+                            "mechanism_class": mechanism,
                             "mechanism": mechanism,
                             "hypothesis": "Test a controlled optimization mechanism.",
                             "target_slices": ["global"],
@@ -668,7 +669,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertFalse(selected["promoted"])
             self.assertEqual(selected["patch"]["operations"], [])
 
-    def test_llm_proposer_drives_optimization(self) -> None:
+    def test_candidate_implementer_drives_optimization(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             evals_path = self.write_evals(root, significance_cases=True)
@@ -684,7 +685,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 progress_callback=progress_rows.append,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = FakePatchClient()
+            optimizer.candidate_implementer._client = FakePatchClient()
             result = optimizer.run(cases)
 
             self.assertTrue(result.promoted)
@@ -818,7 +819,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=0,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = FakePatchClient()
+            optimizer.candidate_implementer._client = FakePatchClient()
             optimizer.run(cases)
             metrics = json.loads((out_dir / "patch_metrics.json").read_text())
             decision_log = json.loads((out_dir / "decision_log.json").read_text())
@@ -884,7 +885,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=2,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = InvalidJsonClient()
+            optimizer.candidate_implementer._client = InvalidJsonClient()
             with self.assertRaises(OptimizerModelError):
                 optimizer.run(cases)
 
@@ -902,7 +903,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=2,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = ShapeInvalidPatchClient()
+            optimizer.candidate_implementer._client = ShapeInvalidPatchClient()
             result = optimizer.run(cases)
 
             self.assertFalse(result.promoted)
@@ -932,7 +933,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 objective=OptimizationObjective(mode="correctness"),
             )
             correctness.diagnoser._client = FakeDiagnosisClient()
-            correctness.proposer._client = FakePatchClient()
+            correctness.candidate_implementer._client = FakePatchClient()
             correctness_result = correctness.run(cases)
             cost = RatchetOptimizer(
                 adapter=adapter,
@@ -942,7 +943,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 objective=OptimizationObjective(mode="cost"),
             )
             cost.diagnoser._client = FakeDiagnosisClient()
-            cost.proposer._client = FakePatchClient()
+            cost.candidate_implementer._client = FakePatchClient()
             cost_result = cost.run(cases)
             self.assertNotEqual(correctness_result.selected_patch_hash, cost_result.selected_patch_hash)
 
@@ -968,7 +969,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=2,
             )
             optimizer.diagnoser._client = BranchingDiagnosisClient()
-            optimizer.proposer._client = patch_client
+            optimizer.candidate_implementer._client = patch_client
             result = optimizer.run(cases)
             decision_log = json.loads((root / "run" / "decision_log.json").read_text())
 
@@ -1017,7 +1018,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=0,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = patch_client
+            optimizer.candidate_implementer._client = patch_client
             result = optimizer.run(cases)
 
             retry_evaluations = [
@@ -1108,7 +1109,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=0,
             )
             optimizer.diagnoser._client = BranchingDiagnosisClient()
-            optimizer.proposer._client = BatchCompetitionPatchClient()
+            optimizer.candidate_implementer._client = BatchCompetitionPatchClient()
             result = optimizer.run(cases)
 
             proposal_rows = [
@@ -1118,13 +1119,13 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             ]
             self.assertEqual(len(proposal_rows), 2)
             full_dev_rows = [row for row in proposal_rows if row.get("full_dev_evaluated")]
-            research_decisions = [
+            measurement_decisions = [
                 row for row in result.decision_log if row.get("type") == "measurement_decision"
             ]
             self.assertEqual(len(full_dev_rows), 2)
-            self.assertTrue(research_decisions)
+            self.assertTrue(measurement_decisions)
             self.assertTrue(
-                any(row.get("stage") == "full_dev" for row in research_decisions)
+                any(row.get("stage") == "full_dev" for row in measurement_decisions)
             )
 
     def test_evaluate_patch_runs_cases_with_bounded_concurrency(self) -> None:
@@ -1209,7 +1210,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 holdout_budget=0,
             )
             optimizer.diagnoser._client = FakeDiagnosisClient()
-            optimizer.proposer._client = patch_client
+            optimizer.candidate_implementer._client = patch_client
             result = optimizer.run(cases)
 
             self.assertEqual(len(patch_client.history_lengths), 1)

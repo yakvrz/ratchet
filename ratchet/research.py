@@ -87,7 +87,7 @@ class ResearchPlanner:
             if not isinstance(raw_intent, dict):
                 raise OptimizerModelError("Research planner intent entry is not an object")
             try:
-                intent = ExperimentIntent.from_dict(raw_intent, fallback_id=f"intent_{index}")
+                intent = ExperimentIntent.from_dict(raw_intent)
             except Exception as exc:
                 raise OptimizerModelError(f"Research planner returned malformed experiment intent: {exc}") from exc
             unknown_affordances = sorted(set(intent.affordance_ids) - affordance_ids)
@@ -325,7 +325,7 @@ def _validate_measurement_decision(
 
 
 @dataclass(frozen=True)
-class ResearchAction:
+class MeasurementAction:
     action_id: str
     action_type: str
     stage: str = ""

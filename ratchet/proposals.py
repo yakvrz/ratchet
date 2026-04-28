@@ -35,7 +35,7 @@ from ratchet.validation import PatchValidator
 MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
-    "You are Ratchet's task-agnostic patch proposer. Return JSON with experiments[] and optional "
+    "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
     "target_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
     "research questions, mechanisms, target slices, controls, and measurements. Treat task_theory.experiment_opportunities "
     "as supporting evidence only; they are not patch recipes. Each candidate must name an active "
@@ -84,7 +84,7 @@ class ProposalStats:
         }
 
 
-class ProposalEngine:
+class CandidateImplementer:
     def __init__(
         self,
         *,
@@ -159,7 +159,7 @@ class ProposalEngine:
             affordances=active_affordances,
         )
         proposals.extend(llm_proposals)
-        analysis_parts.append("LLM proposer returned transform candidate proposals.")
+        analysis_parts.append("Candidate implementer returned transform candidate proposals.")
         invalid_reasons.update(self._last_parse_invalid_reasons)
         validator = PatchValidator()
         valid: list[CandidateProposal] = []
@@ -319,9 +319,9 @@ class ProposalEngine:
             call_diagnostics=self.last_call_diagnostics,
         )
         if valid:
-            analysis_parts.append("Validated LLM transform candidate proposals.")
+            analysis_parts.append("Validated transform candidate implementations.")
         else:
-            analysis_parts.append("No valid LLM transform candidate proposals.")
+            analysis_parts.append("No valid transform candidate implementations.")
         analysis_parts.append(
             "Proposal counts: "
             f"raw={self.last_stats.raw_count}, valid={self.last_stats.valid_count}, "
@@ -507,7 +507,7 @@ class ProposalEngine:
                 max_output_tokens=PROPOSER_MAX_OUTPUT_TOKENS,
             )
             self.last_call_diagnostics = {
-                "component": "proposer",
+                "component": "candidate_implementer",
                 "prompt_chars": len(prompt_input),
                 "prompt_approx_tokens": approximate_prompt_tokens(prompt_input),
                 **response_diagnostics(
@@ -518,7 +518,7 @@ class ProposalEngine:
             }
         except Exception as exc:
             self.last_call_diagnostics = {
-                "component": "proposer",
+                "component": "candidate_implementer",
                 "prompt_chars": len(prompt_input) if "prompt_input" in locals() else None,
                 "prompt_approx_tokens": approximate_prompt_tokens(prompt_input) if "prompt_input" in locals() else None,
                 **error_response_diagnostics(
@@ -527,7 +527,7 @@ class ProposalEngine:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            raise OptimizerModelError(f"Optimizer proposer failed: {exc}") from exc
+            raise OptimizerModelError(f"Candidate implementer failed: {exc}") from exc
         self._last_raw_output_text = response.output_text
         self._last_raw_candidate_count = 0
         self._last_parse_invalid_reasons = Counter()
@@ -557,7 +557,7 @@ class ProposalEngine:
                         }
                     },
                     input=(
-                        "The previous proposer response was invalid JSON. "
+                        "The previous candidate-implementer response was invalid JSON. "
                         "Return only a valid JSON object with target_considerations and experiments. "
                         "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
@@ -570,7 +570,7 @@ class ProposalEngine:
                     elapsed_s=time.perf_counter() - repair_started_at,
                 )
                 self.last_call_diagnostics = combine_response_diagnostics(
-                    component="proposer",
+                    component="candidate_implementer",
                     primary=primary_diagnostics,
                     repair=repair_diagnostics,
                 )
@@ -579,12 +579,12 @@ class ProposalEngine:
             except Exception as repair_exc:
                 self.last_call_diagnostics = {
                     **primary_diagnostics,
-                    "component": "proposer",
+                    "component": "candidate_implementer",
                     "repair_attempted": True,
                     "repair_error": str(repair_exc),
                 }
                 raise OptimizerModelError(
-                    f"Optimizer proposer returned invalid JSON: {exc}; repair failed: {repair_exc}"
+                    f"Candidate implementer returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
         candidates: list[CandidateProposal] = []
         intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
@@ -607,7 +607,7 @@ class ProposalEngine:
                 )
                 continue
             try:
-                experiment = ExperimentSpec.from_dict(raw_experiment, fallback_id=f"exp_{experiment_index}")
+                experiment = ExperimentSpec.from_dict(raw_experiment)
             except Exception as exc:
                 reason = f"malformed experiment: {exc}"
                 self._last_parse_invalid_reasons[reason] += 1
@@ -914,19 +914,19 @@ def _audit_experiment_plan(
     candidate_mechanisms = set(mechanism_counts)
     requested_intent_ids = {intent.intent_id for intent in experiment_intents}
     returned_intent_ids = {
-        str(item.get("experiment_id") or item.get("id") or "")
+        str(item.get("experiment_id") or "")
         for item in raw_experiments
         if isinstance(item, dict)
     }
     intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
     mechanism_mismatch_ids = sorted(
-        str(item.get("experiment_id") or item.get("id") or "")
+        str(item.get("experiment_id") or "")
         for item in raw_experiments
         if isinstance(item, dict)
-        and str(item.get("experiment_id") or item.get("id") or "") in intent_by_id
-        and str(item.get("mechanism_class") or item.get("mechanism") or "")
-        and str(item.get("mechanism_class") or item.get("mechanism") or "")
-        != intent_by_id[str(item.get("experiment_id") or item.get("id") or "")].mechanism_class
+        and str(item.get("experiment_id") or "") in intent_by_id
+        and str(item.get("mechanism_class") or "")
+        and str(item.get("mechanism_class") or "")
+        != intent_by_id[str(item.get("experiment_id") or "")].mechanism_class
     )
     missing_primary = [
         mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
@@ -945,7 +945,7 @@ def _audit_experiment_plan(
         warnings.append("no candidate directly tested a top experiment opportunity")
     missing_intents = sorted(requested_intent_ids - returned_intent_ids)
     if requested_intent_ids and not (requested_intent_ids & returned_intent_ids):
-        warnings.append("proposer did not return any requested experiment intent IDs")
+        warnings.append("candidate implementer did not return any requested experiment intent IDs")
     if mechanism_mismatch_ids:
         warnings.append("returned experiment mechanism differed from requested intent mechanism")
     if task_theory.bottleneck_class == "semantic_boundary_confusion":
@@ -1383,7 +1383,7 @@ def _materialize_candidate_references(
                 op="add_few_shot",
                 target="few_shot",
                 value=[{"source_case_id": source_id} for source_id in parameter_source_ids],
-                rationale="Materialize proposer-selected train examples.",
+                rationale="Materialize implementer-selected train examples.",
             )
         ]
     for operation in candidate_operations:

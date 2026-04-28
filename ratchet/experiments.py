@@ -82,10 +82,10 @@ class ExperimentIntent:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, fallback_id: str) -> "ExperimentIntent":
+    def from_dict(cls, payload: dict[str, Any]) -> "ExperimentIntent":
         return cls(
-            intent_id=str(payload.get("intent_id") or payload.get("experiment_id") or payload.get("id") or fallback_id),
-            mechanism_class=str(payload.get("mechanism_class") or payload.get("mechanism") or ""),
+            intent_id=str(payload.get("intent_id") or ""),
+            mechanism_class=str(payload.get("mechanism_class") or ""),
             hypothesis=str(payload.get("hypothesis") or ""),
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
@@ -122,22 +122,11 @@ class ExperimentSpec:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any], *, fallback_id: str) -> "ExperimentSpec":
+    def from_dict(cls, payload: dict[str, Any]) -> "ExperimentSpec":
         raw_mechanism = str(payload.get("mechanism") or "")
-        mechanism_class = str(payload.get("mechanism_class") or raw_mechanism)
-        if mechanism_class not in MECHANISM_CLASSES:
-            candidate_mechanisms = [
-                str(candidate.get("mechanism_class") or "")
-                for candidate in payload.get("candidates", [])
-                if isinstance(candidate, dict)
-            ]
-            valid_candidate_mechanisms = [
-                mechanism for mechanism in candidate_mechanisms if mechanism in MECHANISM_CLASSES
-            ]
-            if valid_candidate_mechanisms:
-                mechanism_class = valid_candidate_mechanisms[0]
+        mechanism_class = str(payload.get("mechanism_class") or "")
         return cls(
-            experiment_id=str(payload.get("experiment_id") or payload.get("id") or fallback_id),
+            experiment_id=str(payload.get("experiment_id") or ""),
             mechanism=mechanism_class,
             hypothesis=str(payload.get("hypothesis") or ""),
             mechanism_label=raw_mechanism if raw_mechanism != mechanism_class else "",

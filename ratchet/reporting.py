@@ -292,9 +292,9 @@ class RatchetReporter:
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
             f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
             "",
-            "## Research Decisions",
+            "## Research Steps",
             "",
-            *self._research_decision_rows(result),
+            *self._research_step_rows(result),
             "",
             "## Ideation Quality",
             "",
@@ -490,11 +490,11 @@ class RatchetReporter:
         return rows
 
     @staticmethod
-    def _research_decision_rows(result: RatchetResult) -> list[str]:
+    def _research_step_rows(result: RatchetResult) -> list[str]:
         rows = [
             event
             for event in result.decision_log
-            if event.get("type") in {"research_plan", "measurement_decision", "research_decision"}
+            if event.get("type") in {"research_plan", "measurement_decision"}
         ]
         if not rows:
             return ["No research planner or measurement selector decisions were recorded."]
