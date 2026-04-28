@@ -82,8 +82,8 @@ def _family_for_patch(patch: dict[str, object]) -> str:
     target = str(operation.get("target", ""))
     if op == "change_model":
         return "model_substitution"
-    if op == "set_retrieval_param":
-        return "retrieval_tuning"
+    if op == "set_runtime_param":
+        return "runtime_tuning"
     if op == "add_few_shot":
         return "targeted_few_shot"
     if target.startswith("output") or op == "add_output_constraint":
@@ -94,8 +94,6 @@ def _family_for_patch(patch: dict[str, object]) -> str:
 def _mechanism_for_family(family: str) -> str:
     if family == "model_substitution":
         return "model_capability_probe"
-    if family == "retrieval_tuning":
-        return "efficiency_probe"
     if family == "output_contract_tightening":
         return "output_contract_fix"
     if family == "targeted_few_shot":
@@ -622,14 +620,13 @@ class GeneratedSurfaceTests(unittest.TestCase):
             )
         )
 
-    def test_llm_proposer_accepts_categorical_retrieval_patch(self) -> None:
+    def test_llm_proposer_accepts_categorical_runtime_patch(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
             model_options=["small", "large"],
             instructions={"system_prompt": "Answer helpfully."},
-            retrieval={"knowledge_mode": "raw", "top_k": 6},
-            runtime={"output_cap": "128"},
+            runtime={"reasoning_effort": "low", "output_cap": 128},
         )
         objective = OptimizationObjective(mode="cost")
         surface = SurfaceGenerator().generate(spec, objective)
@@ -643,13 +640,13 @@ class GeneratedSurfaceTests(unittest.TestCase):
                 {
                     "operations": [
                         {
-                            "op": "set_retrieval_param",
-                            "target": "retrieval.knowledge_mode",
-                            "value": "semantic",
+                            "op": "set_runtime_param",
+                            "target": "runtime.reasoning_effort",
+                            "value": "medium",
                         }
                     ],
-                    "rationale": "Change retrieval mode.",
-                    "expected_effect": "Explore a categorical retrieval setting.",
+                    "rationale": "Change runtime reasoning effort.",
+                    "expected_effect": "Explore a categorical runtime setting.",
                 }
             ]
         )
@@ -665,7 +662,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         targets = [operation.target for candidate in proposals for operation in candidate.patch.operations]
-        self.assertEqual(targets, ["retrieval.knowledge_mode"])
+        self.assertEqual(targets, ["runtime.reasoning_effort"])
 
     def test_llm_proposer_passes_task_theory_planner_guidance(self) -> None:
         spec = AgentSpec(

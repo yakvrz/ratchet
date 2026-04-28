@@ -25,10 +25,7 @@ MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
     "output_contract_tightening": {"output_contract_fix", "runtime_defect_fix", "ablation"},
     "targeted_few_shot": {"representative_examples", "contrastive_examples", "semantic_boundary_rewrite", "ablation"},
     "model_substitution": {"runtime_defect_fix", "model_capability_probe", "efficiency_probe", "ablation"},
-    "tool_policy_revision": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
-    "retrieval_tuning": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
     "runtime_tuning": {"runtime_defect_fix", "efficiency_probe", "output_contract_fix", "ablation"},
-    "verifier_retry": {"output_contract_fix", "semantic_boundary_rewrite", "ablation"},
 }
 
 

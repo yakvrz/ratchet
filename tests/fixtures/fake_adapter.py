@@ -73,11 +73,13 @@ class FakeAdapter:
         spec = BASE_SPEC.apply_patch(patch)
         needs_tool = bool(case.metadata.get("needs_tool", False))
         small_ok = bool(case.metadata.get("small_ok", True))
-        exact_prompt = "exact grounded" in " ".join(spec.instructions.values()).lower()
+        prompt_text = " ".join(spec.instructions.values()).lower()
+        exact_prompt = "exact grounded" in prompt_text
+        prompt_covers_tool_cases = "tool-dependent cases as solvable" in prompt_text
         tool = spec.tools["search"]
         tool_on = tool.enabled
         tool_sharp = "exact grounded facts" in tool.description.lower()
-        solved = exact_prompt and (tool_on or not needs_tool) and (small_ok or spec.model != "small")
+        solved = exact_prompt and (tool_on or prompt_covers_tool_cases or not needs_tool) and (small_ok or spec.model != "small")
         answer = str(case.expected) if solved else "wrong"
 
         input_tokens = 160 if spec.model == "large" else 60

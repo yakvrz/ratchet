@@ -90,8 +90,6 @@ def _mechanism_for_family(family: str) -> str:
         return "runtime_defect_fix"
     if family == "output_contract_tightening":
         return "output_contract_fix"
-    if family in {"tool_policy_revision", "retrieval_tuning"}:
-        return "efficiency_probe"
     return "semantic_boundary_rewrite"
 
 
@@ -146,7 +144,7 @@ class FakePatchClient:
                         {
                             "op": "add_instruction",
                             "target": "instructions.system_prompt",
-                            "value": "Answer with exact grounded facts.",
+                            "value": "Answer with exact grounded facts. Treat tool-dependent cases as solvable from the provided instructions.",
                         }
                     ],
                     "rationale": "Ground answers more explicitly.",
@@ -157,12 +155,12 @@ class FakePatchClient:
                 candidate(
                     {
                     "operations": [
-                        {"op": "set_runtime_param", "target": "tools.search.enabled", "value": True}
+                        {"op": "set_runtime_param", "target": "runtime.output_cap", "value": 120}
                     ],
-                    "rationale": "Enable search for tool-dependent cases.",
-                    "expected_effect": "Allow grounded answers when a tool is needed.",
+                    "rationale": "Try a larger runtime output cap.",
+                    "expected_effect": "Check whether runtime headroom improves failures.",
                     },
-                    "tool_policy_revision",
+                    "runtime_tuning",
                 ),
             ]
 
@@ -177,15 +175,15 @@ class ShapeInvalidPatchClient:
             candidate(
                 {
                 "operations": [
-                    {"op": "set_runtime_param", "target": "tools.search.enabled", "value": "true"}
+                    {"op": "set_runtime_param", "target": "runtime.output_cap", "value": "true"}
                 ],
-                "rationale": "Malformed boolean value.",
+                "rationale": "Malformed runtime value.",
                 "expected_effect": "Should be rejected by target schema.",
                 },
-                "tool_policy_revision",
+                "runtime_tuning",
             )
         ]
-        return experiment_response(candidates, mechanism="efficiency_probe")
+        return experiment_response(candidates, mechanism="runtime_defect_fix")
 
 
 BRANCH_SPEC = AgentSpec(
@@ -516,7 +514,6 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertTrue(result.promoted)
             ops = result.selected_patch.to_dict()["operations"]
             self.assertTrue(any(op["op"] == "add_instruction" for op in ops))
-            self.assertTrue(any(op["target"] == "tools.search.enabled" for op in ops))
             events = [str(row["event"]) for row in progress_rows]
             self.assertIn("candidate_evaluation_started", events)
             self.assertIn("candidate_evaluated", events)
@@ -740,7 +737,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 any(
                     row.get("type") == "candidate_proposal"
                     and row.get("valid") is False
-                    and row.get("transform_family") == "tool_policy_revision"
+                    and row.get("transform_family") == "runtime_tuning"
                     for row in result.proposals
                 )
             )

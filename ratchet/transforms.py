@@ -528,42 +528,6 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
             }
         },
     ),
-    "tool_policy_revision": TransformFamily(
-        name="tool_policy_revision",
-        category="tools",
-        purpose="Revise tool description, tool use policy, or enabled state.",
-        supported_edit_kinds=["tool"],
-        supported_ops=["revise_tool_description", "revise_tool_policy", "set_runtime_param"],
-        activation_signals=["tool_errors", "retrieval_or_tool_dependent_failures"],
-        expected_effects={"correctness": "possible_increase", "tool_calls": "variable"},
-        risks=["overuses or underuses tools"],
-        required_measurements=["score_delta", "tool_calls", "cost_delta", "latency_delta"],
-        complexity_cost=1.2,
-        parameter_contract={
-            "recommended": {
-                "tool_name": "tool whose description, policy, or enablement changes",
-                "gating_signal": "when the tool should be used differently",
-            }
-        },
-    ),
-    "retrieval_tuning": TransformFamily(
-        name="retrieval_tuning",
-        category="retrieval",
-        purpose="Tune retrieval parameters exposed by the agent policy.",
-        supported_edit_kinds=["retrieval"],
-        supported_ops=["set_retrieval_param"],
-        activation_signals=["retrieval_dependent_failures", "cost_objective", "latency_objective"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["misses evidence", "adds context noise"],
-        required_measurements=["score_delta", "token_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "retrieval_param": "retrieval setting being changed",
-                "expected_tradeoff": "recall, noise, cost, or latency tradeoff",
-            }
-        },
-    ),
     "runtime_tuning": TransformFamily(
         name="runtime_tuning",
         category="runtime",
@@ -582,24 +546,6 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
             }
         },
     ),
-    "verifier_retry": TransformFamily(
-        name="verifier_retry",
-        category="verification",
-        purpose="Enable verifier or repair retry behavior exposed by the policy.",
-        supported_edit_kinds=["verifier"],
-        supported_ops=["add_verifier_retry"],
-        activation_signals=["invalid_output", "persistent_high_risk_failures"],
-        expected_effects={"correctness": "possible_increase", "cost": "increase", "latency": "increase"},
-        risks=["adds model calls", "masks underlying prompt issues"],
-        required_measurements=["score_delta", "cost_delta", "latency_delta", "retry_rate"],
-        complexity_cost=2.0,
-        parameter_contract={
-            "recommended": {
-                "trigger": "failure condition or high-risk slice that should invoke verification",
-                "retry_limit": "number of repair attempts",
-            }
-        },
-    ),
 }
 
 
@@ -609,62 +555,42 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "output_contract_tightening": 1.0,
         "targeted_few_shot": 1.0,
         "model_substitution": 1.0,
-        "tool_policy_revision": 1.0,
-        "retrieval_tuning": 1.0,
         "runtime_tuning": 1.0,
-        "verifier_retry": 1.0,
     },
     "invalid_output": {
         "output_contract_tightening": 1.0,
         "prompt_rewrite": 1.0,
         "targeted_few_shot": 1.0,
-        "verifier_retry": 1.0,
         "runtime_tuning": 1.0,
-        "retrieval_tuning": -0.6,
-        "tool_policy_revision": -0.6,
         "model_substitution": -0.6,
     },
     "correctness_gap": {
         "prompt_rewrite": 1.0,
         "model_substitution": 1.0,
         "targeted_few_shot": 1.0,
-        "tool_policy_revision": 1.0,
-        "retrieval_tuning": 1.0,
-    },
-    "tool_dependent_slice": {
-        "retrieval_tuning": 1.0,
-        "tool_policy_revision": 1.0,
     },
     "cost_objective": {
         "model_substitution": 1.0,
-        "retrieval_tuning": 1.0,
         "runtime_tuning": 1.0,
-        "tool_policy_revision": 1.0,
     },
     "high_cost_cases": {
-        "retrieval_tuning": 1.0,
         "runtime_tuning": 1.0,
         "model_substitution": 1.0,
     },
     "latency_objective": {
         "model_substitution": 1.0,
-        "retrieval_tuning": 1.0,
         "runtime_tuning": 1.0,
-        "tool_policy_revision": 1.0,
     },
     "high_latency_cases": {
-        "retrieval_tuning": 1.0,
         "runtime_tuning": 1.0,
         "model_substitution": 1.0,
     },
     "weak_slices": {
         "targeted_few_shot": 1.0,
         "prompt_rewrite": 1.0,
-        "verifier_retry": 1.0,
     },
     "runtime_errors": {
         "runtime_tuning": 1.0,
-        "verifier_retry": 1.0,
         "model_substitution": 1.0,
     },
     "runtime_truncation": {
@@ -1283,8 +1209,6 @@ def _context_suitability(
         "prompt_rewrite",
         "output_contract_tightening",
         "targeted_few_shot",
-        "tool_policy_revision",
-        "retrieval_tuning",
     }:
         suitability += 0.05
         evidence.append("diagnosis categories provide targetable failure context")
@@ -1555,8 +1479,6 @@ def _operation_mechanism_signature(operation: PatchOperation) -> str:
         return f"{operation.op}:{_value_class(value)}"
     if operation.op == "add_few_shot":
         return f"few_shot:{_few_shot_shape(value)}"
-    if operation.op == "add_verifier_retry":
-        return f"verifier:{_mapping_shape(value)}"
     if operation.op in {
         "add_instruction",
         "revise_instruction",

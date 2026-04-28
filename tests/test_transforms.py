@@ -133,7 +133,6 @@ class TransformLibraryTests(unittest.TestCase):
         )
 
         self.assertIn("model_substitution", hypothesis.active_families)
-        self.assertIn("retrieval_tuning", hypothesis.active_families)
         self.assertIn("runtime_tuning", hypothesis.active_families)
 
     def test_targeted_few_shot_requires_proposal_examples(self) -> None:
