@@ -204,17 +204,37 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
     if event == "search_hypothesis_ready":
         families = _join_limited(row.get("active_families") or [], limit=5)
         return "HYPOTHESIS", f"active={families or 'none'} contexts={row.get('active_context_count')}"
-    if event == "research_controller_started":
+    if event == "research_planner_started":
         return (
-            "RESEARCH",
+            "PLAN",
+            f"started parent={row.get('parent_rank')} opportunities={row.get('opportunity_count')} "
+            f"affordances={row.get('affordance_count')}",
+        )
+    if event == "research_planner_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        mechanisms = _join_limited(row.get("mechanisms") or [], limit=4)
+        return (
+            "PLAN",
+            " ".join(
+                part
+                for part in (
+                    f"complete intents={row.get('intent_count')} mechanisms={mechanisms or 'none'}",
+                    _call_summary(diagnostics),
+                )
+                if part
+            ),
+        )
+    if event == "measurement_selector_started":
+        return (
+            "MEASURE",
             f"started stage={row.get('stage')} candidates={row.get('candidate_count')} "
             f"max_select={row.get('max_select')}",
         )
-    if event == "research_controller_completed":
+    if event == "measurement_selector_completed":
         diagnostics = row.get("call_diagnostics") or {}
         selected = _join_limited([_short_hash(item) for item in row.get("selected_candidate_ids") or []], limit=4)
         return (
-            "RESEARCH",
+            "MEASURE",
             " ".join(
                 part
                 for part in (

@@ -94,6 +94,61 @@ def _mechanism_for_family(family: str) -> str:
     return "semantic_boundary_rewrite"
 
 
+def _attach_affordance_ids(candidates: list[dict[str, object]], prompt: str) -> None:
+    try:
+        payload = json.loads(prompt.split("\n\n", 1)[1])
+    except Exception:
+        return
+    affordances = payload.get("optimization_affordances") or []
+    if not isinstance(affordances, list):
+        return
+    for candidate_row in candidates:
+        if candidate_row.get("affordance_ids"):
+            continue
+        matches = _matching_affordance_ids(candidate_row, affordances)
+        if matches:
+            candidate_row["affordance_ids"] = matches
+
+
+def _matching_affordance_ids(candidate_row: dict[str, object], affordances: list[object]) -> list[str]:
+    family = str(candidate_row.get("transform_family") or "")
+    mechanism = str(candidate_row.get("mechanism_class") or "")
+    operations = _candidate_operations(candidate_row)
+    matches: list[str] = []
+    for affordance in affordances:
+        if not isinstance(affordance, dict):
+            continue
+        if affordance.get("transform_family") != family or affordance.get("mechanism_class") != mechanism:
+            continue
+        if not operations:
+            if affordance.get("target_kind") == "few_shot":
+                matches.append(str(affordance.get("affordance_id") or ""))
+            continue
+        for operation in operations:
+            if (
+                operation.get("op") in set(affordance.get("allowed_ops") or [])
+                and operation.get("target") in {affordance.get("target_name"), affordance.get("target_path")}
+            ):
+                matches.append(str(affordance.get("affordance_id") or ""))
+    return [item for item in matches if item]
+
+
+def _candidate_operations(candidate_row: dict[str, object]) -> list[dict[str, object]]:
+    intervention = candidate_row.get("intervention")
+    if not isinstance(intervention, dict) or intervention.get("kind") == "example_selection":
+        return []
+    payload = intervention.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    patch = payload.get("patch")
+    if not isinstance(patch, dict):
+        return []
+    operations = patch.get("operations")
+    if not isinstance(operations, list):
+        return []
+    return [operation for operation in operations if isinstance(operation, dict)]
+
+
 class InvalidJsonClient:
     def create_response(self, **_: object) -> object:
         class Response:
@@ -165,6 +220,7 @@ class FakePatchClient:
                 ),
             ]
 
+        _attach_affordance_ids(candidates, prompt)
         if '"mode": "cost"' in prompt or '"mode":"cost"' in prompt:
             return experiment_response(candidates, mechanism="efficiency_probe")
         return experiment_response(candidates)
@@ -174,74 +230,111 @@ class FakeResearchClient:
     def create_response(self, **kwargs: object) -> object:
         prompt = str(kwargs.get("input", ""))
         payload = json.loads(prompt.split("\n\n", 1)[1])
-        action = payload["allowed_actions"][0]
-        state = payload["state"]
-        candidates = state.get("candidates", []) or state.get("variants", [])
-        experiment_intents = []
-        if action.get("action_type") == "plan_experiments":
-            opportunities = ((state.get("task_theory") or {}).get("experiment_opportunities") or [])
-            mechanism = "semantic_boundary_rewrite"
-            target_slices = ["failed_cases"]
-            measurements = ["score_delta"]
-            if opportunities and isinstance(opportunities[0], dict):
-                mechanism = str(opportunities[0].get("mechanism_class") or mechanism)
-                target_slices = list(opportunities[0].get("target_slices") or target_slices)
-                measurements = list(opportunities[0].get("measurements") or measurements)
-            active_families = list(((state.get("search_hypothesis") or {}).get("active_families") or []))
-            experiment_intents = [
+        if payload.get("role") == "Ratchet Research Planner":
+            return _fake_research_plan_response(payload)
+        if payload.get("role") == "Ratchet Measurement Selector":
+            return _fake_measurement_response(payload)
+        raise AssertionError(f"unexpected fake research prompt role: {payload.get('role')!r}")
+
+
+def _fake_research_plan_response(payload: dict[str, object]) -> object:
+    state = payload.get("state")
+    state = state if isinstance(state, dict) else {}
+    affordances = state.get("affordances")
+    affordances = affordances if isinstance(affordances, list) else []
+    opportunities = ((state.get("task_theory") or {}).get("experiment_opportunities") or [])
+    mechanism = "semantic_boundary_rewrite"
+    target_slices = ["failed_cases"]
+    measurements = ["score_delta"]
+    if opportunities and isinstance(opportunities[0], dict):
+        mechanism = str(opportunities[0].get("mechanism_class") or mechanism)
+        target_slices = list(opportunities[0].get("target_slices") or target_slices)
+        measurements = list(opportunities[0].get("measurements") or measurements)
+    matching_affordances = [
+        str(affordance.get("affordance_id"))
+        for affordance in affordances
+        if isinstance(affordance, dict) and affordance.get("affordance_id")
+    ]
+    return type(
+        "Response",
+        (),
+        {
+            "output_text": json.dumps(
                 {
-                    "intent_id": "exp_1",
-                    "mechanism_class": mechanism,
-                    "hypothesis": "Fake controller asks proposer to implement the current top task-theory mechanism.",
-                    "target_slices": target_slices[:3],
-                    "candidate_roles": ["atomic", "control"],
-                    "measurements": measurements[:4],
-                    "allowed_families": active_families,
-                    "success_criteria": "Improve objective on dev without regressions.",
-                    "disconfirming_result": "No improvement on staged eval.",
-                    "priority": 1,
+                    "experiment_intents": [
+                        {
+                            "intent_id": "exp_1",
+                            "mechanism_class": mechanism,
+                            "hypothesis": "Fake planner asks implementer to test the current top task-theory mechanism.",
+                            "target_slices": target_slices[:3],
+                            "candidate_roles": ["atomic", "control"],
+                            "measurements": measurements[:4],
+                            "affordance_ids": matching_affordances,
+                            "allowed_families": sorted(
+                                {
+                                    str(affordance.get("transform_family"))
+                                    for affordance in affordances
+                                    if isinstance(affordance, dict) and affordance.get("affordance_id") in matching_affordances
+                                }
+                            ),
+                            "success_criteria": "Improve objective on dev without regressions.",
+                            "disconfirming_result": "No improvement on staged eval.",
+                            "priority": 1,
+                        }
+                    ]
+                    if matching_affordances
+                    else []
                 }
-            ]
-        max_select = int(action.get("max_select", len(candidates)))
-        max_per_group = int(action.get("max_select_per_group") or 0)
-        selected: list[str] = []
-        group_counts: dict[str, int] = {}
-        for candidate_row in candidates:
-            candidate_id = str(candidate_row["candidate_id"])
-            group = str(candidate_row.get("comparison_group_key") or "global")
-            if len(selected) >= max_select:
-                continue
-            if max_per_group and group_counts.get(group, 0) >= max_per_group:
-                continue
-            selected.append(candidate_id)
-            group_counts[group] = group_counts.get(group, 0) + 1
-        skipped = {
-            str(candidate_row["candidate_id"]): "fake controller skipped candidate under action limits"
-            for candidate_row in candidates
-            if str(candidate_row["candidate_id"]) not in set(selected)
-        }
-        return type(
-            "Response",
-            (),
-            {
-                "output_text": json.dumps(
-                    {
-                        "action_id": action["action_id"],
-                        "action_type": action["action_type"],
-                        "selected_candidate_ids": selected,
-                        "experiment_intents": experiment_intents,
-                        "rationale": "Fake controller selects candidates within hard limits.",
-                        "expected_information": "Exercise staged evaluation.",
-                        "risks": "Test fixture only.",
-                        "skipped_candidate_reasons": skipped,
-                    }
-                )
-            },
-        )()
+            )
+        },
+    )()
+
+
+def _fake_measurement_response(payload: dict[str, object]) -> object:
+    state = payload.get("state")
+    state = state if isinstance(state, dict) else {}
+    candidates = state.get("candidates") or state.get("variants") or []
+    candidates = candidates if isinstance(candidates, list) else []
+    max_select = int(payload.get("max_select") or len(candidates))
+    max_per_group = int(payload.get("max_select_per_group") or 0)
+    selected: list[str] = []
+    group_counts: dict[str, int] = {}
+    for candidate_row in candidates:
+        if not isinstance(candidate_row, dict):
+            continue
+        candidate_id = str(candidate_row["candidate_id"])
+        group = str(candidate_row.get("comparison_group_key") or "global")
+        if len(selected) >= max_select:
+            continue
+        if max_per_group and group_counts.get(group, 0) >= max_per_group:
+            continue
+        selected.append(candidate_id)
+        group_counts[group] = group_counts.get(group, 0) + 1
+    skipped = {
+        str(candidate_row["candidate_id"]): "fake selector skipped candidate under action limits"
+        for candidate_row in candidates
+        if isinstance(candidate_row, dict) and str(candidate_row["candidate_id"]) not in set(selected)
+    }
+    return type(
+        "Response",
+        (),
+        {
+            "output_text": json.dumps(
+                {
+                    "selected_candidate_ids": selected,
+                    "rationale": "Fake selector selects candidates within hard limits.",
+                    "expected_information": "Exercise staged evaluation.",
+                    "risks": "Test fixture only.",
+                    "skipped_candidate_reasons": skipped,
+                }
+            )
+        },
+    )()
 
 
 class ShapeInvalidPatchClient:
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
         candidates = [
             candidate(
                 {
@@ -254,6 +347,7 @@ class ShapeInvalidPatchClient:
                 "runtime_tuning",
             )
         ]
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates, mechanism="runtime_defect_fix")
 
 
@@ -348,6 +442,7 @@ class BranchingPatchClient:
 
     def create_response(self, **kwargs: object) -> object:
         payload = json.loads(str(kwargs["input"]).split("\n\n", 1)[1])
+        prompt = str(kwargs.get("input", ""))
         self.diagnosis_counts.append(len(payload.get("diagnoses", [])))
         values = [
             str(operation.get("value", "")).lower()
@@ -408,11 +503,13 @@ class BranchingPatchClient:
             ]
         else:
             candidates = []
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates)
 
 
 class BatchCompetitionPatchClient:
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
         candidates = [
             candidate(
                 {
@@ -443,6 +540,7 @@ class BatchCompetitionPatchClient:
                 "prompt_rewrite",
             ),
         ]
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates)
 
 
@@ -452,6 +550,7 @@ class RetryPatchClient:
 
     def create_response(self, **kwargs: object) -> object:
         payload = json.loads(str(kwargs["input"]).split("\n\n", 1)[1])
+        prompt = str(kwargs.get("input", ""))
         self.history_lengths.append(len(payload.get("recent_history", [])))
         if len(self.history_lengths) == 1:
             candidates = [
@@ -488,6 +587,7 @@ class RetryPatchClient:
                     transform_instance="distinct retry prompt rewrite",
                 )
             ]
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates)
 
 
@@ -981,7 +1081,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertIn("smoke rejected", rejection_reason or "")
             self.assertLess(summary.case_count, len(cases))
 
-    def test_batch_progressive_evaluation_uses_research_controller_decision(self) -> None:
+    def test_batch_progressive_evaluation_uses_measurement_selector_decision(self) -> None:
         dev_cases = tuple(
             [
                 *(
@@ -1019,7 +1119,7 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(len(proposal_rows), 2)
             full_dev_rows = [row for row in proposal_rows if row.get("full_dev_evaluated")]
             research_decisions = [
-                row for row in result.decision_log if row.get("type") == "research_decision"
+                row for row in result.decision_log if row.get("type") == "measurement_decision"
             ]
             self.assertEqual(len(full_dev_rows), 2)
             self.assertTrue(research_decisions)

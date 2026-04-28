@@ -179,9 +179,11 @@ class RatchetReporter:
                 "run_profile": result.run_profile,
                 "run_cost": (result.run_profile or {}).get("run_cost", {}),
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
+                "ideation_metrics": result.ideation_metrics,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
             },
         )
+        write_json(self.out_dir / "ideation_metrics.json", result.ideation_metrics)
         write_json(
             self.out_dir / "selected_patch.json",
             {
@@ -206,6 +208,7 @@ class RatchetReporter:
                 "frontier_recommendation": result.frontier_recommendation,
                 "run_profile": result.run_profile,
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
+                "ideation_metrics": result.ideation_metrics,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
                 "holdout_comparison_to_baseline": selected_comparison.to_dict(),
                 "baseline": result.baseline_holdout.to_dict(),
@@ -292,6 +295,10 @@ class RatchetReporter:
             "## Research Decisions",
             "",
             *self._research_decision_rows(result),
+            "",
+            "## Ideation Quality",
+            "",
+            *self._ideation_quality_rows(result),
             "",
             "## Finalist Statuses",
             "",
@@ -484,26 +491,63 @@ class RatchetReporter:
 
     @staticmethod
     def _research_decision_rows(result: RatchetResult) -> list[str]:
-        rows = [event for event in result.decision_log if event.get("type") == "research_decision"]
+        rows = [
+            event
+            for event in result.decision_log
+            if event.get("type") in {"research_plan", "measurement_decision", "research_decision"}
+        ]
         if not rows:
-            return ["No research controller decisions were recorded."]
+            return ["No research planner or measurement selector decisions were recorded."]
         table = [
-            "| Iteration | Stage | Selected | Rationale |",
-            "| ---: | --- | --- | --- |",
+            "| Iteration | Type | Stage | Output | Rationale |",
+            "| ---: | --- | --- | --- | --- |",
         ]
         for row in rows[-12:]:
-            decision = row.get("decision") or {}
-            selected = ", ".join(str(item)[:12] for item in decision.get("selected_candidate_ids", [])) or "none"
+            row_type = str(row.get("type") or "")
+            if row_type == "research_plan":
+                intents = row.get("experiment_intents") or []
+                output = ", ".join(str(item.get("intent_id", ""))[:16] for item in intents if isinstance(item, dict))
+                rationale = f"{len(intents)} intent(s)"
+                stage = "planning"
+            else:
+                decision = row.get("decision") or {}
+                output = ", ".join(str(item)[:12] for item in decision.get("selected_candidate_ids", [])) or "none"
+                rationale = _short_reason(decision.get("rationale"))
+                stage = str(row.get("stage") or "")
             table.append(
                 "| "
                 f"{row.get('iteration')} | "
-                f"`{row.get('stage')}` | "
-                f"{selected} | "
-                f"{_short_reason(decision.get('rationale'))} |"
+                f"`{row_type}` | "
+                f"`{stage}` | "
+                f"{output or 'none'} | "
+                f"{rationale} |"
             )
         if len(rows) > 12:
             table.append(f"- {len(rows) - 12} earlier research decisions omitted from this table.")
         return table
+
+    @staticmethod
+    def _ideation_quality_rows(result: RatchetResult) -> list[str]:
+        metrics = result.ideation_metrics or {}
+        if not metrics:
+            return ["No ideation telemetry was recorded."]
+        planner = metrics.get("planner") or {}
+        implementer = metrics.get("implementer") or {}
+        discovery = metrics.get("discovery") or {}
+        stage_counts = discovery.get("stage_counts") or {}
+        invalid_reasons = implementer.get("invalid_reason_counts") or {}
+        rows = [
+            f"- Planner intents: {planner.get('intent_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
+            f"- Intents citing affordances: {planner.get('intent_with_affordance_ids', 0)}.",
+            f"- Implementer candidates: valid={implementer.get('valid_candidate_count', 0)} invalid={implementer.get('invalid_candidate_count', 0)}.",
+            f"- Discovery stages: {json.dumps(stage_counts, sort_keys=True)}",
+        ]
+        if invalid_reasons:
+            rows.append(f"- Invalid implementation reasons: {json.dumps(invalid_reasons, sort_keys=True)}")
+        missing = planner.get("missing_opportunity_mechanisms") or []
+        if missing:
+            rows.append(f"- Task-theory opportunities not covered by intents: {json.dumps(missing[:8])}")
+        return rows
 
     @staticmethod
     def _task_theory_rows(result: RatchetResult) -> list[str]:

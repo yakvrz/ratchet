@@ -6,9 +6,10 @@ import json
 import time
 from typing import Any
 
+from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_affordances
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, MECHANISMS_BY_FAMILY, TaskTheory, build_task_theory
+from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, TaskTheory, build_task_theory
 from ratchet.io import extract_json_object, patch_hash
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -41,7 +42,8 @@ PROPOSER_INSTRUCTIONS = (
     "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
     "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
     "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
-    "proposal_example_bank. Do not inline few-shot examples. Patch operations must use editable_targets, "
+    "proposal_example_bank. Do not inline few-shot examples. Each candidate must cite affordance_ids from "
+    "optimization_affordances. Patch operations must use editable_targets, "
     "allowed_ops, value_schema, and the declared transform family's supported ops. Declare family by the "
     "actual operation: instruction ops -> prompt_rewrite/output_contract_tightening, set_runtime_param -> "
     "runtime_tuning, change_model -> model_substitution, source_case_ids/add_few_shot -> targeted_few_shot. "
@@ -120,7 +122,7 @@ class ProposalEngine:
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
         experiment_intents: list[ExperimentIntent] | None = None,
-        research_brief: dict[str, Any] | None = None,
+        affordances: list[OptimizationAffordance] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
         analysis_parts: list[str] = []
@@ -142,6 +144,7 @@ class ProposalEngine:
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
+        active_affordances = list(affordances or generate_optimization_affordances(surface, active_families=search_hypothesis.active_families))
         llm_proposals, target_considerations = self._llm_proposals(
             summary,
             surface,
@@ -153,7 +156,7 @@ class ProposalEngine:
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
             experiment_intents=experiment_intents or [],
-            research_brief=research_brief,
+            affordances=active_affordances,
         )
         proposals.extend(llm_proposals)
         analysis_parts.append("LLM proposer returned transform candidate proposals.")
@@ -199,6 +202,20 @@ class ProposalEngine:
             if family_error is not None:
                 invalid_reasons[family_error] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, family_error, materialization=materialization))
+                continue
+            affordance_error = validate_candidate_affordances(
+                affordance_ids=candidate.affordance_ids,
+                transform_family=candidate.transform_family,
+                mechanism_class=candidate.mechanism_class,
+                operations=[
+                    {"op": operation.op, "target": operation.target}
+                    for operation in candidate.patch.operations
+                ],
+                affordances=active_affordances,
+            )
+            if affordance_error is not None:
+                invalid_reasons[affordance_error] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(candidate, affordance_error, materialization=materialization))
                 continue
             is_valid, invalid_reason = validator.validate_with_reason(
                 candidate.patch,
@@ -265,6 +282,7 @@ class ProposalEngine:
                         "experiment_id": candidate.experiment_id,
                         "candidate_role": candidate.candidate_role,
                         "comparison_group": candidate.comparison_group,
+                        "affordance_ids": list(candidate.affordance_ids),
                         "transform_instance": candidate.transform_instance,
                         "target_slice": candidate.target_slice,
                         "hypothesis": candidate.hypothesis,
@@ -325,7 +343,7 @@ class ProposalEngine:
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
         experiment_intents: list[ExperimentIntent],
-        research_brief: dict[str, Any] | None,
+        affordances: list[OptimizationAffordance],
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
@@ -339,11 +357,6 @@ class ProposalEngine:
         ]
         behavior_diagnostics = build_behavior_diagnostics(summary)
         compact_diagnostics = _compact_behavior_diagnostics(behavior_diagnostics)
-        planner_guidance = _planner_guidance(
-            task_theory=task_theory,
-            search_hypothesis=search_hypothesis,
-            proposal_budget=proposal_budget,
-        )
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
@@ -352,13 +365,11 @@ class ProposalEngine:
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
             "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
-            "planner_guidance": planner_guidance,
-            "research_brief": research_brief or {},
+            "optimization_affordances": [_compact_affordance(affordance) for affordance in affordances],
             "proposal_policy": {
                 "experiment_intents": (
                     "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
-                    "intent_id, every experiment mechanism_class must match that intent, and candidates must use "
-                    "that intent's allowed_families when provided."
+                    "intent_id. Each candidate must cite affordance_ids from that intent and from optimization_affordances."
                 ),
                 "empty_patches_allowed": (
                     "Only when no listed editable target can plausibly improve the objective without violating constraints."
@@ -474,9 +485,13 @@ class ProposalEngine:
                                                         "hypothesis": {"type": "string", "maxLength": 360},
                                                         "expected_effects": {"type": "object"},
                                                         "evaluation_plan": {"type": "string", "maxLength": 240},
+                                                        "affordance_ids": {
+                                                            "type": "array",
+                                                            "items": {"type": "string", "maxLength": 80},
+                                                        },
                                                         "intervention": _intervention_schema(),
                                                     },
-                                                    "required": ["transform_family", "candidate_role", "hypothesis", "intervention"],
+                                                    "required": ["transform_family", "candidate_role", "hypothesis", "affordance_ids", "intervention"],
                                                 },
                                             },
                                         },
@@ -651,11 +666,22 @@ class ProposalEngine:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
+                if intent is not None and intent.affordance_ids:
+                    unknown_for_intent = sorted(set(candidate.affordance_ids) - set(intent.affordance_ids))
+                    if unknown_for_intent:
+                        reason = (
+                            f"candidate affordance_ids {unknown_for_intent} are not allowed by experiment intent "
+                            f"{intent.intent_id!r}"
+                        )
+                        self._last_parse_invalid_reasons[reason] += 1
+                        self._last_parse_invalid_candidate_rows.append(
+                            _invalid_raw_candidate_row(raw_candidate, reason)
+                        )
+                        continue
                 candidates.append(candidate)
         self._last_plan_audit = _audit_experiment_plan(
             raw_experiments=raw_experiments,
             parsed_candidates=candidates,
-            planner_guidance=planner_guidance,
             experiment_intents=experiment_intents,
             task_theory=task_theory,
             proposal_budget=proposal_budget,
@@ -836,31 +862,6 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
     }
 
 
-def _compact_experiment_opportunities(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
-    compact: list[dict[str, Any]] = []
-    for row in rows[:limit]:
-        if not isinstance(row, dict):
-            continue
-        compact.append(
-            {
-                "mechanism_class": row.get("mechanism_class"),
-                "target_slices": list(row.get("target_slices") or [])[:3],
-                "candidate_roles": list(row.get("candidate_roles") or [])[:4],
-                "compatible_mechanisms": list(row.get("compatible_mechanisms") or [])[:4],
-                "source_labels": list(row.get("source_labels") or [])[:3],
-                "source_case_ids_by_label": {
-                    str(label): list(case_ids)[:3]
-                    for label, case_ids in (row.get("source_case_ids_by_label") or {}).items()
-                    if isinstance(case_ids, list)
-                },
-                "measurements": list(row.get("measurements") or [])[:4],
-                "rationale": str(row.get("rationale") or "")[:180],
-                "disconfirming_result": str(row.get("disconfirming_result") or "")[:160],
-            }
-        )
-    return compact
-
-
 def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
     return {
         "intent_id": intent.intent_id,
@@ -870,100 +871,33 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
         "candidate_roles": list(intent.candidate_roles)[:5],
         "measurements": list(intent.measurements)[:5],
         "allowed_families": list(intent.allowed_families)[:5],
+        "affordance_ids": list(intent.affordance_ids)[:8],
         "success_criteria": intent.success_criteria[:240],
         "disconfirming_result": intent.disconfirming_result[:240],
         "priority": intent.priority,
     }
 
 
-def _planner_guidance(
-    *,
-    task_theory: TaskTheory,
-    search_hypothesis: SearchHypothesis,
-    proposal_budget: int,
-) -> dict[str, Any]:
-    active_mechanisms = _active_mechanisms(search_hypothesis)
-    primary, secondary, rationale = _mechanisms_for_bottleneck(task_theory.bottleneck_class)
-    primary = [mechanism for mechanism in primary if mechanism in active_mechanisms]
-    secondary = [mechanism for mechanism in secondary if mechanism in active_mechanisms and mechanism not in primary]
-    if not primary:
-        primary = list(secondary[:2])
-        secondary = secondary[2:]
-    experiment_count = max(0, min(proposal_budget, 3))
-    opportunities = [
-        row
-        for row in _compact_experiment_opportunities(task_theory.experiment_opportunities, limit=3)
-        if row.get("mechanism_class") in active_mechanisms
-    ]
+def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
     return {
-        "bottleneck_class": task_theory.bottleneck_class,
-        "primary_mechanisms": primary[:3],
-        "secondary_mechanisms": secondary[:4],
-        "active_mechanisms": active_mechanisms,
-        "experiment_opportunities": opportunities,
-        "recommended_experiment_count": experiment_count,
-        "rationale": rationale,
-        "planning_rules": [
-            "Each experiment should test one mechanism, not a grab bag of unrelated edits.",
-            "Prefer one strong experiment with controls over many shallow single-candidate variants.",
-            "For the top experiment opportunity, include the listed measurements and explain the disconfirming result in the hypothesis.",
-            "Use composed candidates only when the mechanism needs multiple compatible transform families.",
-            "For semantic-boundary opportunities with source_case_ids_by_label, prefer a boundary rewrite control plus example anchoring when budget allows.",
-            "If few-shot is proposed, use proposal-safe source_case_ids and make the target labels/slices explicit.",
-        ],
+        "affordance_id": affordance.affordance_id,
+        "target_name": affordance.target_name,
+        "target_kind": affordance.target_kind,
+        "transform_family": affordance.transform_family,
+        "mechanism_class": affordance.mechanism_class,
+        "allowed_ops": list(affordance.allowed_ops),
+        "value_schema": affordance.value_schema,
+        "expected_cost_impact": affordance.expected_cost_impact,
+        "expected_latency_impact": affordance.expected_latency_impact,
+        "risk_level": affordance.risk_level,
+        "required_measurements": list(affordance.required_measurements)[:5],
     }
-
-
-def _active_mechanisms(search_hypothesis: SearchHypothesis) -> list[str]:
-    mechanisms: set[str] = set()
-    for family in search_hypothesis.active_families:
-        mechanisms.update(MECHANISMS_BY_FAMILY.get(family, set()))
-    return sorted(mechanisms)
-
-
-def _mechanisms_for_bottleneck(bottleneck_class: str) -> tuple[list[str], list[str], str]:
-    if bottleneck_class == "runtime_or_output_defect":
-        return (
-            ["runtime_defect_fix", "output_contract_fix"],
-            ["semantic_boundary_rewrite", "model_capability_probe"],
-            "Current evidence points first at runtime/output reliability before semantic specialization.",
-        )
-    if bottleneck_class == "output_contract":
-        return (
-            ["output_contract_fix"],
-            ["runtime_defect_fix", "semantic_boundary_rewrite"],
-            "Invalid or contract-shaped failures should be tested as output contract fixes first.",
-        )
-    if bottleneck_class == "semantic_boundary_confusion":
-        return (
-            ["semantic_boundary_rewrite", "representative_examples", "contrastive_examples"],
-            ["model_capability_probe", "ablation"],
-            "Label, slice, or semantic confusion calls for boundary rewrites and example anchoring experiments.",
-        )
-    if bottleneck_class == "efficiency_tradeoff":
-        return (
-            ["efficiency_probe", "model_capability_probe"],
-            ["ablation", "runtime_defect_fix"],
-            "Efficiency objectives should test cost/latency mechanisms while preserving quality.",
-        )
-    if bottleneck_class == "no_observed_failures":
-        return (
-            ["efficiency_probe", "ablation"],
-            ["model_capability_probe"],
-            "With no observed failures, useful experiments should reduce cost, latency, or complexity.",
-        )
-    return (
-        ["semantic_boundary_rewrite", "model_capability_probe", "representative_examples"],
-        ["output_contract_fix", "ablation"],
-        "General correctness gaps need semantic, capability, or example-anchoring experiments.",
-    )
 
 
 def _audit_experiment_plan(
     *,
     raw_experiments: list[Any],
     parsed_candidates: list[CandidateProposal],
-    planner_guidance: dict[str, Any],
     experiment_intents: list[ExperimentIntent],
     task_theory: TaskTheory,
     proposal_budget: int,
@@ -971,10 +905,10 @@ def _audit_experiment_plan(
     experiment_count = sum(1 for item in raw_experiments if isinstance(item, dict))
     mechanism_counts = Counter(candidate.mechanism_class for candidate in parsed_candidates)
     role_counts = Counter(candidate.candidate_role for candidate in parsed_candidates)
-    primary_mechanisms = [str(item) for item in planner_guidance.get("primary_mechanisms", [])]
+    primary_mechanisms = [intent.mechanism_class for intent in experiment_intents]
     opportunity_mechanisms = [
         str(item.get("mechanism_class"))
-        for item in planner_guidance.get("experiment_opportunities", [])
+        for item in task_theory.experiment_opportunities
         if isinstance(item, dict) and item.get("mechanism_class")
     ]
     candidate_mechanisms = set(mechanism_counts)
@@ -1511,6 +1445,7 @@ def _materialize_candidate_references(
             experiment_id=candidate.experiment_id,
             candidate_role=candidate.candidate_role,
             comparison_group=candidate.comparison_group,
+            affordance_ids=list(candidate.affordance_ids),
             target_slice=candidate.target_slice,
             hypothesis=candidate.hypothesis,
             expected_effects=dict(candidate.expected_effects),

@@ -26,6 +26,9 @@ MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
     "targeted_few_shot": {"representative_examples", "contrastive_examples", "semantic_boundary_rewrite", "ablation"},
     "model_substitution": {"runtime_defect_fix", "model_capability_probe", "efficiency_probe", "ablation"},
     "runtime_tuning": {"runtime_defect_fix", "efficiency_probe", "output_contract_fix", "ablation"},
+    "retrieval_tuning": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
+    "tool_policy_revision": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
+    "verifier_retry": {"runtime_defect_fix", "output_contract_fix", "semantic_boundary_rewrite", "ablation"},
 }
 
 
@@ -59,6 +62,7 @@ class ExperimentIntent:
     candidate_roles: list[str] = field(default_factory=list)
     measurements: list[str] = field(default_factory=list)
     allowed_families: list[str] = field(default_factory=list)
+    affordance_ids: list[str] = field(default_factory=list)
     success_criteria: str = ""
     disconfirming_result: str = ""
     priority: int = 1
@@ -91,6 +95,7 @@ class ExperimentIntent:
                 for item in payload.get("allowed_families", [])
                 if item and str(item).lower() not in {"all", "any", "*"}
             ],
+            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
             success_criteria=str(payload.get("success_criteria") or ""),
             disconfirming_result=str(payload.get("disconfirming_result") or ""),
             priority=int(payload.get("priority") or 1),
@@ -140,6 +145,49 @@ class ExperimentSpec:
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
         )
+
+
+@dataclass(frozen=True)
+class ResearchState:
+    objective: dict[str, Any]
+    budget: dict[str, Any]
+    parent: dict[str, Any]
+    task_theory: dict[str, Any]
+    behavior_profile: dict[str, Any]
+    affordances: list[dict[str, Any]]
+    prior_experiment_outcomes: list[dict[str, Any]] = field(default_factory=list)
+    frontier: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CandidateImplementation:
+    intent_id: str
+    candidate_id: str
+    affordance_ids: list[str]
+    transform_family: str
+    mechanism_class: str
+    candidate_role: str
+    hypothesis: str
+    intervention: dict[str, Any]
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class MeasurementDecision:
+    stage: str
+    selected_candidate_ids: list[str]
+    rationale: str
+    expected_information: str = ""
+    risks: str = ""
+    skipped_candidate_reasons: dict[str, str] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
 
 
 def build_task_theory(

@@ -28,7 +28,8 @@ class FakePatchClient:
     def __init__(self, patches: list[dict[str, object]]) -> None:
         self.patches = patches
 
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
         candidates = [
             {
                 "transform_family": _family_for_patch(patch),
@@ -45,6 +46,7 @@ class FakePatchClient:
             }
             for patch in self.patches
         ]
+        _attach_affordance_ids(candidates, prompt)
         return experiment_response(candidates)
 
 
@@ -102,6 +104,61 @@ def _mechanism_for_family(family: str) -> str:
     if family == "runtime_tuning":
         return "runtime_defect_fix"
     return "semantic_boundary_rewrite"
+
+
+def _attach_affordance_ids(candidates: list[object], prompt: str) -> None:
+    try:
+        payload = json.loads(prompt.split("\n\n", 1)[1])
+    except Exception:
+        return
+    affordances = payload.get("optimization_affordances") or []
+    if not isinstance(affordances, list):
+        return
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("affordance_ids"):
+            continue
+        matches = _matching_affordance_ids(candidate, affordances)
+        if matches:
+            candidate["affordance_ids"] = matches
+
+
+def _matching_affordance_ids(candidate: dict[str, object], affordances: list[object]) -> list[str]:
+    family = str(candidate.get("transform_family") or "")
+    mechanism = str(candidate.get("mechanism_class") or "")
+    operations = _candidate_operations(candidate)
+    matches: list[str] = []
+    for affordance in affordances:
+        if not isinstance(affordance, dict):
+            continue
+        if affordance.get("transform_family") != family or affordance.get("mechanism_class") != mechanism:
+            continue
+        if not operations:
+            if affordance.get("target_kind") == "few_shot":
+                matches.append(str(affordance.get("affordance_id") or ""))
+            continue
+        for operation in operations:
+            if (
+                operation.get("op") in set(affordance.get("allowed_ops") or [])
+                and operation.get("target") in {affordance.get("target_name"), affordance.get("target_path")}
+            ):
+                matches.append(str(affordance.get("affordance_id") or ""))
+    return [item for item in matches if item]
+
+
+def _candidate_operations(candidate: dict[str, object]) -> list[dict[str, object]]:
+    intervention = candidate.get("intervention")
+    if not isinstance(intervention, dict) or intervention.get("kind") == "example_selection":
+        return []
+    payload = intervention.get("payload")
+    if not isinstance(payload, dict):
+        return []
+    patch = payload.get("patch")
+    if not isinstance(patch, dict):
+        return []
+    operations = patch.get("operations")
+    if not isinstance(operations, list):
+        return []
+    return [operation for operation in operations if isinstance(operation, dict)]
 
 
 def search_hypothesis_with_budget(budget_allocation: dict[str, float]) -> SearchHypothesis:
@@ -181,7 +238,10 @@ class RawCandidateClient:
     def __init__(self, candidates: list[object]) -> None:
         self.candidates = candidates
 
-    def create_response(self, **_: object) -> object:
+    def create_response(self, **kwargs: object) -> object:
+        prompt = str(kwargs.get("input", ""))
+        candidates = list(self.candidates)
+        _attach_affordance_ids(candidates, prompt)
         return type(
             "Response",
             (),
@@ -193,7 +253,7 @@ class RawCandidateClient:
                                 "experiment_id": "exp_1",
                                 "mechanism": "semantic_boundary_rewrite",
                                 "hypothesis": "Malformed candidate test.",
-                                "candidates": self.candidates,
+                                "candidates": candidates,
                             }
                         ]
                     }
@@ -665,7 +725,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         targets = [operation.target for candidate in proposals for operation in candidate.patch.operations]
         self.assertEqual(targets, ["runtime.reasoning_effort"])
 
-    def test_llm_proposer_passes_task_theory_planner_guidance(self) -> None:
+    def test_llm_proposer_passes_task_theory_and_affordances(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -693,7 +753,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertIn('"planner_guidance"', client.input_text)
+        self.assertNotIn('"planner_guidance"', client.input_text)
+        self.assertIn('"optimization_affordances"', client.input_text)
+        self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)
         self.assertIn("example_selection", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
@@ -820,8 +882,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertIn('"experiment_opportunities"', client.input_text)
-        self.assertIn('"confusion:beta->alpha"', client.input_text)
+        self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
+        self.assertIn('"expected":"beta"', client.input_text)
+        self.assertIn('"actual":"alpha"', client.input_text)
         self.assertIn('"train-beta-1"', client.input_text)
 
     def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
