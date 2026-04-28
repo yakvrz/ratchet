@@ -672,7 +672,8 @@ class RatchetReporter:
         profile = result.run_profile or {}
         rows = [
             f"- Elapsed: {float(profile.get('elapsed_s') or 0.0):.3f}s",
-            f"- Phase durations: {json.dumps(profile.get('phase_durations_s', {}), sort_keys=True)}",
+            f"- Phase wall durations: {json.dumps(profile.get('phase_durations_s', {}), sort_keys=True)}",
+            f"- Phase attempt durations: {json.dumps(profile.get('phase_attempt_durations_s', {}), sort_keys=True)}",
             f"- Cache events: {json.dumps(profile.get('cache_events', {}), sort_keys=True)}",
             f"- Cache hit rate: {float(profile.get('cache_hit_rate') or 0.0):.3f}",
         ]

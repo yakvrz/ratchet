@@ -6,7 +6,7 @@ import unittest
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.proposals import ProposalEngine
+from ratchet.proposals import ProposalEngine, prompt_size_profile
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.surface import SurfaceGenerator
 from ratchet.transforms import BehaviorProfile, SearchHypothesis, TransformFamilyState
@@ -476,7 +476,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             [True, False, False],
         )
 
-    def test_llm_proposer_enforces_transform_family_budget_allocation(self) -> None:
+    def test_llm_proposer_allows_same_group_arms_within_family_budget(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -542,22 +542,83 @@ class GeneratedSurfaceTests(unittest.TestCase):
             proposal_budget=2,
         )
 
-        self.assertEqual([proposal.transform_family for proposal in proposals], ["prompt_rewrite", "output_contract_tightening"])
+        self.assertEqual(
+            [proposal.transform_family for proposal in proposals],
+            ["prompt_rewrite", "prompt_rewrite", "output_contract_tightening"],
+        )
         self.assertEqual(engine.last_stats.raw_count, 3)
-        self.assertEqual(engine.last_stats.valid_count, 2)
-        self.assertEqual(engine.last_stats.returned_count, 2)
-        self.assertEqual(len(engine.last_candidate_rows), 2)
+        self.assertEqual(engine.last_stats.valid_count, 3)
+        self.assertEqual(engine.last_stats.returned_count, 3)
+        self.assertEqual(len(engine.last_candidate_rows), 3)
+        self.assertFalse(
+            any("transform family budget exceeded" in reason for reason in (engine.last_stats.invalid_reasons or {}))
+        )
+
+    def test_llm_proposer_constrains_distinct_family_budget_groups(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Answer helpfully."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        prompt_candidate = {
+            "transform_family": "prompt_rewrite",
+            "mechanism_class": "semantic_boundary_rewrite",
+            "experiment_id": "exp_1",
+            "candidate_role": "atomic",
+            "target_slice": "global",
+            "hypothesis": "Try a prompt edit.",
+            "expected_effects": {"summary": "Improve failed cases."},
+            "evaluation_plan": "full_dev",
+            "intervention": {
+                "kind": "patch",
+                "payload": {
+                    "patch": {
+                        "operations": [
+                            {
+                                "op": "add_instruction",
+                                "target": "instructions.system_prompt",
+                                "value": "Answer with grounded evidence.",
+                            }
+                        ],
+                        "rationale": "Prompt candidate.",
+                        "expected_effect": "Improve failed cases.",
+                    }
+                },
+            },
+        }
+        second_prompt = json.loads(json.dumps(prompt_candidate))
+        prompt_candidate["comparison_group"] = "prompt_group_1"
+        second_prompt["comparison_group"] = "prompt_group_2"
+        second_prompt["intervention"]["payload"]["patch"]["operations"][0]["value"] = "Use exact wording from the task."
+        engine._client = RawCandidateClient([prompt_candidate, second_prompt])
+
+        proposals, _ = engine.propose(
+            make_summary("baseline", [0.0]),
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget({"prompt_rewrite": 1.0}),
+            proposal_budget=1,
+        )
+
+        self.assertEqual(len(proposals), 1)
+        self.assertEqual(engine.last_stats.valid_count, 1)
         self.assertTrue(
             any(
                 row["transform_family"] == "prompt_rewrite"
                 and "transform family budget exceeded" in row["invalid_reason"]
                 for row in engine.last_invalid_candidate_rows
-            )
-        )
-        self.assertTrue(
-            any(
-                "transform family budget exceeded" in reason
-                for reason in (engine.last_stats.invalid_reasons or {})
             )
         )
 
@@ -636,7 +697,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals, [])
         self.assertIn('"planner_guidance"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)
-        self.assertIn('"example_selection"', client.input_text)
+        self.assertIn("example_selection", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
 
     def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
@@ -980,13 +1041,19 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertIn('"sanitized": true', client.input_text)
+        self.assertIn('"sanitized":true', client.input_text)
         self.assertIn("[redacted by sanitize_examples]", client.input_text)
         self.assertNotIn("123-45-6789", client.input_text)
         self.assertNotIn("private expected answer", client.input_text)
         self.assertNotIn("private wrong output", client.input_text)
         self.assertNotIn("private raw transcript", client.input_text)
         self.assertNotIn("private grading note", client.input_text)
+        self.assertEqual(engine.last_call_diagnostics["prompt_chars"], len(client.input_text))
+        self.assertEqual(
+            engine.last_call_diagnostics["prompt_approx_tokens"],
+            prompt_size_profile(client.input_text)["approx_tokens"],
+        )
+        self.assertLess(prompt_size_profile(client.input_text)["chars"], 30000)
 
 
 if __name__ == "__main__":

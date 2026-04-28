@@ -11,6 +11,7 @@ import unittest
 from ratchet.scaffold import init_scaffold
 from ratchet.preflight import run_preflight_check
 from ratchet.config import RatchetConfigError, load_run_config, resolve_run_config
+from ratchet.__main__ import CliProgressPrinter
 from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
@@ -192,6 +193,73 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.write_evals(root / "evals.sample.jsonl")
             completed = self.run_cli("check", "--config", str(root / "ratchet.toml"), "--sample-limit", "2")
             self.assertIn("Ratchet check passed.", completed.stdout)
+
+    def test_progress_formatter_renders_key_events_consistently(self) -> None:
+        printer = CliProgressPrinter()
+
+        run_line = printer.format(
+            {
+                "event": "run_started",
+                "elapsed_s": 3.2,
+                "objective": "correctness",
+                "train_cases": 20,
+                "dev_cases": 30,
+                "holdout_cases": 10,
+                "dev_budget": 8,
+                "holdout_budget": 2,
+                "case_concurrency": 4,
+                "proposal_example_count": 12,
+            }
+        )
+        self.assertIsNotNone(run_line)
+        self.assertIn("[ratchet 00:03] RUN", run_line)
+        self.assertIn("train=20 dev=30 holdout=10", run_line)
+
+        proposal_line = printer.format(
+            {
+                "event": "proposal_completed",
+                "elapsed_s": 72,
+                "returned_count": 5,
+                "valid_count": 4,
+                "invalid_count": 1,
+                "duplicate_count": 0,
+                "call_diagnostics": {
+                    "model": "gemini-3-flash-preview",
+                    "input_tokens": 1200,
+                    "output_tokens": 300,
+                    "prompt_approx_tokens": 1000,
+                    "elapsed_s": 2.4,
+                    "finish_reason": "stop",
+                },
+            }
+        )
+        self.assertIsNotNone(proposal_line)
+        self.assertIn("PROPOSE", proposal_line)
+        self.assertIn("returned=5 valid=4 invalid=1", proposal_line)
+        self.assertIn("model=gemini-3-flash-preview", proposal_line)
+        self.assertIn("tokens=1200/300", proposal_line)
+
+        candidate_line = printer.format(
+            {
+                "event": "candidate_evaluated",
+                "elapsed_s": 125,
+                "frontier_status": "screened_out",
+                "transform_family": "targeted_few_shot",
+                "patch_hash": "abcdef123456",
+                "score_delta": 0.125,
+                "cost_delta": -0.002,
+                "latency_delta": 0.31,
+                "stage_count": 2,
+                "full_dev_evaluated": False,
+                "rejection_reason": "small-dev regression",
+            }
+        )
+        self.assertIsNotNone(candidate_line)
+        self.assertIn("CANDIDATE", candidate_line)
+        self.assertIn("patch=abcdef12", candidate_line)
+        self.assertIn("score_delta=+0.125", candidate_line)
+        self.assertIn("cost_delta=-$0.0020", candidate_line)
+        self.assertIn("full_dev=no", candidate_line)
 
     def test_check_fails_clearly_on_invalid_adapter_wiring(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

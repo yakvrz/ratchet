@@ -32,6 +32,22 @@ from ratchet.validation import PatchValidator
 
 
 MAX_PROPOSALS_PER_ITERATION = 8
+PROPOSER_INSTRUCTIONS = (
+    "You are Ratchet's task-agnostic patch proposer. Return JSON with experiments[] and optional "
+    "target_considerations[]. Keep text concise. Use planner_guidance and search_hypothesis to choose "
+    "mechanism_class values from the allowed mechanism list. Each candidate must name an active "
+    "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
+    "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
+    "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
+    "proposal_example_bank. Do not inline few-shot examples. Patch operations must use editable_targets, "
+    "allowed_ops, value_schema, and the declared transform family's supported ops. Declare family by the "
+    "actual operation: instruction ops -> prompt_rewrite/output_contract_tightening, set_runtime_param -> "
+    "runtime_tuning, change_model -> model_substitution, source_case_ids/add_few_shot -> targeted_few_shot. "
+    "Do not copy diagnostic_only_examples into patch values; only proposal-safe train examples may be copied, "
+    "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
+    "preserve correctness and explore model/runtime/retrieval/tool efficiency even when failures are absent. "
+    "Return empty experiments only when no safe evaluable candidate exists."
+)
 
 
 @dataclass
@@ -145,6 +161,9 @@ class ProposalEngine:
             proposal_budget=proposal_budget,
         )
         family_counts: Counter[str] = Counter()
+        family_budget_groups: set[tuple[str, str]] = set()
+        scheduled_group_indices: dict[str, int] = {}
+        scheduled_group_flags: dict[str, bool] = {}
         group_count = 0
         candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows: list[dict[str, Any]] = []
@@ -206,12 +225,14 @@ class ProposalEngine:
             if not group_valid:
                 continue
             group_family = group_valid[0][0].transform_family
+            budget_group = _candidate_budget_group(group_valid[0][0])
+            family_budget_group = (group_family, budget_group)
             raw_quota = family_quotas.get(group_family)
             if raw_quota is None:
                 quota = proposal_budget if not family_quotas else 0
             else:
                 quota = max(1, raw_quota)
-            if family_counts[group_family] >= quota:
+            if family_budget_group not in family_budget_groups and family_counts[group_family] >= quota:
                 reason = f"transform family budget exceeded for {group_family!r} (quota {quota})"
                 invalid_reasons[reason] += len(group_valid)
                 for candidate, variant_materialization, _digest in group_valid:
@@ -219,16 +240,22 @@ class ProposalEngine:
                         _invalid_candidate_row(candidate, reason, materialization=variant_materialization)
                     )
                 continue
-            family_counts[group_family] += 1
-            group_count += 1
-            group_scheduled = group_count <= proposal_budget
+            if family_budget_group not in family_budget_groups:
+                family_counts[group_family] += 1
+                family_budget_groups.add(family_budget_group)
+            if budget_group not in scheduled_group_indices:
+                group_count += 1
+                scheduled_group_indices[budget_group] = group_count
+                scheduled_group_flags[budget_group] = group_count <= proposal_budget
+            proposal_group = scheduled_group_indices[budget_group]
+            group_scheduled = scheduled_group_flags[budget_group]
             for variant_rank, (candidate, variant_materialization, digest) in enumerate(group_valid, start=1):
                 valid.append(candidate)
                 budget_valid.append(candidate)
                 candidate_rows.append(
                     {
                         "rank": len(candidate_rows) + 1,
-                        "proposal_group": group_count,
+                        "proposal_group": proposal_group,
                         "variant_rank": variant_rank,
                         "proposal_patch_hash": patch_hash(candidate.patch),
                         "patch_hash": digest,
@@ -321,7 +348,10 @@ class ProposalEngine:
             "proposal_budget": proposal_budget,
             "target_kinds": target_kinds,
             "transform_library": active_family_rows,
-            "search_hypothesis": search_hypothesis.to_prompt_dict(),
+            "search_hypothesis": search_hypothesis.to_prompt_dict(
+                max_contexts_per_family=2,
+                max_constrained_contexts=5,
+            ),
             "task_theory": _compact_task_theory(task_theory),
             "planner_guidance": planner_guidance,
             "proposal_policy": {
@@ -338,7 +368,7 @@ class ProposalEngine:
                     "and constraint risk."
                 ),
             },
-            "current_patch": summary.patch.to_dict(),
+            "current_patch": _compact_patch(summary.patch.to_dict()),
             "behavior": {
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,
@@ -362,8 +392,8 @@ class ProposalEngine:
                 ),
                 "sanitized": objective.constraints.sanitize_examples,
                 "examples": summary.failed_examples(
-                    limit=5,
-                    max_text_chars=360,
+                    limit=3,
+                    max_text_chars=260,
                     sanitize_text=objective.constraints.sanitize_examples,
                 ),
             },
@@ -371,7 +401,7 @@ class ProposalEngine:
                 _compact_proposal_example_bank(
                     proposal_example_bank,
                     target_labels=_target_labels_for_examples(compact_diagnostics),
-                    max_examples=12,
+                    max_examples=8,
                     max_per_label=2,
                 )
                 if proposal_example_bank is not None
@@ -381,10 +411,11 @@ class ProposalEngine:
                     "examples": [],
                 }
             ),
-            "recent_history": _compact_recent_history(history, limit=6),
+            "recent_history": _compact_recent_history(history, limit=4),
         }
         try:
             started_at = time.perf_counter()
+            prompt_input = _proposal_prompt_input(prompt, proposal_budget=proposal_budget)
             response = self._client.create_response(
                 model=self.model,
                 reasoning={"effort": self.reasoning_effort},
@@ -450,81 +481,13 @@ class ProposalEngine:
                         },
                     }
                 },
-                input=(
-                    "You are Ratchet's patch proposer inside a task-agnostic agent optimizer. "
-                    "Return JSON with an experiments array and, when possible, a target_considerations array. "
-                    f"The experiments should contain at most {proposal_budget} total candidates. "
-                    "Keep all rationale, hypothesis, transform_instance, and evaluation_plan strings concise. "
-                    "Do not include long examples, full transcripts, or repeated label lists in candidate fields. "
-                    "Each experiment must set experiment.mechanism_class to one mechanism class from the transform library; "
-                    "experiment.mechanism may be a short human-readable label. "
-                    "Use mechanism_class values only from: runtime_defect_fix, output_contract_fix, semantic_boundary_rewrite, "
-                    "representative_examples, contrastive_examples, model_capability_probe, efficiency_probe, ablation. "
-                    "Use planner_guidance.primary_mechanisms as the default experiment mechanisms unless the evidence, "
-                    "surface, or constraints make them unsuitable; if you skip all primary mechanisms, explain why in "
-                    "target_considerations. "
-                    "Candidate roles must be one of: atomic, composed, control, ablation, compression. "
-                    "For semantic-boundary or example-anchoring bottlenecks, include a composed candidate when compatible "
-                    "families need to work together, plus a control or ablation when budget allows. "
-                    "Each candidate must name one active transform_family from search_hypothesis.active_families, "
-                    "name a compatible mechanism_class, state a hypothesis, and include one intervention object. "
-                    "Use intervention.kind='patch' with intervention.payload.patch for normal patch-based transforms. "
-                    "Prefer the listed active_contexts. "
-                    "If a family's lifecycle state is constrained, it remains eligible, but only for candidates that are "
-                    "materially distinct from constrained_or_paused_contexts; use different targets, operations, slices, "
-                    "or concrete mechanism classes, and explain that distinction in transform_instance and hypothesis. "
-                    "Patch interventions must have payload.patch.operations, payload.patch.rationale, "
-                    "payload.patch.expected_effect, and optional metadata. payload.patch.operations must be an array "
-                    "of operation objects shaped like {\"op\":\"...\",\"target\":\"...\",\"value\":...}; never encode "
-                    "operations as strings, tuples, or flattened operation fields. "
-                    "Exception: targeted_few_shot candidates must use intervention.kind='example_selection'. "
-                    "Set intervention.payload.source_case_ids to a JSON array of proposal_example_bank case_id strings. "
-                    "Do not emit patch, inline add_few_shot values, example objects, inputs, outputs, or placeholder objects "
-                    "for targeted_few_shot; Ratchet will materialize the add_few_shot patch. "
-                    "Use only editable_targets listed in the prompt. Use only operations allowed by each target. "
-                    "The patch operations must be compatible with the declared transform_family's supported_ops and "
-                    "supported_edit_kinds. "
-                    "Declare transform_family by the actual patch operations: revise_instruction/add_instruction use "
-                    "prompt_rewrite or output_contract_tightening; set_runtime_param uses runtime_tuning; "
-                    "change_model uses model_substitution; add_few_shot or source_case_ids uses targeted_few_shot. "
-                    "Do not label instruction-only patches as targeted_few_shot or runtime_tuning. "
-                    "Each operation value must satisfy the target value_schema exactly: respect type, enum, and maxLength. "
-                    "For targeted_few_shot, emit an intervention like "
-                    "{\"kind\":\"example_selection\",\"payload\":{\"source_case_ids\":[\"train-example-1\",\"train-example-2\"],"
-                    "\"selection_strategy\":\"contrastive\",\"target_labels\":[\"label_a\"]}}. "
-                    "Do not use a comma-separated string. "
-                    "Do not invent few-shot examples when proposal_example_bank is empty. "
-                    "Allowed operations are add_instruction, revise_instruction, add_output_constraint, "
-                    "revise_tool_description, revise_tool_policy, set_retrieval_param, set_runtime_param, "
-                    "change_model, add_few_shot, and add_verifier_retry. Touch at most two targets per patch. "
-                    "Prefer minimal, independently evaluable patches; do not combine unrelated ideas. "
-                    "Before choosing patches, inspect the generated editable target kinds and record whether each plausible "
-                    "kind was proposed or skipped. Treat model changes as a normal optimizer action when a model target "
-                    "is present: compare the current model against allowed alternatives and either include a change_model "
-                    "patch when it plausibly improves the objective, or explain why the model target was skipped. "
-                    "For correctness mode, consider every diagnosis in the prompt and propose patches that address the "
-                    "largest or most actionable failure clusters while preserving cost and latency constraints. "
-                    "When failed examples mention invalid_output, malformed or empty raw output, parser fallback, or output "
-                    "contract labels, prefer output_contract/output instruction fixes over loosening semantic grounding or "
-                    "unknown-answer policy. Only loosen grounding/fallback behavior when the evidence shows the model returned "
-                    "a valid output object with a semantically over-cautious answer. "
-                    "For cost or latency mode, preserve correctness within constraints and change only model, runtime, retrieval, "
-                    "or similarly relevant targets when the surface allows them. In cost or latency mode, do not require failing "
-                    "examples before proposing patches; saturated correctness is a reason to explore cheaper or faster variants, "
-                    "not a reason to return an empty patch list. "
-                    "Return an empty experiments array only after considering every active transform family and concluding "
-                    "that no safe, evaluable candidate exists. "
-                    "Do not alter, describe, or route around the eval scorer; it is frozen. "
-                    "Do not memorize diagnostic-only examples: no literal case IDs, user inputs, private names, or expected "
-                    "answers from diagnostic_only_examples may appear in patch values unless the same text is already part "
-                    "of the editable target's current_value. Proposal-safe train examples are the only examples that may be "
-                    "copied, and only through few-shot items with source_case_id.\n\n"
-                    f"{json.dumps(prompt, indent=2, default=str)}"
-                ),
-                max_output_tokens=6000,
+                input=prompt_input,
+                max_output_tokens=3500,
             )
             self.last_call_diagnostics = {
                 "component": "proposer",
+                "prompt_chars": len(prompt_input),
+                "prompt_approx_tokens": approximate_prompt_tokens(prompt_input),
                 **response_diagnostics(
                     response,
                     model=self.model,
@@ -534,6 +497,8 @@ class ProposalEngine:
         except Exception as exc:
             self.last_call_diagnostics = {
                 "component": "proposer",
+                "prompt_chars": len(prompt_input) if "prompt_input" in locals() else None,
+                "prompt_approx_tokens": approximate_prompt_tokens(prompt_input) if "prompt_input" in locals() else None,
                 **error_response_diagnostics(
                     exc,
                     model=self.model,
@@ -573,9 +538,9 @@ class ProposalEngine:
                         "The previous proposer response was invalid JSON. "
                         "Return only a valid JSON object with target_considerations and experiments. "
                         "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
-                        f"Invalid response:\n{response.output_text[:16000]}"
+                        f"Invalid response:\n{response.output_text[:9000]}"
                     ),
-                    max_output_tokens=6000,
+                    max_output_tokens=3500,
                 )
                 repair_diagnostics = response_diagnostics(
                     repair_response,
@@ -1075,6 +1040,42 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
     return rows
 
 
+def _proposal_prompt_input(prompt: dict[str, Any], *, proposal_budget: int) -> str:
+    return (
+        f"{PROPOSER_INSTRUCTIONS} proposal_budget={proposal_budget}. "
+        "Allowed mechanisms: runtime_defect_fix, output_contract_fix, semantic_boundary_rewrite, "
+        "representative_examples, contrastive_examples, model_capability_probe, efficiency_probe, ablation.\n\n"
+        f"{json.dumps(prompt, separators=(',', ':'), default=str)}"
+    )
+
+
+def approximate_prompt_tokens(text: str) -> int:
+    return max(1, (len(text) + 3) // 4)
+
+
+def prompt_size_profile(text: str) -> dict[str, int]:
+    return {
+        "chars": len(text),
+        "approx_tokens": approximate_prompt_tokens(text),
+    }
+
+
+def _compact_patch(patch: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "operations": [
+            {
+                "op": operation.get("op"),
+                "target": operation.get("target"),
+                "value_summary": _value_summary(operation.get("value")),
+            }
+            for operation in patch.get("operations", [])
+            if isinstance(operation, dict)
+        ],
+        "rationale": str(patch.get("rationale") or "")[:240],
+        "expected_effect": str(patch.get("expected_effect") or "")[:240],
+    }
+
+
 def _target_labels_for_examples(behavior_diagnostics: dict[str, Any]) -> set[str]:
     labels = {str(label) for label in behavior_diagnostics.get("weak_labels", []) if label}
     for row in behavior_diagnostics.get("confusions", []):
@@ -1157,6 +1158,18 @@ def _family_budget_quotas(
     for family, _ in ranked_remainders[:remaining]:
         quotas[family] += 1
     return quotas
+
+
+def _candidate_budget_group(candidate: CandidateProposal) -> str:
+    comparison_group = candidate.comparison_group or candidate.experiment_id or "default"
+    target_slice = candidate.target_slice or "global"
+    return "|".join(
+        [
+            candidate.transform_family,
+            str(comparison_group),
+            str(target_slice),
+        ]
+    )
 
 
 def _targeted_few_shot_reference_error(candidate: CandidateProposal) -> str | None:

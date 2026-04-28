@@ -3,7 +3,12 @@ from __future__ import annotations
 import unittest
 
 from ratchet.evidence import ProposalExample, ProposalExampleBank
-from ratchet.profiling import quality_cost_tradeoffs, runtime_reliability_diagnostics
+from ratchet.profiling import (
+    _phase_attempt_durations,
+    _phase_durations,
+    quality_cost_tradeoffs,
+    runtime_reliability_diagnostics,
+)
 from ratchet.proposals import _few_shot_count_variants, _materialize_candidate_references
 from ratchet.optimizer import _prefer_simple_few_shot_strategy, _simplification_variants
 from ratchet.results import CaseEvaluation, PatchSummary
@@ -58,6 +63,17 @@ def summary(
 
 
 class ProfilingTests(unittest.TestCase):
+    def test_phase_durations_report_wall_time_for_overlapping_attempts(self) -> None:
+        rows = [
+            {"event": "candidate_evaluation_started", "elapsed_s": 10.0},
+            {"event": "candidate_evaluation_started", "elapsed_s": 11.0},
+            {"event": "candidate_evaluated", "elapsed_s": 20.0},
+            {"event": "candidate_evaluated", "elapsed_s": 21.0},
+        ]
+
+        self.assertEqual(_phase_durations(rows)["candidate_evaluation"], 11.0)
+        self.assertEqual(_phase_attempt_durations(rows)["candidate_evaluation"], 20.0)
+
     def test_runtime_only_invalid_output_fix_below_cap_is_suspicious(self) -> None:
         baseline = summary(
             AgentPatch.empty(),

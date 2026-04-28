@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 import contextlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -76,8 +76,10 @@ PROPOSAL_RETRY_BUDGET = 1
 FINALIST_CONFIRMATION_SAMPLES = 2
 FRONTIER_PARENT_STALL_LIMIT = 2
 MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 2
+MAX_SIMPLIFICATION_PARENT_COUNT = 2
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
+MAX_FULL_DEV_PER_COMPARISON_GROUP = 1
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -88,6 +90,24 @@ class FrontierParentState:
     accepted_child_count: int = 0
     last_selected_iteration: int = 0
     exhausted: bool = False
+
+
+@dataclass
+class CandidateEvaluationState:
+    candidate: CandidateProposal
+    patch: AgentPatch
+    patch_hash: str
+    proposal_patch_hash: str
+    transform_context: TransformContextKey
+    stage_rows: list[dict[str, Any]] = field(default_factory=list)
+    summary: PatchSummary | None = None
+    comparison: Comparison | None = None
+    flip_summary: dict[str, Any] | None = None
+    rejection_reason: str | None = None
+    constraint_warning: str | None = None
+    frontier_status: str = "pending"
+    accepted: bool = False
+    full_dev_evaluated: bool = False
 
 
 @contextlib.contextmanager
@@ -660,50 +680,51 @@ class RatchetOptimizer:
         for dev_summary in finalist_dev_patches:
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
-            confirmation_cases = confirmation_case_subset(baseline_dev, dev_summary, dev_cases)
-            self._emit_progress(
-                "confirmation_started",
-                patch_hash=dev_summary.patch_hash,
-                case_count=len(confirmation_cases),
-                sample_count=FINALIST_CONFIRMATION_SAMPLES,
-                reason=runtime_diagnostic.get("reason"),
-            )
-            sample_start = 1000 + len(confirmation_results) * 100
-            sample_indices = tuple(range(sample_start, sample_start + FINALIST_CONFIRMATION_SAMPLES))
-            confirmation_baseline = self.evaluate_patch(
-                baseline_patch,
-                confirmation_cases,
-                sample_indices=sample_indices,
-            )
-            confirmation_candidate = self.evaluate_patch(
-                dev_summary.patch,
-                confirmation_cases,
-                sample_indices=sample_indices,
-            )
-            confirmation = confirmation_result(
-                reference=baseline_dev,
-                candidate=dev_summary,
-                confirmation_reference=confirmation_baseline,
-                confirmation_candidate=confirmation_candidate,
-                objective=self.objective,
-            )
-            confirmation_results.append(confirmation)
-            decision_log.append(
-                {
-                    "type": "finalist_confirmation",
-                    "patch_hash": dev_summary.patch_hash,
-                    "runtime_reliability_diagnostics": runtime_diagnostic,
-                    "confirmation": confirmation,
-                }
-            )
-            self._emit_progress(
-                "confirmation_completed",
-                patch_hash=dev_summary.patch_hash,
-                passed=confirmation.get("passed"),
-                reason=confirmation.get("reason"),
-            )
-            if not confirmation.get("passed"):
-                finalist_statuses.append(
+            if _requires_finalist_confirmation(dev_summary.patch, runtime_diagnostic):
+                confirmation_cases = confirmation_case_subset(baseline_dev, dev_summary, dev_cases)
+                self._emit_progress(
+                    "confirmation_started",
+                    patch_hash=dev_summary.patch_hash,
+                    case_count=len(confirmation_cases),
+                    sample_count=FINALIST_CONFIRMATION_SAMPLES,
+                    reason=runtime_diagnostic.get("reason"),
+                )
+                sample_start = 1000 + len(confirmation_results) * 100
+                sample_indices = tuple(range(sample_start, sample_start + FINALIST_CONFIRMATION_SAMPLES))
+                confirmation_baseline = self.evaluate_patch(
+                    baseline_patch,
+                    confirmation_cases,
+                    sample_indices=sample_indices,
+                )
+                confirmation_candidate = self.evaluate_patch(
+                    dev_summary.patch,
+                    confirmation_cases,
+                    sample_indices=sample_indices,
+                )
+                confirmation = confirmation_result(
+                    reference=baseline_dev,
+                    candidate=dev_summary,
+                    confirmation_reference=confirmation_baseline,
+                    confirmation_candidate=confirmation_candidate,
+                    objective=self.objective,
+                )
+                confirmation_results.append(confirmation)
+                decision_log.append(
+                    {
+                        "type": "finalist_confirmation",
+                        "patch_hash": dev_summary.patch_hash,
+                        "runtime_reliability_diagnostics": runtime_diagnostic,
+                        "confirmation": confirmation,
+                    }
+                )
+                self._emit_progress(
+                    "confirmation_completed",
+                    patch_hash=dev_summary.patch_hash,
+                    passed=confirmation.get("passed"),
+                    reason=confirmation.get("reason"),
+                )
+                if not confirmation.get("passed"):
+                    finalist_statuses.append(
                         {
                             "patch_hash": dev_summary.patch_hash,
                             "status": "failed",
@@ -711,11 +732,25 @@ class RatchetOptimizer:
                             "reason": confirmation.get("reason"),
                             "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
                             "dev_metrics": dev_summary.to_dict(),
+                            "runtime_reliability_diagnostics": runtime_diagnostic,
+                            "confirmation": confirmation,
+                        }
+                    )
+                    continue
+            else:
+                decision_log.append(
+                    {
+                        "type": "finalist_confirmation_skipped",
+                        "patch_hash": dev_summary.patch_hash,
+                        "reason": "no runtime/output reliability suspicion; holdout is the validation gate",
                         "runtime_reliability_diagnostics": runtime_diagnostic,
-                        "confirmation": confirmation,
                     }
                 )
-                continue
+                self._emit_progress(
+                    "confirmation_skipped",
+                    patch_hash=dev_summary.patch_hash,
+                    reason="no runtime/output reliability suspicion",
+                )
             self._emit_progress(
                 "holdout_candidate_started",
                 patch_hash=dev_summary.patch_hash,
@@ -891,7 +926,17 @@ class RatchetOptimizer:
     ) -> list[PatchSummary]:
         known_by_hash = {summary.patch_hash: summary for summary in [baseline_dev, *accepted_dev_patches]}
         augmented_by_hash = {summary.patch_hash: summary for summary in finalist_dev_patches}
-        for parent in list(finalist_dev_patches):
+        simplification_parents = list(finalist_dev_patches)[:MAX_SIMPLIFICATION_PARENT_COUNT]
+        for skipped_parent in list(finalist_dev_patches)[MAX_SIMPLIFICATION_PARENT_COUNT:]:
+            row = {
+                "type": "simplification_skipped",
+                "parent_patch_hash": skipped_parent.patch_hash,
+                "reason": "simplification parent cap reached",
+                "max_simplification_parent_count": MAX_SIMPLIFICATION_PARENT_COUNT,
+            }
+            simplification_results.append(row)
+            decision_log.append(row)
+        for parent in simplification_parents:
             for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]:
                 digest = patch_hash(variant)
                 if digest == parent.patch_hash:
@@ -973,52 +1018,48 @@ class RatchetOptimizer:
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
     ) -> tuple[PatchSummary, str | None, list[dict[str, Any]]]:
-        stages = self._progressive_eval_stages(parent, dev_cases)
-        smoke_name, smoke_cases = stages[0]
-        parent_smoke = _summary_for_cases(parent, smoke_cases) or self.evaluate_patch(parent.patch, smoke_cases)
-        candidate_smoke = self.evaluate_patch(patch, smoke_cases)
-        smoke_rejection = _smoke_rejection_reason(parent_smoke, candidate_smoke)
-        smoke_comparison = compare_summaries(parent_smoke, candidate_smoke)
-        smoke_flip_summary = behavior_flip_summary(parent_smoke, candidate_smoke)
-        stage_rows = [
-            {
-                "stage": smoke_name,
-                "case_ids": [case.id for case in smoke_cases],
-                "case_count": len(smoke_cases),
-                "patch_hash": candidate_smoke.patch_hash,
-                "metrics": candidate_smoke.to_dict(),
-                "comparison_to_parent": smoke_comparison.to_dict(),
-                "behavior_flip_summary": smoke_flip_summary,
-                "rejection_reason": smoke_rejection,
-                "passed": smoke_rejection is None,
-            }
-        ]
-        if smoke_rejection is not None:
-            return candidate_smoke, f"simplification smoke gate rejected variant: {smoke_rejection}", stage_rows
-        candidate_full = self.evaluate_patch(patch, dev_cases)
-        baseline_full = _summary_for_cases(baseline, dev_cases) or self.evaluate_patch(baseline.patch, dev_cases)
-        full_comparison = compare_summaries(baseline_full, candidate_full)
-        full_flip_summary = behavior_flip_summary(baseline_full, candidate_full)
-        full_rejection = patch_rejection_reason(
-            baseline=baseline_full,
-            reference=baseline_full,
-            patch_summary=candidate_full,
-            objective=self.objective,
-        )
-        stage_rows.append(
-            {
-                "stage": "full_dev",
-                "case_ids": [case.id for case in dev_cases],
-                "case_count": len(dev_cases),
-                "patch_hash": candidate_full.patch_hash,
-                "metrics": candidate_full.to_dict(),
-                "comparison_to_baseline": full_comparison.to_dict(),
-                "behavior_flip_summary": full_flip_summary,
-                "rejection_reason": full_rejection,
-                "passed": full_rejection is None,
-            }
-        )
-        return candidate_full, full_rejection, stage_rows
+        stage_rows: list[dict[str, Any]] = []
+        latest_summary: PatchSummary | None = None
+        latest_rejection: str | None = None
+        for stage_name, stage_cases in self._progressive_eval_stages(parent, dev_cases):
+            parent_stage = _summary_for_cases(parent, stage_cases) or self.evaluate_patch(parent.patch, stage_cases)
+            baseline_stage = _summary_for_cases(baseline, stage_cases) or self.evaluate_patch(baseline.patch, stage_cases)
+            candidate_stage = self.evaluate_patch(patch, stage_cases)
+            latest_summary = candidate_stage
+            comparison_to_parent = compare_summaries(parent_stage, candidate_stage)
+            comparison_to_baseline = compare_summaries(baseline_stage, candidate_stage)
+            flip_summary = behavior_flip_summary(baseline_stage, candidate_stage)
+            if stage_name == "smoke":
+                rejection = _smoke_rejection_reason(parent_stage, candidate_stage)
+            else:
+                rejection = patch_rejection_reason(
+                    baseline=baseline_stage,
+                    reference=baseline_stage,
+                    patch_summary=candidate_stage,
+                    objective=self.objective,
+                )
+            latest_rejection = rejection
+            stage_rows.append(
+                {
+                    "stage": stage_name,
+                    "case_ids": [case.id for case in stage_cases],
+                    "case_count": len(stage_cases),
+                    "patch_hash": candidate_stage.patch_hash,
+                    "metrics": candidate_stage.to_dict(),
+                    "comparison_to_parent": comparison_to_parent.to_dict(),
+                    "comparison_to_baseline": comparison_to_baseline.to_dict(),
+                    "behavior_flip_summary": flip_summary,
+                    "rejection_reason": rejection,
+                    "passed": rejection is None,
+                }
+            )
+            if rejection is not None:
+                return candidate_stage, f"simplification {stage_name} gate rejected variant: {rejection}", stage_rows
+            if stage_name == "full_dev":
+                return candidate_stage, None, stage_rows
+        if latest_summary is None:
+            latest_summary = self.evaluate_patch(patch, dev_cases)
+        return latest_summary, latest_rejection, stage_rows
 
     def _propose_and_evaluate_parent(
         self,
@@ -1142,10 +1183,8 @@ class RatchetOptimizer:
             if row.get("proposal_patch_hash")
         }
         accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
-        evaluations_used = 0
-        for candidate in proposals:
-            if evaluations_used >= proposal_budget:
-                break
+        evaluation_states: list[CandidateEvaluationState] = []
+        for candidate in proposals[:proposal_budget]:
             patch = compose_patches(current_dev.patch, candidate.patch)
             digest = patch_hash(patch)
             if digest in evaluated_patch_hashes:
@@ -1161,24 +1200,33 @@ class RatchetOptimizer:
                 patch_hash=digest,
                 proposal_patch_hash=patch_hash(candidate.patch),
             )
-            summary, comparison, flip_summary, rejection_reason, stage_rows = self._evaluate_candidate_progressively(
-                patch=patch,
-                reference=current_dev,
-                baseline=baseline_dev,
-                dev_cases=dev_cases,
+            evaluation_states.append(
+                CandidateEvaluationState(
+                    candidate=candidate,
+                    patch=patch,
+                    patch_hash=digest,
+                    proposal_patch_hash=patch_hash(candidate.patch),
+                    transform_context=transform_context,
+                )
             )
-            evaluations_used += 1
-            evaluated_patch_hashes.add(digest)
-            constraint_warning = constraint_rejection_reason(baseline_dev, summary, self.objective)
-            if rejection_reason is None and constraint_warning is None:
-                discovery_status = "promotable"
-            elif rejection_reason is None and constraint_warning is not None:
-                discovery_status = "quality_frontier"
-            elif _efficiency_improved(current_dev, summary):
-                discovery_status = "efficiency_frontier"
-            else:
-                discovery_status = "failed"
-            accepted = discovery_status in {"promotable", "quality_frontier", "efficiency_frontier"}
+        if not evaluation_states:
+            return [], 0
+
+        self._evaluate_candidate_batch_progressively(
+            states=evaluation_states,
+            reference=current_dev,
+            baseline=baseline_dev,
+            dev_cases=dev_cases,
+        )
+        evaluations_used = len(evaluation_states)
+        for state in evaluation_states:
+            candidate = state.candidate
+            summary = state.summary
+            comparison = state.comparison
+            flip_summary = state.flip_summary
+            if summary is None or comparison is None or flip_summary is None:
+                continue
+            evaluated_patch_hashes.add(state.patch_hash)
             proposal_row = {
                 "iteration": iteration,
                 "attempt": attempt,
@@ -1186,10 +1234,10 @@ class RatchetOptimizer:
                 "retry_reason": retry_reason,
                 "parent_rank": parent_index + 1,
                 "parent_patch_hash": current_dev.patch_hash,
-                "proposal_patch_hash": patch_hash(candidate.patch),
+                "proposal_patch_hash": state.proposal_patch_hash,
                 "proposal": candidate.patch.to_dict(),
                 "candidate": candidate.to_dict(),
-                "materialization": materialization_by_proposal_hash.get(patch_hash(candidate.patch), {}),
+                "materialization": materialization_by_proposal_hash.get(state.proposal_patch_hash, {}),
                 "transform_family": candidate.transform_family,
                 "mechanism_class": candidate.mechanism_class,
                 "experiment_id": candidate.experiment_id,
@@ -1197,21 +1245,22 @@ class RatchetOptimizer:
                 "comparison_group": candidate.comparison_group,
                 "transform_instance": candidate.transform_instance,
                 "transform_parameters": candidate.transform_parameters,
-                "transform_context": transform_context.to_dict(),
+                "transform_context": state.transform_context.to_dict(),
                 "target_slice": candidate.target_slice,
                 "hypothesis": candidate.hypothesis,
                 "expected_effects": candidate.expected_effects,
                 "evaluation_plan": candidate.evaluation_plan,
-                "evaluation_stages": stage_rows,
-                "patch_hash": digest,
-                "patch": patch.to_dict(),
+                "evaluation_stages": state.stage_rows,
+                "patch_hash": state.patch_hash,
+                "patch": state.patch.to_dict(),
                 "comparison_to_parent": comparison.to_dict(),
                 "behavior_flip_summary": flip_summary,
                 "metrics": summary.to_dict(),
-                "accepted": accepted,
-                "frontier_status": discovery_status,
-                "rejection_reason": rejection_reason,
-                "constraint_warning": constraint_warning,
+                "accepted": state.accepted,
+                "frontier_status": state.frontier_status,
+                "rejection_reason": state.rejection_reason,
+                "constraint_warning": state.constraint_warning,
+                "full_dev_evaluated": state.full_dev_evaluated,
                 "diagnosis_category": candidate.patch.metadata.get("diagnosis_category"),
             }
             proposals_log.append(proposal_row)
@@ -1219,10 +1268,10 @@ class RatchetOptimizer:
             decision_log.append(
                 observe_transform_result(
                     family=candidate.transform_family,
-                    context_key=transform_context,
-                    accepted=accepted,
+                    context_key=state.transform_context,
+                    accepted=state.accepted,
                     comparison=comparison,
-                    rejection_reason=rejection_reason,
+                    rejection_reason=state.rejection_reason,
                 )
             )
             self._emit_progress(
@@ -1231,30 +1280,123 @@ class RatchetOptimizer:
                 attempt=attempt,
                 parent_rank=parent_index + 1,
                 transform_family=candidate.transform_family,
-                transform_context=transform_context.to_dict(),
-                patch_hash=digest,
-                accepted=accepted,
-                frontier_status=discovery_status,
-                rejection_reason=rejection_reason,
-                constraint_warning=constraint_warning,
+                transform_context=state.transform_context.to_dict(),
+                patch_hash=state.patch_hash,
+                accepted=state.accepted,
+                frontier_status=state.frontier_status,
+                rejection_reason=state.rejection_reason,
+                constraint_warning=state.constraint_warning,
                 score_delta=comparison.score_delta,
                 cost_delta=comparison.cost_delta,
                 latency_delta=comparison.latency_delta,
-                stage_count=len(stage_rows),
+                stage_count=len(state.stage_rows),
+                full_dev_evaluated=state.full_dev_evaluated,
             )
-            if accepted:
+            if state.accepted:
                 accepted_rows.append((candidate, summary, comparison))
                 if candidate.mechanism_class in {"runtime_defect_fix", "output_contract_fix"}:
                     decision_log.append(
                         {
                             "type": "residual_rediagnosis_triggered",
-                            "patch_hash": digest,
+                            "patch_hash": state.patch_hash,
                             "parent_patch_hash": current_dev.patch_hash,
                             "mechanism_class": candidate.mechanism_class,
                             "reason": "structural/runtime fix accepted; child branch should be rediagnosed for residual failures",
                         }
                     )
         return _prefer_simple_few_shot_strategy(accepted_rows), evaluations_used
+
+    def _evaluate_candidate_batch_progressively(
+        self,
+        *,
+        states: list[CandidateEvaluationState],
+        reference: PatchSummary,
+        baseline: PatchSummary,
+        dev_cases: tuple[EvalCase, ...],
+    ) -> None:
+        active = list(states)
+        for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
+            if not active:
+                break
+            if stage_name == "full_dev":
+                active = _select_full_dev_candidates(active, self.objective)
+                if not active:
+                    break
+            self._emit_progress(
+                "candidate_stage_started",
+                stage=stage_name,
+                candidate_count=len(active),
+                case_count=len(stage_cases),
+                patch_hashes=[state.patch_hash for state in active],
+            )
+            reference_summary = _summary_for_cases(reference, stage_cases) or self.evaluate_patch(reference.patch, stage_cases)
+            baseline_summary = _summary_for_cases(baseline, stage_cases) or self.evaluate_patch(baseline.patch, stage_cases)
+            next_active: list[CandidateEvaluationState] = []
+            for state in active:
+                candidate_summary = self.evaluate_patch(state.patch, stage_cases)
+                comparison = compare_summaries(reference_summary, candidate_summary)
+                flip_summary = behavior_flip_summary(reference_summary, candidate_summary)
+                constraint_warning = None
+                if stage_name == "smoke":
+                    rejection_reason = _smoke_rejection_reason(reference_summary, candidate_summary)
+                else:
+                    rejection_reason = objective_rejection_reason(
+                        reference_summary,
+                        candidate_summary,
+                        self.objective,
+                    )
+                    constraint_warning = constraint_rejection_reason(
+                        baseline_summary,
+                        candidate_summary,
+                        self.objective,
+                    )
+                state.stage_rows.append(
+                    {
+                        "stage": stage_name,
+                        "case_ids": [case.id for case in stage_cases],
+                        "case_count": len(stage_cases),
+                        "patch_hash": candidate_summary.patch_hash,
+                        "metrics": candidate_summary.to_dict(),
+                        "comparison_to_parent": comparison.to_dict(),
+                        "behavior_flip_summary": flip_summary,
+                        "rejection_reason": rejection_reason,
+                        "constraint_warning": constraint_warning,
+                        "passed": rejection_reason is None,
+                    }
+                )
+                state.summary = candidate_summary
+                state.comparison = comparison
+                state.flip_summary = flip_summary
+                state.rejection_reason = rejection_reason
+                state.constraint_warning = constraint_warning
+                if stage_name == "full_dev":
+                    state.full_dev_evaluated = True
+                    _finalize_candidate_state(state, reference)
+                    continue
+                if rejection_reason is None:
+                    next_active.append(state)
+                else:
+                    state.frontier_status = "failed"
+                    state.accepted = False
+            self._emit_progress(
+                "candidate_stage_completed",
+                stage=stage_name,
+                candidate_count=len(active),
+                advanced_count=len(next_active) if stage_name != "full_dev" else 0,
+                accepted_count=sum(1 for state in active if state.accepted),
+                rejected_count=sum(1 for state in active if state.frontier_status == "failed"),
+                screened_count=sum(1 for state in active if state.frontier_status == "screened_out"),
+                case_count=len(stage_cases),
+            )
+            active = next_active
+        for state in states:
+            if state.summary is None:
+                continue
+            if state.full_dev_evaluated or state.frontier_status != "pending":
+                continue
+            state.rejection_reason = "screened out before full_dev by batch ranking"
+            state.frontier_status = "screened_out"
+            state.accepted = False
 
     def _evaluate_candidate_progressively(
         self,
@@ -1682,11 +1824,74 @@ def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) ->
     return None
 
 
+def _select_full_dev_candidates(
+    states: list[CandidateEvaluationState],
+    objective: OptimizationObjective,
+) -> list[CandidateEvaluationState]:
+    by_group: dict[str, list[CandidateEvaluationState]] = {}
+    for state in states:
+        comparison_group = (
+            state.candidate.comparison_group
+            or state.candidate.experiment_id
+            or state.candidate.transform_family
+        )
+        group = f"{comparison_group}|{state.candidate.target_slice or 'global'}"
+        by_group.setdefault(group, []).append(state)
+    selected: list[CandidateEvaluationState] = []
+    for group_states in by_group.values():
+        ranked = sorted(group_states, key=lambda state: _candidate_stage_sort_key(state, objective))
+        selected.extend(ranked[:MAX_FULL_DEV_PER_COMPARISON_GROUP])
+    return sorted(selected, key=lambda state: _candidate_stage_sort_key(state, objective))
+
+
+def _candidate_stage_sort_key(
+    state: CandidateEvaluationState,
+    objective: OptimizationObjective,
+) -> tuple[Any, ...]:
+    if state.summary is None:
+        return (1,)
+    return (0, *objective_sort_key(state.summary, objective))
+
+
+def _finalize_candidate_state(state: CandidateEvaluationState, reference: PatchSummary) -> None:
+    if state.summary is None:
+        return
+    if state.rejection_reason is None and state.constraint_warning is None:
+        state.frontier_status = "promotable"
+    elif state.rejection_reason is None and state.constraint_warning is not None:
+        state.frontier_status = "quality_frontier"
+    elif _efficiency_improved(reference, state.summary):
+        state.frontier_status = "efficiency_frontier"
+    else:
+        state.frontier_status = "failed"
+    state.accepted = state.frontier_status in {"promotable", "quality_frontier", "efficiency_frontier"}
+
+
 def _efficiency_improved(reference: PatchSummary, candidate: PatchSummary) -> bool:
     score_noninferior = candidate.mean_score >= reference.mean_score - 0.01
     cheaper = candidate.mean_cost_usd < reference.mean_cost_usd
     faster = candidate.median_latency_s < reference.median_latency_s
     return score_noninferior and (cheaper or faster)
+
+
+def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[str, Any]) -> bool:
+    if runtime_diagnostic.get("baseline_runtime_defect_fixed"):
+        return True
+    if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(patch):
+        return True
+    return False
+
+
+def _touches_output_or_runtime(patch: AgentPatch) -> bool:
+    for operation in patch.operations:
+        target = operation.target
+        if operation.op == "set_runtime_param" and target.startswith("runtime."):
+            return True
+        if operation.op == "add_output_constraint" or target == "output_contract":
+            return True
+        if target.startswith("instructions.output"):
+            return True
+    return False
 
 
 def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:

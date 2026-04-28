@@ -85,7 +85,7 @@ def run_optimizer(
             "adapter_fingerprint": adapter_fingerprint(config.adapter),
             "evals_sha256": file_sha256(config.evals),
         },
-        progress_callback=_print_progress_event,
+        progress_callback=CliProgressPrinter(),
     )
     result = optimizer.run(cases)
     print(
@@ -96,90 +96,337 @@ def run_optimizer(
     return config.out
 
 
+class CliProgressPrinter:
+    def __call__(self, row: dict[str, Any]) -> None:
+        rendered = self.format(row)
+        if rendered:
+            print(rendered, file=sys.stderr, flush=True)
+
+    def format(self, row: dict[str, Any]) -> str | None:
+        event = str(row.get("event") or "")
+        phase, message = _progress_message(event, row)
+        if message is None:
+            return None
+        return f"[ratchet {_format_elapsed(row.get('elapsed_s'))}] {phase:<10} {message}"
+
+
 def _print_progress_event(row: dict[str, Any]) -> None:
-    event = row.get("event")
-    message: str | None = None
+    CliProgressPrinter()(row)
+
+
+def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]:
     if event == "run_started":
-        message = (
-            f"run started: dev={row.get('dev_cases')} holdout={row.get('holdout_cases')} "
-            f"dev_budget={row.get('dev_budget')} concurrency={row.get('case_concurrency')}"
+        return (
+            "RUN",
+            "started "
+            f"objective={row.get('objective')} train={row.get('train_cases')} dev={row.get('dev_cases')} "
+            f"holdout={row.get('holdout_cases')} dev_budget={row.get('dev_budget')} "
+            f"holdout_budget={row.get('holdout_budget')} concurrency={row.get('case_concurrency')} "
+            f"examples={row.get('proposal_example_count')}",
         )
-    elif event == "baseline_dev_started":
-        message = f"baseline dev started: cases={row.get('case_count')}"
-    elif event == "baseline_dev_completed":
-        message = _format_score_message("baseline dev", row)
-    elif event == "baseline_holdout_started":
-        message = f"baseline holdout started: cases={row.get('case_count')}"
-    elif event == "baseline_holdout_completed":
-        message = _format_score_message("baseline holdout", row)
-    elif event == "iteration_started":
-        message = (
-            f"iteration {row.get('iteration')}: frontier={row.get('frontier_width')} "
-            f"dev_evals={row.get('dev_evaluations')}/{row.get('dev_budget')}"
+    if event == "baseline_dev_started":
+        return "BASELINE", f"dev evaluation started cases={row.get('case_count')}"
+    if event == "baseline_dev_completed":
+        return "BASELINE", "dev complete " + _score_summary(row)
+    if event == "baseline_holdout_started":
+        return "BASELINE", f"holdout evaluation started cases={row.get('case_count')}"
+    if event == "baseline_holdout_completed":
+        return "BASELINE", "holdout complete " + _score_summary(row)
+    if event == "iteration_started":
+        return (
+            "SEARCH",
+            f"iteration={row.get('iteration')} frontier={row.get('frontier_width')} "
+            f"dev_evals={row.get('dev_evaluations')}/{row.get('dev_budget')}",
         )
-    elif event == "parent_started":
-        message = (
-            f"parent {row.get('parent_rank')}: patch={_short_hash(row.get('parent_patch_hash'))} "
-            f"score={row.get('mean_score')} pass={row.get('pass_count')}/{row.get('case_count')}"
+    if event == "parent_started":
+        return (
+            "PARENT",
+            f"rank={row.get('parent_rank')} patch={_short_hash(row.get('parent_patch_hash'))} "
+            + _score_summary(row),
         )
-    elif event == "diagnosis_started":
-        message = (
-            f"diagnosis started: parent={row.get('parent_rank')} "
-            f"failures={row.get('failure_count')}"
+    if event == "diagnosis_started":
+        return "DIAGNOSE", f"started parent={row.get('parent_rank')} failures={row.get('failure_count')}"
+    if event == "diagnosis_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        cached = " cached" if row.get("cached") else ""
+        return (
+            "DIAGNOSE",
+            " ".join(
+                part
+                for part in (
+                    f"complete diagnoses={row.get('diagnosis_count')}{cached}",
+                    _call_summary(diagnostics),
+                    _short_reason(row.get("analysis")),
+                )
+                if part
+            ),
         )
-    elif event == "search_hypothesis_ready":
-        families = row.get("active_families") or []
-        message = (
-            f"hypothesis ready: families={','.join(families[:5]) or 'none'} "
-            f"contexts={row.get('active_context_count')}"
+    if event == "task_theory_ready":
+        modes = _join_limited(row.get("residual_failure_modes") or [], limit=3)
+        cached = " cached" if row.get("cached") else ""
+        return (
+            "THEORY",
+            f"bottleneck={row.get('bottleneck_class')} confidence={row.get('confidence')}{cached} "
+            f"residual={modes or 'none'}",
         )
-    elif event == "proposal_started":
-        families = row.get("active_families") or []
-        message = (
-            f"proposal started: budget={row.get('proposal_budget')} "
-            f"families={','.join(families[:5]) or 'none'}"
+    if event == "search_hypothesis_ready":
+        families = _join_limited(row.get("active_families") or [], limit=5)
+        return "HYPOTHESIS", f"active={families or 'none'} contexts={row.get('active_context_count')}"
+    if event == "proposal_started":
+        families = _join_limited(row.get("active_families") or [], limit=5)
+        retry = " retry" if row.get("proposal_retry") else ""
+        return (
+            "PROPOSE",
+            f"started{retry} parent={row.get('parent_rank')} budget={row.get('proposal_budget')} "
+            f"families={families or 'none'}",
         )
-    elif event == "proposal_completed":
-        message = (
-            f"proposals: returned={row.get('returned_count')} valid={row.get('valid_count')} "
-            f"invalid={row.get('invalid_count')} duplicates={row.get('duplicate_count')}"
+    if event == "proposal_completed":
+        diagnostics = row.get("call_diagnostics") or {}
+        return (
+            "PROPOSE",
+            " ".join(
+                part
+                for part in (
+                    f"complete returned={row.get('returned_count')} valid={row.get('valid_count')} "
+                    f"invalid={row.get('invalid_count')} duplicates={row.get('duplicate_count')}",
+                    _call_summary(diagnostics),
+                )
+                if part
+            ),
         )
-    elif event == "candidate_evaluation_started":
-        message = (
-            f"candidate started: family={row.get('transform_family')} "
-            f"patch={_short_hash(row.get('patch_hash'))}"
+    if event == "candidate_evaluation_started":
+        return (
+            "CANDIDATE",
+            f"queued family={row.get('transform_family')} patch={_short_hash(row.get('patch_hash'))}",
         )
-    elif event == "candidate_evaluated":
+    if event == "candidate_stage_started":
+        return (
+            "STAGE",
+            f"{_stage_name(row.get('stage'))} started candidates={row.get('candidate_count')} "
+            f"cases={row.get('case_count')}",
+        )
+    if event == "candidate_stage_completed":
+        return (
+            "STAGE",
+            f"{_stage_name(row.get('stage'))} complete advanced={row.get('advanced_count')} "
+            f"accepted={row.get('accepted_count')} rejected={row.get('rejected_count')} "
+            f"screened={row.get('screened_count')}",
+        )
+    if event == "candidate_evaluated":
+        status = row.get("frontier_status") or ("accepted" if row.get("accepted") else "rejected")
+        reason = row.get("rejection_reason") or row.get("constraint_warning")
+        return (
+            "CANDIDATE",
+            f"{status} family={row.get('transform_family')} patch={_short_hash(row.get('patch_hash'))} "
+            f"score_delta={_format_signed(row.get('score_delta'), digits=3)} "
+            f"cost_delta={_format_money_delta(row.get('cost_delta'))} "
+            f"latency_delta={_format_seconds_delta(row.get('latency_delta'))} "
+            f"stages={row.get('stage_count')} full_dev={_format_bool(row.get('full_dev_evaluated'))}"
+            + (f" reason={_short_reason(reason)}" if reason else ""),
+        )
+    if event == "retry_started":
+        return "RETRY", f"parent={row.get('parent_rank')} reason={_short_reason(row.get('reason'))}"
+    if event == "frontier_updated":
+        patches = _join_limited([_short_hash(item) for item in row.get("frontier_patch_hashes") or []], limit=4)
+        return "FRONTIER", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} patches={patches}"
+    if event == "search_stopped":
+        return "SEARCH", f"stopped reason={_short_reason(row.get('reason'))}"
+    if event == "simplification_started":
+        return (
+            "SIMPLIFY",
+            f"started parent={_short_hash(row.get('parent_patch_hash'))} variant={_short_hash(row.get('patch_hash'))}",
+        )
+    if event == "simplification_completed":
         status = "accepted" if row.get("accepted") else "rejected"
         reason = row.get("rejection_reason")
-        suffix = f" ({reason})" if reason else ""
-        message = f"candidate {status}: family={row.get('transform_family')}{suffix}"
-    elif event == "retry_started":
-        message = f"retrying parent {row.get('parent_rank')}: {row.get('reason')}"
-    elif event == "frontier_updated":
-        message = f"frontier updated: accepted={row.get('accepted_count')}"
-    elif event == "holdout_candidate_started":
-        message = f"holdout started: patch={_short_hash(row.get('patch_hash'))}"
-    elif event == "holdout_candidate_completed":
-        status = "passed" if row.get("passed_final_gate") else "rejected"
-        message = f"holdout {status}: patch={_short_hash(row.get('patch_hash'))}"
-    elif event == "holdout_validation_skipped":
-        message = f"holdout skipped: {row.get('reason')}"
-    elif event == "run_completed":
+        return (
+            "SIMPLIFY",
+            f"{status} variant={_short_hash(row.get('variant_patch_hash'))} {_score_summary(row)}"
+            + (f" reason={_short_reason(reason)}" if reason else ""),
+        )
+    if event == "confirmation_started":
+        return (
+            "CONFIRM",
+            f"started patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')} "
+            f"samples={row.get('sample_count')}",
+        )
+    if event == "confirmation_completed":
+        status = "passed" if row.get("passed") else "failed"
+        return "CONFIRM", f"{status} patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+    if event == "confirmation_skipped":
+        return "CONFIRM", f"skipped patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+    if event == "holdout_candidate_started":
+        return "HOLDOUT", f"started patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')}"
+    if event == "holdout_candidate_completed":
+        status = row.get("finalist_status") or ("validated" if row.get("passed_final_gate") else "rejected")
+        reason = row.get("rejection_reason")
+        return (
+            "HOLDOUT",
+            f"{status} patch={_short_hash(row.get('patch_hash'))} {_score_summary(row)}"
+            + (f" reason={_short_reason(reason)}" if reason else ""),
+        )
+    if event == "holdout_validation_skipped":
+        return "HOLDOUT", f"skipped reason={_short_reason(row.get('reason'))}"
+    if event == "case_batch_started":
+        return (
+            "BATCH",
+            f"started split={row.get('split')} patch={_short_hash(row.get('patch_hash'))} "
+            f"fresh={row.get('fresh_count')} cases={row.get('case_count')} samples={row.get('sample_count')} "
+            f"concurrency={row.get('concurrency')}",
+        )
+    if event == "case_batch_completed":
+        return (
+            "BATCH",
+            f"complete split={row.get('split')} patch={_short_hash(row.get('patch_hash'))} "
+            f"fresh={row.get('fresh_count')} concurrency={row.get('concurrency')}",
+        )
+    if event == "run_completed":
         status = "promoted" if row.get("promoted") else "baseline kept"
-        message = f"run completed: {status}, selected={_short_hash(row.get('selected_patch_hash'))}"
+        return (
+            "DONE",
+            f"{status} selected={_short_hash(row.get('selected_patch_hash'))} "
+            f"accepted_dev={row.get('accepted_dev_patches')} holdout_validations={row.get('holdout_validations')} "
+            f"reason={_short_reason(row.get('selection_reason'))}",
+        )
+    return event.upper()[:10] or "EVENT", None
 
-    if message:
-        print(f"[ratchet] {message}", file=sys.stderr, flush=True)
+
+def _format_elapsed(value: object) -> str:
+    seconds = int(float(value or 0))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
 
 
-def _format_score_message(label: str, row: dict[str, Any]) -> str:
+def _score_summary(row: dict[str, Any]) -> str:
     return (
-        f"{label} complete: score={row.get('mean_score')} "
-        f"pass={row.get('pass_count')}/{row.get('case_count')} "
-        f"cost=${float(row.get('mean_cost_usd') or 0):.4f}/case "
-        f"latency={float(row.get('median_latency_s') or 0):.2f}s"
+        f"score={_format_number(row.get('mean_score'), digits=3)} "
+        f"pass={_format_count(row.get('pass_count'))}/{_format_count(row.get('case_count'))} "
+        f"cost={_format_money(row.get('mean_cost_usd'))}/case "
+        f"latency={_format_seconds(row.get('median_latency_s'))}"
     )
+
+
+def _call_summary(diagnostics: dict[str, Any]) -> str:
+    if not diagnostics:
+        return ""
+    parts: list[str] = []
+    model = diagnostics.get("model")
+    if model:
+        parts.append(f"model={model}")
+    input_tokens = diagnostics.get("input_tokens")
+    output_tokens = diagnostics.get("output_tokens")
+    total_tokens = diagnostics.get("total_tokens")
+    if input_tokens is not None or output_tokens is not None:
+        parts.append(f"tokens={_format_count(input_tokens)}/{_format_count(output_tokens)}")
+    elif total_tokens is not None:
+        parts.append(f"tokens={_format_count(total_tokens)}")
+    prompt_tokens = diagnostics.get("prompt_approx_tokens")
+    if prompt_tokens is not None:
+        parts.append(f"prompt~={_format_count(prompt_tokens)}tok")
+    prompt_chars = diagnostics.get("prompt_chars")
+    if prompt_chars is not None:
+        parts.append(f"prompt={_format_count(prompt_chars)}ch")
+    elapsed = diagnostics.get("elapsed_s")
+    if elapsed is not None:
+        parts.append(f"call={_format_seconds(elapsed)}")
+    finish_reason = diagnostics.get("finish_reason")
+    if finish_reason:
+        parts.append(f"finish={finish_reason}")
+    return " ".join(parts)
+
+
+def _format_number(value: object, *, digits: int) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_signed(value: object, *, digits: int) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):+.{digits}f}"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_count(value: object) -> str:
+    if value is None:
+        return "?"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _format_bool(value: object) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _format_money(value: object) -> str:
+    if value is None:
+        return "$?"
+    try:
+        return f"${float(value):.4f}"
+    except (TypeError, ValueError):
+        return f"${value}"
+
+
+def _format_money_delta(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        amount = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    sign = "+" if amount >= 0 else "-"
+    return f"{sign}${abs(amount):.4f}"
+
+
+def _format_seconds(value: object) -> str:
+    if value is None:
+        return "?s"
+    try:
+        return f"{float(value):.2f}s"
+    except (TypeError, ValueError):
+        return f"{value}s"
+
+
+def _format_seconds_delta(value: object) -> str:
+    if value is None:
+        return "n/a"
+    try:
+        return f"{float(value):+.2f}s"
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _stage_name(value: object) -> str:
+    text = str(value or "stage")
+    return text.replace("_", "-")
+
+
+def _join_limited(values: list[Any] | tuple[Any, ...], *, limit: int) -> str:
+    items = [str(item) for item in values if item is not None and str(item)]
+    if not items:
+        return ""
+    shown = items[:limit]
+    if len(items) > limit:
+        shown.append(f"+{len(items) - limit}")
+    return ",".join(shown)
+
+
+def _short_reason(value: object, *, limit: int = 120) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
 
 
 def _short_hash(value: object) -> str:

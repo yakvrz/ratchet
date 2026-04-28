@@ -137,6 +137,7 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
     return {
         "elapsed_s": max((float(row.get("elapsed_s", 0.0)) for row in progress_rows), default=0.0),
         "phase_durations_s": _phase_durations(progress_rows),
+        "phase_attempt_durations_s": _phase_attempt_durations(progress_rows),
         "slowest_cases": _case_metric_extremes(result, metric="latency_s", limit=8),
         "highest_token_cases": _case_metric_extremes(result, metric="total_tokens", limit=8),
         "patch_profiles": _patch_profiles(result),
@@ -229,6 +230,24 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _phase_durations(rows: list[dict[str, Any]]) -> dict[str, float]:
+    durations: dict[str, float] = {}
+    for name, intervals in _phase_intervals(rows).items():
+        duration = _union_interval_duration(intervals)
+        if duration:
+            durations[name] = round(duration, 3)
+    return durations
+
+
+def _phase_attempt_durations(rows: list[dict[str, Any]]) -> dict[str, float]:
+    durations: dict[str, float] = {}
+    for name, intervals in _phase_intervals(rows).items():
+        duration = sum(max(end - start, 0.0) for start, end in intervals)
+        if duration:
+            durations[name] = round(duration, 3)
+    return durations
+
+
+def _phase_intervals(rows: list[dict[str, Any]]) -> dict[str, list[tuple[float, float]]]:
     pairings = [
         ("baseline_dev", "baseline_dev_started", "baseline_dev_completed"),
         ("baseline_holdout", "baseline_holdout_started", "baseline_holdout_completed"),
@@ -238,16 +257,27 @@ def _phase_durations(rows: list[dict[str, Any]]) -> dict[str, float]:
         ("confirmation", "confirmation_started", "confirmation_completed"),
         ("holdout_validation", "holdout_candidate_started", "holdout_candidate_completed"),
     ]
-    durations: dict[str, float] = {}
+    intervals: dict[str, list[tuple[float, float]]] = {}
     for name, start_event, end_event in pairings:
         starts = _event_rows(rows, start_event)
         ends = _event_rows(rows, end_event)
-        total = 0.0
+        phase_intervals: list[tuple[float, float]] = []
         for start, end in zip(starts, ends):
-            total += max(float(end.get("elapsed_s", 0.0)) - float(start.get("elapsed_s", 0.0)), 0.0)
-        if total:
-            durations[name] = round(total, 3)
-    return durations
+            phase_intervals.append((float(start.get("elapsed_s", 0.0)), float(end.get("elapsed_s", 0.0))))
+        if phase_intervals:
+            intervals[name] = phase_intervals
+    return intervals
+
+
+def _union_interval_duration(intervals: list[tuple[float, float]]) -> float:
+    merged: list[tuple[float, float]] = []
+    for start, end in sorted((start, end) for start, end in intervals if end > start):
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+            continue
+        previous_start, previous_end = merged[-1]
+        merged[-1] = (previous_start, max(previous_end, end))
+    return sum(end - start for start, end in merged)
 
 
 def _event_rows(rows: list[dict[str, Any]], event: str) -> list[dict[str, Any]]:

@@ -127,7 +127,7 @@ class FakeDiagnosisClient:
 class FakePatchClient:
     def create_response(self, **kwargs: object) -> object:
         prompt = str(kwargs.get("input", ""))
-        if '"mode": "cost"' in prompt:
+        if '"mode": "cost"' in prompt or '"mode":"cost"' in prompt:
             candidates = [
                 candidate(
                 {
@@ -166,7 +166,7 @@ class FakePatchClient:
                 ),
             ]
 
-        if '"mode": "cost"' in prompt:
+        if '"mode": "cost"' in prompt or '"mode":"cost"' in prompt:
             return experiment_response(candidates, mechanism="efficiency_probe")
         return experiment_response(candidates)
 
@@ -342,6 +342,41 @@ class BranchingPatchClient:
         return experiment_response(candidates)
 
 
+class BatchCompetitionPatchClient:
+    def create_response(self, **_: object) -> object:
+        candidates = [
+            candidate(
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Route alpha cases to alpha.",
+                        }
+                    ],
+                    "rationale": "Try the alpha cluster.",
+                    "expected_effect": "Fix alpha cases.",
+                },
+                "prompt_rewrite",
+            ),
+            candidate(
+                {
+                    "operations": [
+                        {
+                            "op": "add_instruction",
+                            "target": "instructions.system_prompt",
+                            "value": "Route beta cases to beta.",
+                        }
+                    ],
+                    "rationale": "Try the beta cluster.",
+                    "expected_effect": "Fix beta cases.",
+                },
+                "prompt_rewrite",
+            ),
+        ]
+        return experiment_response(candidates)
+
+
 class RetryPatchClient:
     def __init__(self) -> None:
         self.history_lengths: list[int] = []
@@ -485,12 +520,12 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             events = [str(row["event"]) for row in progress_rows]
             self.assertIn("candidate_evaluation_started", events)
             self.assertIn("candidate_evaluated", events)
-            self.assertIn("confirmation_started", events)
+            self.assertIn("confirmation_skipped", events)
+            self.assertIn("holdout_candidate_started", events)
             self.assertLess(
                 events.index("candidate_evaluation_started"),
                 events.index("candidate_evaluated"),
             )
-            self.assertTrue(result.confirmation_results)
             self.assertTrue(result.optimizer_call_diagnostics)
             self.assertGreaterEqual(result.run_profile["optimizer_calls"]["totals"]["call_count"], 1)
             self.assertIn("frontier_recommendation", result.manifest)
@@ -764,23 +799,18 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertTrue(any("alpha" in value for value in values))
             self.assertTrue(any("beta" in value for value in values))
             self.assertTrue(any(count >= 2 for count in patch_client.diagnosis_counts))
-            self.assertTrue(
-                any(
-                    event.get("type") == "proposal_iteration"
-                    and event.get("iteration") == 2
-                    and event.get("parent_rank") == 2
-                    for event in decision_log
-                )
-            )
+            proposal_parent_hashes = {
+                event.get("parent_patch_hash")
+                for event in decision_log
+                if event.get("type") == "proposal_iteration"
+            }
+            self.assertGreaterEqual(len(proposal_parent_hashes), 2)
             frontier_updates = [
                 event for event in decision_log if event.get("type") == "frontier_update"
             ]
             self.assertTrue(
                 any(
-                    any(
-                        dict(state).get("exhausted")
-                        for state in dict(event.get("frontier_parent_states") or {}).values()
-                    )
+                    len(dict(event.get("frontier_parent_states") or {})) >= 2
                     for event in frontier_updates
                 )
             )
@@ -869,6 +899,49 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
             self.assertEqual(len(stage_rows), 1)
             self.assertIn("smoke rejected", rejection_reason or "")
             self.assertLess(summary.case_count, len(cases))
+
+    def test_batch_progressive_evaluation_escalates_one_candidate_per_group(self) -> None:
+        dev_cases = tuple(
+            [
+                *(
+                    EvalCase(id=f"dev-alpha-{index}", split="dev", input="alpha", expected="alpha")
+                    for index in range(20)
+                ),
+                *(
+                    EvalCase(id=f"dev-beta-{index}", split="dev", input="beta", expected="beta")
+                    for index in range(10)
+                ),
+            ]
+        )
+        cases = (
+            *dev_cases,
+            EvalCase(id="hold-alpha", split="holdout", input="alpha", expected="alpha"),
+            EvalCase(id="hold-beta", split="holdout", input="beta", expected="beta"),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            optimizer = RatchetOptimizer(
+                adapter=BranchingAdapter(),
+                out_dir=Path(tmp) / "run",
+                env_path=".env",
+                dev_budget=2,
+                holdout_budget=0,
+            )
+            optimizer.diagnoser._client = BranchingDiagnosisClient()
+            optimizer.proposer._client = BatchCompetitionPatchClient()
+            result = optimizer.run(cases)
+
+            proposal_rows = [
+                row
+                for row in result.proposals
+                if "accepted" in row and row.get("valid", True)
+            ]
+            self.assertEqual(len(proposal_rows), 2)
+            full_dev_rows = [row for row in proposal_rows if row.get("full_dev_evaluated")]
+            screened_rows = [row for row in proposal_rows if row.get("frontier_status") == "screened_out"]
+            self.assertEqual(len(full_dev_rows), 1)
+            self.assertEqual(len(screened_rows), 1)
+            self.assertTrue(any(stage["stage"] == "small_dev" for stage in screened_rows[0]["evaluation_stages"]))
+            self.assertFalse(any(stage["stage"] == "full_dev" for stage in screened_rows[0]["evaluation_stages"]))
 
     def test_evaluate_patch_runs_cases_with_bounded_concurrency(self) -> None:
         cases = tuple(
