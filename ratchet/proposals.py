@@ -32,10 +32,12 @@ from ratchet.validation import PatchValidator
 
 
 MAX_PROPOSALS_PER_ITERATION = 8
+PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic patch proposer. Return JSON with experiments[] and optional "
     "target_considerations[]. Keep text concise. Use planner_guidance and search_hypothesis to choose "
-    "mechanism_class values from the allowed mechanism list. Each candidate must name an active "
+    "mechanism_class values from the allowed mechanism list. Treat task_theory.experiment_opportunities "
+    "as evidence-backed hypotheses to test or explicitly skip; they are not patch recipes. Each candidate must name an active "
     "transform_family, a candidate_role in atomic/composed/control/ablation/compression, a hypothesis, "
     "and one intervention. Normal candidates use intervention.kind='patch' with payload.patch.operations; "
     "few-shot candidates use only intervention.kind='example_selection' with payload.source_case_ids from "
@@ -348,10 +350,7 @@ class ProposalEngine:
             "proposal_budget": proposal_budget,
             "target_kinds": target_kinds,
             "transform_library": active_family_rows,
-            "search_hypothesis": search_hypothesis.to_prompt_dict(
-                max_contexts_per_family=2,
-                max_constrained_contexts=5,
-            ),
+            "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "task_theory": _compact_task_theory(task_theory),
             "planner_guidance": planner_guidance,
             "proposal_policy": {
@@ -401,8 +400,8 @@ class ProposalEngine:
                 _compact_proposal_example_bank(
                     proposal_example_bank,
                     target_labels=_target_labels_for_examples(compact_diagnostics),
-                    max_examples=8,
-                    max_per_label=2,
+                    max_examples=6,
+                    max_per_label=1,
                 )
                 if proposal_example_bank is not None
                 else {
@@ -482,7 +481,7 @@ class ProposalEngine:
                     }
                 },
                 input=prompt_input,
-                max_output_tokens=3500,
+                max_output_tokens=PROPOSER_MAX_OUTPUT_TOKENS,
             )
             self.last_call_diagnostics = {
                 "component": "proposer",
@@ -540,7 +539,7 @@ class ProposalEngine:
                         "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
                     ),
-                    max_output_tokens=3500,
+                    max_output_tokens=PROPOSER_MAX_OUTPUT_TOKENS,
                 )
                 repair_diagnostics = response_diagnostics(
                     repair_response,
@@ -721,17 +720,57 @@ def _compact_transform_family(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": row.get("name"),
         "category": row.get("category"),
-        "purpose": row.get("purpose"),
+        "purpose": str(row.get("purpose") or "")[:180],
         "supported_edit_kinds": row.get("supported_edit_kinds", []),
         "supported_ops": row.get("supported_ops", []),
-        "activation_signals": row.get("activation_signals", [])[:6]
-        if isinstance(row.get("activation_signals"), list)
-        else row.get("activation_signals", []),
-        "required_measurements": row.get("required_measurements", [])[:6]
-        if isinstance(row.get("required_measurements"), list)
-        else row.get("required_measurements", []),
         "complexity_cost": row.get("complexity_cost"),
-        "parameter_contract": row.get("parameter_contract", {}),
+    }
+
+
+def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str, Any]:
+    row = search_hypothesis.to_prompt_dict(
+        max_contexts_per_family=1,
+        max_constrained_contexts=3,
+    )
+    return {
+        "family_states": {
+            name: {
+                "state": value.get("state"),
+                "suitability": value.get("suitability"),
+                "budget_share": value.get("budget_share"),
+                "constraints": list(value.get("constraints") or [])[:3],
+            }
+            for name, value in (row.get("family_states") or {}).items()
+            if isinstance(value, dict)
+        },
+        "active_families": list(row.get("active_families") or []),
+        "active_contexts": [
+            _compact_context_prompt_row(context)
+            for context in list(row.get("active_contexts") or [])[:8]
+            if isinstance(context, dict)
+        ],
+        "constrained_or_paused_contexts": [
+            _compact_context_prompt_row(context)
+            for context in list(row.get("constrained_or_paused_contexts") or [])[:3]
+            if isinstance(context, dict)
+        ],
+        "target_slices": list(row.get("target_slices") or [])[:8],
+        "profile": row.get("profile", {}),
+        "budget_allocation": row.get("budget_allocation", {}),
+        "rationale": str(row.get("rationale") or "")[:360],
+    }
+
+
+def _compact_context_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
+    key = row.get("key") if isinstance(row.get("key"), dict) else {}
+    return {
+        "family": key.get("family") or row.get("family"),
+        "targets": list(key.get("target_names") or row.get("target_names") or [])[:3],
+        "ops": list(key.get("ops") or row.get("ops") or [])[:3],
+        "target_slice": key.get("target_slice") or row.get("target_slice"),
+        "state": row.get("state"),
+        "suitability": row.get("suitability"),
+        "constraints": list(row.get("constraints") or [])[:3],
     }
 
 
@@ -740,8 +779,8 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
     return {
         "bottleneck_class": row.get("bottleneck_class"),
         "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:8],
-        "label_confusions": list(row.get("label_confusions") or [])[:8],
-        "weak_slices": list(row.get("weak_slices") or [])[:12],
+        "label_confusions": list(row.get("label_confusions") or [])[:4],
+        "weak_slices": list(row.get("weak_slices") or [])[:8],
         "runtime_defects": row.get("runtime_defects", {}),
         "output_defects": row.get("output_defects", {}),
         "example_coverage": {
@@ -749,12 +788,47 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
             "weak_labels_without_examples": list(
                 (row.get("example_coverage") or {}).get("weak_labels_without_examples") or []
             )[:12],
+            "target_label_source_case_ids": {
+                str(label): list(case_ids)[:4]
+                for label, case_ids in ((row.get("example_coverage") or {}).get("target_label_source_case_ids") or {}).items()
+                if isinstance(case_ids, list)
+            },
             "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=20),
         },
         "cost_latency_profile": row.get("cost_latency_profile", {}),
         "confidence": row.get("confidence"),
         "evidence": list(row.get("evidence") or [])[:6],
+        "experiment_opportunity_mechanisms": [
+            str(item.get("mechanism_class"))
+            for item in list(row.get("experiment_opportunities") or [])[:5]
+            if isinstance(item, dict) and item.get("mechanism_class")
+        ],
     }
+
+
+def _compact_experiment_opportunities(rows: list[dict[str, Any]], *, limit: int) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        if not isinstance(row, dict):
+            continue
+        compact.append(
+            {
+                "mechanism_class": row.get("mechanism_class"),
+                "target_slices": list(row.get("target_slices") or [])[:3],
+                "candidate_roles": list(row.get("candidate_roles") or [])[:4],
+                "compatible_mechanisms": list(row.get("compatible_mechanisms") or [])[:4],
+                "source_labels": list(row.get("source_labels") or [])[:3],
+                "source_case_ids_by_label": {
+                    str(label): list(case_ids)[:3]
+                    for label, case_ids in (row.get("source_case_ids_by_label") or {}).items()
+                    if isinstance(case_ids, list)
+                },
+                "measurements": list(row.get("measurements") or [])[:4],
+                "rationale": str(row.get("rationale") or "")[:180],
+                "disconfirming_result": str(row.get("disconfirming_result") or "")[:160],
+            }
+        )
+    return compact
 
 
 def _planner_guidance(
@@ -771,17 +845,25 @@ def _planner_guidance(
         primary = list(secondary[:2])
         secondary = secondary[2:]
     experiment_count = max(0, min(proposal_budget, 3))
+    opportunities = [
+        row
+        for row in _compact_experiment_opportunities(task_theory.experiment_opportunities, limit=3)
+        if row.get("mechanism_class") in active_mechanisms
+    ]
     return {
         "bottleneck_class": task_theory.bottleneck_class,
         "primary_mechanisms": primary[:3],
         "secondary_mechanisms": secondary[:4],
         "active_mechanisms": active_mechanisms,
+        "experiment_opportunities": opportunities,
         "recommended_experiment_count": experiment_count,
         "rationale": rationale,
         "planning_rules": [
             "Each experiment should test one mechanism, not a grab bag of unrelated edits.",
             "Prefer one strong experiment with controls over many shallow single-candidate variants.",
+            "For the top experiment opportunity, include the listed measurements and explain the disconfirming result in the hypothesis.",
             "Use composed candidates only when the mechanism needs multiple compatible transform families.",
+            "For semantic-boundary opportunities with source_case_ids_by_label, prefer a boundary rewrite control plus example anchoring when budget allows.",
             "If few-shot is proposed, use proposal-safe source_case_ids and make the target labels/slices explicit.",
         ],
     }
@@ -844,6 +926,11 @@ def _audit_experiment_plan(
     mechanism_counts = Counter(candidate.mechanism_class for candidate in parsed_candidates)
     role_counts = Counter(candidate.candidate_role for candidate in parsed_candidates)
     primary_mechanisms = [str(item) for item in planner_guidance.get("primary_mechanisms", [])]
+    opportunity_mechanisms = [
+        str(item.get("mechanism_class"))
+        for item in planner_guidance.get("experiment_opportunities", [])
+        if isinstance(item, dict) and item.get("mechanism_class")
+    ]
     candidate_mechanisms = set(mechanism_counts)
     missing_primary = [
         mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
@@ -855,11 +942,18 @@ def _audit_experiment_plan(
         warnings.append("experiments contained no parseable candidates")
     if parsed_candidates and missing_primary and len(missing_primary) == len(primary_mechanisms):
         warnings.append("no candidate used a primary mechanism from planner guidance")
+    missing_opportunities = [
+        mechanism for mechanism in opportunity_mechanisms[:2] if mechanism not in candidate_mechanisms
+    ]
+    if parsed_candidates and missing_opportunities and len(missing_opportunities) == min(2, len(opportunity_mechanisms)):
+        warnings.append("no candidate directly tested a top experiment opportunity")
     if task_theory.bottleneck_class == "semantic_boundary_confusion":
         has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
         has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
         if has_examples and not has_rewrite:
             warnings.append("example experiment lacks a semantic-boundary rewrite control")
+        if _semantic_opportunity_has_examples(task_theory) and has_rewrite and not has_examples:
+            warnings.append("semantic-boundary plan did not test available example anchoring")
     if role_counts.get("composed", 0) and not (role_counts.get("control", 0) or role_counts.get("ablation", 0)):
         warnings.append("composed candidate lacks a control or ablation in the returned plan")
     return {
@@ -873,22 +967,50 @@ def _audit_experiment_plan(
         "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
         "candidate_roles": dict(sorted(role_counts.items())),
         "primary_mechanisms": primary_mechanisms,
+        "opportunity_mechanisms": opportunity_mechanisms,
         "missing_primary_mechanisms": missing_primary,
         "warnings": warnings,
     }
 
 
+def _semantic_opportunity_has_examples(task_theory: TaskTheory) -> bool:
+    for row in task_theory.experiment_opportunities:
+        if row.get("mechanism_class") != "semantic_boundary_rewrite":
+            continue
+        source_ids = row.get("source_case_ids_by_label")
+        if isinstance(source_ids, dict) and any(source_ids.values()):
+            return True
+    return False
+
+
 def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
     return {
         "label_field": diagnostics.get("label_field"),
-        "per_label": list(diagnostics.get("per_label") or [])[:16],
-        "weak_labels": list(diagnostics.get("weak_labels") or [])[:12],
-        "confusions": list(diagnostics.get("confusions") or [])[:8],
-        "overpredicted_labels": list(diagnostics.get("overpredicted_labels") or [])[:8],
+        "per_label": _compact_per_label(list(diagnostics.get("per_label") or [])[:8]),
+        "weak_labels": list(diagnostics.get("weak_labels") or [])[:8],
+        "confusions": list(diagnostics.get("confusions") or [])[:6],
+        "overpredicted_labels": list(diagnostics.get("overpredicted_labels") or [])[:5],
         "invalid_output_case_ids": list(diagnostics.get("invalid_output_case_ids") or [])[:8],
-        "runtime_reliability": diagnostics.get("runtime_reliability", {}),
-        "category_metrics": _compact_category_metrics(diagnostics.get("category_metrics") or {}),
+        "runtime_reliability": _compact_runtime_reliability(diagnostics.get("runtime_reliability") or {}),
+        "category_metrics": _compact_category_metrics(diagnostics.get("category_metrics") or {}, limit=4),
     }
+
+
+def _compact_per_label(rows: list[Any]) -> list[dict[str, Any]]:
+    compact: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        compact.append(
+            {
+                "label": row.get("label"),
+                "support": row.get("support"),
+                "pass_count": row.get("pass_count"),
+                "pass_rate": row.get("pass_rate"),
+                "case_ids": list(row.get("case_ids") or [])[:4],
+            }
+        )
+    return compact
 
 
 def _compact_category_metrics(metrics: dict[str, Any], *, limit: int = 16) -> dict[str, Any]:
@@ -903,7 +1025,24 @@ def _compact_category_metrics(metrics: dict[str, Any], *, limit: int = 16) -> di
             str(item[0]),
         ),
     )
-    return {str(name): value for name, value in rows[:limit]}
+    return {
+        str(name): {
+            "pass_rate": value.get("pass_rate"),
+            "pass_count": value.get("pass_count"),
+            "case_count": value.get("case_count"),
+            "mean_score": value.get("mean_score"),
+        }
+        for name, value in rows[:limit]
+    }
+
+
+def _compact_runtime_reliability(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "finish_reason_counts": row.get("finish_reason_counts", {}),
+        "length_finish_case_ids": list(row.get("length_finish_case_ids") or [])[:4],
+        "parser_fallback_case_ids": list(row.get("parser_fallback_case_ids") or [])[:4],
+        "low_output_token_length_case_ids": list(row.get("low_output_token_length_case_ids") or [])[:4],
+    }
 
 
 def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
@@ -919,7 +1058,7 @@ def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
 def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
     current_value = target.current_value
     if isinstance(current_value, str):
-        compact_value: Any = current_value[:700]
+        compact_value: Any = current_value[:260]
     elif isinstance(current_value, list):
         compact_value = {"type": "list", "count": len(current_value), "sample": current_value[:2]}
     elif isinstance(current_value, dict):
@@ -932,8 +1071,8 @@ def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
         "path": target.path,
         "current_value": compact_value,
         "allowed_ops": list(target.allowed_ops),
-        "description": target.description[:240],
-        "choices": list(target.choices),
+        "description": target.description[:120],
+        "choices": list(target.choices)[:12],
         "max_chars": target.max_chars,
         "value_schema": dict(target.value_schema),
     }
@@ -973,7 +1112,18 @@ def _compact_proposal_example_bank(
         "included_example_count": len(selected),
         "label_counts": dict(bank.label_counts),
         "metadata_categories": _top_mapping(bank.metadata_categories, limit=20),
-        "examples": [example.to_dict() for example in selected],
+        "examples": [_compact_proposal_example(example) for example in selected],
+    }
+
+
+def _compact_proposal_example(example: Any) -> dict[str, Any]:
+    row = example.to_dict()
+    return {
+        "case_id": row.get("case_id"),
+        "input": _value_summary(row.get("input")),
+        "expected": row.get("expected"),
+        "label": row.get("label"),
+        "metadata": row.get("metadata"),
     }
 
 

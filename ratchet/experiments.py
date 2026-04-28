@@ -47,6 +47,7 @@ class TaskTheory:
     cost_latency_profile: dict[str, Any]
     confidence: str
     evidence: list[str] = field(default_factory=list)
+    experiment_opportunities: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -131,6 +132,8 @@ def build_task_theory(
         evidence.append("current branch has no observed failures")
     label_counts = proposal_example_bank.label_counts if proposal_example_bank is not None else {}
     missing_weak_examples = [label for label in weak_labels if label not in label_counts]
+    example_source_ids = _example_source_ids_by_label(proposal_example_bank)
+    target_example_labels = _target_example_labels(confusions=confusions, weak_labels=weak_labels)
     return TaskTheory(
         bottleneck_class=bottleneck,
         residual_failure_modes=_residual_failure_modes(
@@ -155,6 +158,11 @@ def build_task_theory(
             "example_count": len(proposal_example_bank.examples) if proposal_example_bank else 0,
             "label_counts": dict(label_counts),
             "weak_labels_without_examples": missing_weak_examples,
+            "target_label_source_case_ids": {
+                label: example_source_ids.get(label, [])[:4]
+                for label in target_example_labels
+                if example_source_ids.get(label)
+            },
         },
         cost_latency_profile={
             "mean_cost_usd": summary.mean_cost_usd,
@@ -163,6 +171,15 @@ def build_task_theory(
         },
         confidence="medium" if summary.case_count >= 20 else "low",
         evidence=evidence,
+        experiment_opportunities=_experiment_opportunities(
+            bottleneck=bottleneck,
+            runtime=runtime,
+            invalid_case_ids=invalid_case_ids,
+            confusions=confusions,
+            weak_labels=weak_labels,
+            example_source_ids=example_source_ids,
+            objective=objective,
+        ),
     )
 
 
@@ -193,3 +210,139 @@ def _residual_failure_modes(
         modes.append("weak_slices")
     modes.extend(category for category in diagnosis_categories if category not in modes)
     return modes[:12]
+
+
+def _experiment_opportunities(
+    *,
+    bottleneck: str,
+    runtime: dict[str, Any],
+    invalid_case_ids: list[str],
+    confusions: list[dict[str, Any]],
+    weak_labels: list[str],
+    example_source_ids: dict[str, list[str]],
+    objective: OptimizationObjective,
+) -> list[dict[str, Any]]:
+    opportunities: list[dict[str, Any]] = []
+    if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
+        opportunities.append(
+            {
+                "mechanism_class": "runtime_defect_fix",
+                "target_slices": _slice_ids("runtime", runtime.get("length_finish_case_ids", []))
+                + _slice_ids("parser_fallback", runtime.get("parser_fallback_case_ids", [])),
+                "candidate_roles": ["atomic", "control"],
+                "measurements": ["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
+                "rationale": "Trace evidence suggests the current branch may be failing before semantic behavior is measurable.",
+                "disconfirming_result": "Output reliability metrics do not improve on affected cases.",
+            }
+        )
+    if invalid_case_ids:
+        opportunities.append(
+            {
+                "mechanism_class": "output_contract_fix",
+                "target_slices": _slice_ids("invalid_output", invalid_case_ids),
+                "candidate_roles": ["atomic", "control"],
+                "measurements": ["invalid_output_delta", "score_delta", "non_target_regression"],
+                "rationale": "Invalid outputs should be tested as contract/format failures before adding semantic complexity.",
+                "disconfirming_result": "Invalid-output cases remain invalid or regress elsewhere.",
+            }
+        )
+    for row in confusions[:4]:
+        if not isinstance(row, dict):
+            continue
+        expected = str(row.get("expected") or "")
+        actual = str(row.get("actual") or "")
+        if not expected or not actual:
+            continue
+        labels = [label for label in (expected, actual) if label]
+        opportunities.append(
+            {
+                "mechanism_class": "semantic_boundary_rewrite",
+                "target_slices": [f"confusion:{expected}->{actual}", f"label:{expected}"],
+                "candidate_roles": ["control", "atomic", "composed"],
+                "compatible_mechanisms": ["representative_examples", "contrastive_examples"],
+                "source_labels": labels,
+                "source_case_ids_by_label": {
+                    label: example_source_ids.get(label, [])[:3]
+                    for label in labels
+                    if example_source_ids.get(label)
+                },
+                "measurements": ["target_slice_score_delta", "non_target_regression", "cost_delta"],
+                "rationale": "Observed expected-vs-actual label confusion needs a boundary test, not only a generic prompt improvement.",
+                "disconfirming_result": "The confusion persists on target cases or causes non-target regressions.",
+            }
+        )
+    for label in weak_labels[:4]:
+        if any(label == str(row.get("expected") or "") for row in confusions[:4] if isinstance(row, dict)):
+            continue
+        opportunities.append(
+            {
+                "mechanism_class": "representative_examples",
+                "target_slices": [f"label:{label}"],
+                "candidate_roles": ["atomic", "compression"],
+                "compatible_mechanisms": ["semantic_boundary_rewrite", "contrastive_examples"],
+                "source_labels": [label],
+                "source_case_ids_by_label": {
+                    label: example_source_ids.get(label, [])[:4]
+                }
+                if example_source_ids.get(label)
+                else {},
+                "measurements": ["target_slice_score_delta", "example_token_delta", "non_target_regression"],
+                "rationale": "Weak label evidence with train coverage can test whether example anchoring is the missing signal.",
+                "disconfirming_result": "Few-shot variants do not improve the weak label after compression.",
+            }
+        )
+    if bottleneck in {"efficiency_tradeoff", "no_observed_failures"} or objective.mode in {"cost", "latency"}:
+        opportunities.append(
+            {
+                "mechanism_class": "efficiency_probe",
+                "target_slices": ["global"],
+                "candidate_roles": ["atomic", "ablation"],
+                "measurements": ["score_delta", "cost_delta", "latency_delta"],
+                "rationale": "The current objective can improve through cost or latency reductions if quality is preserved.",
+                "disconfirming_result": "Cost or latency improves only by violating the quality constraint.",
+            }
+        )
+    if not opportunities and bottleneck == "general_correctness_gap":
+        opportunities.append(
+            {
+                "mechanism_class": "semantic_boundary_rewrite",
+                "target_slices": ["failed_cases"],
+                "candidate_roles": ["atomic", "control"],
+                "measurements": ["score_delta", "non_target_regression", "cost_delta"],
+                "rationale": "Failures exist but are not yet explained by a sharper slice; test a minimal semantic hypothesis.",
+                "disconfirming_result": "No failed-case improvement on the current branch.",
+            }
+        )
+    return opportunities[:8]
+
+
+def _target_example_labels(*, confusions: list[dict[str, Any]], weak_labels: list[str]) -> list[str]:
+    labels: list[str] = []
+    for row in confusions:
+        if not isinstance(row, dict):
+            continue
+        for key in ("expected", "actual"):
+            label = str(row.get(key) or "")
+            if label and label not in labels:
+                labels.append(label)
+    for label in weak_labels:
+        if label and label not in labels:
+            labels.append(label)
+    return labels[:12]
+
+
+def _example_source_ids_by_label(bank: ProposalExampleBank | None) -> dict[str, list[str]]:
+    if bank is None:
+        return {}
+    rows: dict[str, list[str]] = {}
+    for example in bank.examples:
+        if not example.label:
+            continue
+        rows.setdefault(example.label, []).append(example.case_id)
+    return {label: case_ids[:6] for label, case_ids in sorted(rows.items())}
+
+
+def _slice_ids(prefix: str, case_ids: Any) -> list[str]:
+    if not isinstance(case_ids, list):
+        return []
+    return [f"{prefix}:{case_id}" for case_id in case_ids[:6] if case_id]

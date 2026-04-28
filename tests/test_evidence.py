@@ -3,8 +3,9 @@ from __future__ import annotations
 import unittest
 
 from ratchet.evidence import build_behavior_diagnostics, build_proposal_example_bank
+from ratchet.experiments import build_task_theory
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.types import AgentPatch, EvalCase, GradeResult, OperationalMetrics, RunRecord
+from ratchet.types import AgentPatch, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 def _evaluation(
@@ -78,6 +79,43 @@ class EvidenceTests(unittest.TestCase):
         self.assertEqual(
             diagnostics["confusions"][0],
             {"expected": "beta", "actual": "alpha", "count": 2, "case_ids": ["dev-2", "dev-3"]},
+        )
+
+    def test_task_theory_exposes_experiment_opportunities_and_example_sources(self) -> None:
+        summary = PatchSummary(
+            patch_hash="baseline",
+            patch=AgentPatch.empty(),
+            split="dev",
+            evaluations=[
+                _evaluation(case_id="dev-1", expected="alpha", actual="alpha", passed=True),
+                _evaluation(case_id="dev-2", expected="beta", actual="alpha", passed=False),
+                _evaluation(case_id="dev-3", expected="beta", actual="alpha", passed=False),
+            ],
+        )
+        train_cases = (
+            EvalCase(id="train-alpha-1", split="train", input="alpha sample", expected={"label": "alpha"}),
+            EvalCase(id="train-beta-1", split="train", input="beta sample", expected={"label": "beta"}),
+            EvalCase(id="train-beta-2", split="train", input="beta sample 2", expected={"label": "beta"}),
+        )
+
+        theory = build_task_theory(
+            summary=summary,
+            diagnoses=[],
+            objective=OptimizationObjective(),
+            proposal_example_bank=build_proposal_example_bank(train_cases),
+        )
+
+        self.assertEqual(theory.bottleneck_class, "semantic_boundary_confusion")
+        self.assertEqual(
+            theory.example_coverage["target_label_source_case_ids"],
+            {"alpha": ["train-alpha-1"], "beta": ["train-beta-1", "train-beta-2"]},
+        )
+        opportunity = theory.experiment_opportunities[0]
+        self.assertEqual(opportunity["mechanism_class"], "semantic_boundary_rewrite")
+        self.assertIn("confusion:beta->alpha", opportunity["target_slices"])
+        self.assertEqual(
+            opportunity["source_case_ids_by_label"],
+            {"beta": ["train-beta-1", "train-beta-2"], "alpha": ["train-alpha-1"]},
         )
 
 

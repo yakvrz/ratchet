@@ -700,6 +700,78 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertIn("example_selection", client.input_text)
         self.assertIn("no experiments returned", engine.last_stats.plan_audit["warnings"])
 
+    def test_llm_proposer_prompt_includes_experiment_opportunities(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            instructions={"system_prompt": "Classify intent."},
+            output_contract="Return JSON with label.",
+        )
+        objective = OptimizationObjective()
+        surface = SurfaceGenerator().generate(spec, objective)
+        client = CapturingPatchClient()
+        engine = ProposalEngine(
+            env_path=".env",
+            model="gpt-5.4-mini",
+            reasoning_effort="low",
+        )
+        engine._client = client
+        summary = PatchSummary(
+            patch_hash="baseline",
+            patch=AgentPatch.empty(),
+            split="dev",
+            evaluations=[
+                CaseEvaluation(
+                    case=EvalCase(
+                        id="dev-beta-1",
+                        split="dev",
+                        input="beta message",
+                        expected={"label": "beta"},
+                    ),
+                    record=RunRecord(
+                        output={"label": "alpha"},
+                        metrics=OperationalMetrics(
+                            latency_s=1.0,
+                            input_tokens=10,
+                            output_tokens=5,
+                            total_tokens=15,
+                            cost_usd=0.001,
+                        ),
+                        diagnostics=DiagnosticTrace(),
+                    ),
+                    grade=GradeResult(
+                        score=0.0,
+                        passed=False,
+                        labels=["wrong_label", "expected:beta", "actual:alpha"],
+                    ),
+                )
+            ],
+        )
+        train_cases = (
+            EvalCase(id="train-alpha-1", split="train", input="alpha sample", expected={"label": "alpha"}),
+            EvalCase(id="train-beta-1", split="train", input="beta sample", expected={"label": "beta"}),
+        )
+
+        proposals, _ = engine.propose(
+            summary,
+            surface,
+            objective=objective,
+            diagnosis=None,
+            seen_hashes=set(),
+            current_spec=spec,
+            history=[],
+            search_hypothesis=search_hypothesis_with_budget(
+                {"prompt_rewrite": 0.5, "targeted_few_shot": 0.5}
+            ),
+            proposal_example_bank=build_proposal_example_bank(train_cases),
+            proposal_example_cases=train_cases,
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertIn('"experiment_opportunities"', client.input_text)
+        self.assertIn('"confusion:beta->alpha"', client.input_text)
+        self.assertIn('"train-beta-1"', client.input_text)
+
     def test_targeted_few_shot_source_ids_materialize_from_train_bank(self) -> None:
         spec = AgentSpec(
             name="sample",

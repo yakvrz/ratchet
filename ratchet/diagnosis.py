@@ -19,7 +19,7 @@ from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjectiv
 
 DIAGNOSIS_FAILED_EXAMPLE_LIMIT = 8
 DIAGNOSIS_FAILED_EXAMPLE_MAX_CHARS = 420
-DIAGNOSIS_MAX_OUTPUT_TOKENS = 1800
+DIAGNOSIS_MAX_OUTPUT_TOKENS = 4000
 
 
 class FailureDiagnoser:
