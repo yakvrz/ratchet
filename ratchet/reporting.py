@@ -95,7 +95,10 @@ def build_outcome_analysis(
                 status = "proposals_evaluated_no_dev_gain"
                 summary = "Patch proposals ran on dev but did not improve the configured objective."
         elif accepted_dev_patches and not holdout_patches:
-            if finalist_status_counts.get("failed", 0) > 0:
+            if finalist_status_counts.get("unstable", 0) > 0:
+                status = "runtime_baseline_unstable"
+                summary = "At least one dev finalist improved, but paired stability checks showed runtime/baseline instability."
+            elif finalist_status_counts.get("failed", 0) > 0:
                 status = "finalists_failed_confirmation"
                 summary = "At least one dev patch improved, but finalist confirmation rejected all candidates before holdout."
             else:
@@ -152,6 +155,7 @@ class RatchetReporter:
         write_json(self.out_dir / "run_manifest.json", result.manifest)
         write_json(self.out_dir / "decision_log.json", result.decision_log)
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
+        write_json(self.out_dir / "evidence_ledger.json", result.evidence_ledger)
         write_jsonl(self.out_dir / "diagnoses.jsonl", result.diagnoses)
         write_jsonl(self.out_dir / "task_theories.jsonl", result.task_theories)
         write_jsonl(self.out_dir / "proposals.jsonl", result.proposals)
@@ -181,6 +185,7 @@ class RatchetReporter:
                 "run_cost": (result.run_profile or {}).get("run_cost", {}),
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "ideation_metrics": result.ideation_metrics,
+                "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
             },
         )
@@ -211,6 +216,7 @@ class RatchetReporter:
                 "run_profile": result.run_profile,
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "ideation_metrics": result.ideation_metrics,
+                "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
                 "holdout_comparison_to_baseline": selected_comparison.to_dict(),
                 "baseline": result.baseline_holdout.to_dict(),
@@ -246,9 +252,21 @@ class RatchetReporter:
             "",
             *self._frontier_status_rows(result),
             "",
-            "## Small-Dev Screening",
+            "## Early Evidence Quality",
+            "",
+            *self._early_evidence_quality_rows(result),
+            "",
+            "## Small-Dev Triage",
             "",
             *self._small_dev_screening_rows(result),
+            "",
+            "## Runtime Baseline Stability",
+            "",
+            *self._runtime_baseline_stability_rows(result),
+            "",
+            "## Measurement Efficiency",
+            "",
+            *self._measurement_efficiency_rows(result),
             "",
             "## Holdout Frontier",
             "",
@@ -627,6 +645,83 @@ class RatchetReporter:
         return table
 
     @staticmethod
+    def _early_evidence_quality_rows(result: RatchetResult) -> list[str]:
+        ledger = result.evidence_ledger or {}
+        records = list(ledger.get("records") or [])
+        if not records:
+            return ["No staged evidence records were written."]
+        summary = dict(ledger.get("summary") or {})
+        rows = [
+            f"- Evidence records: {summary.get('record_count', len(records))}",
+            f"- Stage counts: `{json.dumps(summary.get('stage_counts', {}), sort_keys=True)}`",
+            f"- Confidence tiers: `{json.dumps(summary.get('confidence_counts', {}), sort_keys=True)}`",
+            "| Candidate | Stage | Cases | Confidence | Pass gain | Score delta | Instability | Mechanism |",
+            "| --- | --- | ---: | --- | ---: | ---: | --- | --- |",
+        ]
+        ranked = sorted(
+            records,
+            key=lambda row: (
+                str(row.get("candidate_id") or ""),
+                str(row.get("stage") or ""),
+            ),
+        )
+        for row in ranked[:12]:
+            comparison = row.get("comparison_to_reference") or {}
+            rows.append(
+                "| "
+                f"`{row.get('candidate_id')}` | "
+                f"`{row.get('stage')}` | "
+                f"{row.get('case_count', 0)} | "
+                f"`{row.get('confidence_tier', 'n/a')}` | "
+                f"{int(row.get('pass_gain') or 0):+d} | "
+                f"{float(comparison.get('score_delta') or 0.0):+.3f} | "
+                f"{', '.join(row.get('baseline_instability_flags') or []) or 'none'} | "
+                f"`{row.get('mechanism_class') or 'n/a'}` |"
+            )
+        if len(records) > 12:
+            rows.append(f"- {len(records) - 12} additional evidence records omitted from this table.")
+        return rows
+
+    @staticmethod
+    def _runtime_baseline_stability_rows(result: RatchetResult) -> list[str]:
+        rows: list[str] = []
+        baseline_stability = result.manifest.get("baseline_stability") or {}
+        instability_counts = baseline_stability.get("instability_counts") or {}
+        rows.append(f"- Early-stage instability flags: `{json.dumps(instability_counts, sort_keys=True)}`")
+        rows.append(f"- Runtime repeat required: {bool(baseline_stability.get('requires_runtime_repeat'))}")
+        confirmations = result.confirmation_results or []
+        if not confirmations:
+            rows.append("- No runtime/output paired stability checks were required.")
+            return rows
+        rows.extend(
+            [
+                "| Patch | Status | Passed | Reason |",
+                "| --- | --- | --- | --- |",
+            ]
+        )
+        for item in confirmations:
+            rows.append(
+                "| "
+                f"`{item.get('patch_hash')}` | "
+                f"`{item.get('status') or item.get('diagnostic_class')}` | "
+                f"{bool(item.get('passed'))} | "
+                f"{_short_reason(item.get('reason'))} |"
+            )
+        return rows
+
+    @staticmethod
+    def _measurement_efficiency_rows(result: RatchetResult) -> list[str]:
+        summary = (result.evidence_ledger or {}).get("summary") or {}
+        measurement_cost = summary.get("measurement_cost") or {}
+        run_cost = (result.run_profile or {}).get("run_cost", {})
+        return [
+            f"- Ledger-estimated candidate measurement cost: `${float(measurement_cost.get('estimated_total_cost_usd') or 0.0):.6f}`",
+            f"- Ledger-estimated candidate measurement tokens: {int(measurement_cost.get('estimated_total_tokens') or 0)}",
+            f"- Total eval cost: `${float((run_cost.get('eval') or {}).get('cost_usd') or 0.0):.6f}`",
+            f"- Fresh case evaluations: {((result.manifest.get('stats') or {}).get('fresh_case_evaluations', 0))}",
+        ]
+
+    @staticmethod
     def _affordance_summary_rows(result: RatchetResult) -> list[str]:
         if not result.affordance_summaries:
             return ["No optimization affordance applications were recorded."]
@@ -748,6 +843,7 @@ class RatchetReporter:
                 f"`{item.get('patch_hash')}` ({item.get('diagnostic_class', 'runtime_finding')}): {item.get('reason')} "
                 f"fixed_invalid={item.get('fixed_invalid_output_case_ids', [])}, "
                 f"low_token_fixed={item.get('low_token_fixed_case_ids', [])}, "
+                f"finish_changed={item.get('finish_reason_changed_case_ids', [])}, "
                 f"finish_reasons={json.dumps(item.get('finish_reasons_by_case', {}), sort_keys=True)}"
             )
         if result.confirmation_results:

@@ -5,7 +5,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from ratchet.objectives import GatePredicate, behavior_flip_summary, compare_summaries
+from ratchet.evidence_ledger import confirmation_stability_result
+from ratchet.objectives import behavior_flip_summary, compare_summaries
 from ratchet.results import PatchSummary, RatchetResult
 from ratchet.types import AgentPatch, EvalCase, OptimizationObjective
 
@@ -25,7 +26,15 @@ def runtime_reliability_diagnostics(
     candidate_by_id = _representative_evaluations(candidate)
     fixed_invalid: list[str] = []
     low_token_fixed: list[str] = []
+    finish_reason_changed: list[str] = []
     finish_reasons: dict[str, list[str]] = defaultdict(list)
+    for case_id in sorted(set(reference_by_id) & set(candidate_by_id)):
+        reference_eval = reference_by_id[case_id]
+        candidate_eval = candidate_by_id[case_id]
+        reference_finish_reason = str(reference_eval.record.diagnostics.metadata.get("finish_reason") or "")
+        candidate_finish_reason = str(candidate_eval.record.diagnostics.metadata.get("finish_reason") or "")
+        if reference_finish_reason != candidate_finish_reason:
+            finish_reason_changed.append(case_id)
     for case_id in sorted(fixed_ids):
         reference_eval = reference_by_id.get(case_id)
         candidate_eval = candidate_by_id.get(case_id)
@@ -41,7 +50,7 @@ def runtime_reliability_diagnostics(
             finish_reason = str(evaluation.record.diagnostics.metadata.get("finish_reason") or "")
             if finish_reason:
                 finish_reasons[case_id].append(finish_reason)
-    baseline_runtime_defect_fixed = bool(runtime_involved and fixed_invalid and low_token_fixed)
+    baseline_runtime_defect_fixed = bool(runtime_involved and ((fixed_invalid and low_token_fixed) or finish_reason_changed))
     return {
         "patch_hash": candidate.patch_hash,
         "runtime_only": runtime_only,
@@ -60,6 +69,7 @@ def runtime_reliability_diagnostics(
         ),
         "fixed_invalid_output_case_ids": fixed_invalid,
         "low_token_fixed_case_ids": low_token_fixed,
+        "finish_reason_changed_case_ids": finish_reason_changed,
         "regressed_case_ids": list(flip_summary["regressed_case_ids"]),
         "finish_reasons_by_case": dict(finish_reasons),
     }
@@ -105,30 +115,17 @@ def confirmation_result(
     objective: OptimizationObjective | None = None,
 ) -> dict[str, Any]:
     objective = objective or OptimizationObjective()
-    predicate = GatePredicate(objective)
-    comparison = compare_summaries(confirmation_reference, confirmation_candidate)
-    flip_summary = behavior_flip_summary(confirmation_reference, confirmation_candidate)
-    confirmation_reason = predicate.confirmation_reason(
-        baseline=confirmation_reference,
-        candidate=confirmation_candidate,
-        regressed_case_ids=list(flip_summary["regressed_case_ids"]),
-        comparison=comparison,
+    stability = confirmation_stability_result(
+        reference=reference,
+        candidate=candidate,
+        repeated_reference=confirmation_reference,
+        repeated_candidate=confirmation_candidate,
+        objective=objective,
     )
-    passed = confirmation_reason is None
     return {
         "patch_hash": candidate.patch_hash,
-        "objective": objective.to_dict(),
-        "case_ids": list(confirmation_reference.grouped_evaluations),
-        "passed": passed,
-        "reference_metrics": confirmation_reference.to_dict(),
-        "candidate_metrics": confirmation_candidate.to_dict(),
-        "comparison_to_reference": comparison.to_dict(),
-        "behavior_flip_summary": flip_summary,
-        "reason": (
-            "Finalist repeated its dev-gate improvement on the confirmation subset."
-            if passed
-            else f"Finalist failed dev-gate confirmation on the confirmation subset: {confirmation_reason}."
-        ),
+        "diagnostic_class": stability["status"],
+        **stability,
     }
 
 

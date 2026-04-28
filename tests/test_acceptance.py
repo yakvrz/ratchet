@@ -290,7 +290,7 @@ class AcceptanceGateTests(unittest.TestCase):
         )
         self.assertIsNotNone(reason)
 
-    def test_predicate_confirmation_requires_pass_flip_significance(self) -> None:
+    def test_predicate_confirmation_does_not_require_tiny_subset_significance(self) -> None:
         baseline = make_summary("baseline", [0.0, 0.0], [0.002] * 2, [100] * 2, [1.0] * 2)
         candidate = make_summary("candidate", [1.0, 1.0], [0.002] * 2, [100] * 2, [1.0] * 2)
         predicate = GatePredicate(OptimizationObjective(mode="correctness"))
@@ -299,8 +299,7 @@ class AcceptanceGateTests(unittest.TestCase):
             candidate=candidate,
             regressed_case_ids=[],
         )
-        self.assertIsNotNone(reason)
-        self.assertIn("paired pass-flip p-value", reason or "")
+        self.assertIsNone(reason)
 
     def test_latency_mode_requires_confident_latency_gain(self) -> None:
         baseline = make_summary("baseline", [1.0, 1.0, 1.0], [0.002] * 3, [100] * 3, [1.0, 1.0, 1.0])

@@ -11,6 +11,7 @@ DISCOVERY_STAGES = {
     "lost_at_small_dev",
     "failed_full_dev",
     "failed_confirmation",
+    "unstable_confirmation",
     "failed_holdout",
     "validated",
     "directional_holdout",
@@ -45,6 +46,8 @@ def build_ideation_metrics(
             stage_counts["directional_holdout"] += 1
         elif status == "failed":
             stage_counts["failed_holdout"] += 1
+        elif status == "unstable":
+            stage_counts["unstable_confirmation"] += 1
     intent_ids = {str(intent.get("intent_id")) for intent in intents if intent.get("intent_id")}
     implemented_intent_ids = {
         str((row.get("candidate") or {}).get("experiment_id") or row.get("experiment_id"))
@@ -118,6 +121,7 @@ def _best_intent_stage(rows: list[dict[str, Any]]) -> str:
     ordered = [
         "validated",
         "directional_holdout",
+        "unstable_confirmation",
         "promotable_dev",
         "failed_full_dev",
         "lost_at_small_dev",

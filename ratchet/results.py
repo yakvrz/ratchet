@@ -351,6 +351,7 @@ class RatchetResult:
     quality_cost_tradeoffs: list[dict[str, Any]]
     optimizer_call_diagnostics: list[dict[str, Any]]
     ideation_metrics: dict[str, Any]
+    evidence_ledger: dict[str, Any]
     selection_reason: str
     outcome_analysis: dict[str, Any]
     manifest: dict[str, Any]

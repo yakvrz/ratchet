@@ -324,7 +324,8 @@ def _fake_research_plan_response(payload: dict[str, object]) -> object:
 def _fake_measurement_response(payload: dict[str, object]) -> object:
     state = payload.get("state")
     state = state if isinstance(state, dict) else {}
-    candidates = state.get("candidates") or state.get("variants") or []
+    ledger = state.get("evidence_ledger") if isinstance(state.get("evidence_ledger"), dict) else {}
+    candidates = ledger.get("candidate_evidence") or []
     candidates = candidates if isinstance(candidates, list) else []
     max_select = int(payload.get("max_select") or len(candidates))
     max_per_group = int(payload.get("max_select_per_group") or 0)
@@ -334,7 +335,7 @@ def _fake_measurement_response(payload: dict[str, object]) -> object:
         if not isinstance(candidate_row, dict):
             continue
         candidate_id = str(candidate_row["candidate_id"])
-        group = str(candidate_row.get("comparison_group_key") or "global")
+        group = str(candidate_row.get("comparison_group") or "global")
         if len(selected) >= max_select:
             continue
         if max_per_group and group_counts.get(group, 0) >= max_per_group:
@@ -741,6 +742,10 @@ class FakeAdapterIntegrationTests(unittest.TestCase):
                 + result.run_profile["run_cost"]["optimizer_cost_usd"],
             )
             self.assertIn("frontier_recommendation", result.manifest)
+            self.assertIn("evidence_ledger", result.manifest)
+            self.assertTrue((root / "run" / "evidence_ledger.json").exists())
+            evidence = json.loads((root / "run" / "evidence_ledger.json").read_text())
+            self.assertGreater(evidence["summary"]["record_count"], 0)
 
     def test_runtime_error_is_persisted_and_resume_retries_failed_pair(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

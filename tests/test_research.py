@@ -112,6 +112,26 @@ class ResearchRoleTests(unittest.TestCase):
         with self.assertRaises(OptimizerModelError):
             selector.select(
                 stage="full_dev",
+                state={"evidence_ledger": {"candidate_evidence": [{"candidate_id": "a"}]}},
+                candidate_ids=["a"],
+                max_select=1,
+            )
+
+    def test_measurement_selector_requires_evidence_ledger(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient(
+            [
+                (
+                    '{"selected_candidate_ids":[],"rationale":"bad",'
+                    '"expected_information":"info","risks":"none",'
+                    '"skipped_candidate_reasons":{"a":"skip"}}'
+                )
+            ]
+        )
+
+        with self.assertRaises(OptimizerModelError):
+            selector.select(
+                stage="full_dev",
                 state={"candidates": [{"candidate_id": "a"}]},
                 candidate_ids=["a"],
                 max_select=1,

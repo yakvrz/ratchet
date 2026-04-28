@@ -128,6 +128,31 @@ class ProfilingTests(unittest.TestCase):
         self.assertEqual(diagnostics["fixed_invalid_output_case_ids"], ["case-1"])
         self.assertEqual(diagnostics["low_token_fixed_case_ids"], ["case-1"])
 
+    def test_runtime_finish_reason_change_is_reliability_finding(self) -> None:
+        baseline = summary(
+            AgentPatch.empty(),
+            passed=False,
+            output={"label": "partial"},
+            labels=["failed"],
+            metadata={"requested_output_cap": 64, "finish_reason": "length"},
+        )
+        candidate_patch = AgentPatch(
+            operations=[
+                PatchOperation(op="set_runtime_param", target="runtime.output_cap", value=256)
+            ]
+        )
+        candidate = summary(
+            candidate_patch,
+            passed=True,
+            output={"label": "ok"},
+            metadata={"requested_output_cap": 256, "finish_reason": "stop"},
+        )
+
+        diagnostics = runtime_reliability_diagnostics(baseline, candidate)
+
+        self.assertTrue(diagnostics["runtime_finding"])
+        self.assertEqual(diagnostics["finish_reason_changed_case_ids"], ["case-1"])
+
     def test_few_shot_source_references_are_materialized(self) -> None:
         bank = ProposalExampleBank(
             examples=[

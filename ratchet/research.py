@@ -176,7 +176,10 @@ class MeasurementSelector:
             "instruction": (
                 "Select which already-valid candidates should be measured next. "
                 "Do not create candidates, alter patches, or revise experiment intents. "
-                "Base the decision on observed stage metrics and expected information value."
+                "Use evidence_ledger.candidate_evidence as the decision surface. "
+                "Small-dev evidence is triage evidence, not a final ranking; preserve mechanism-distinct "
+                "candidates when evidence is close or noisy. Base the decision on evidence confidence, "
+                "mechanism diversity, baseline stability, remaining budget, and expected information value."
             ),
             "stage": stage,
             "candidate_ids": candidate_ids,
@@ -214,6 +217,7 @@ class MeasurementSelector:
                 },
             }
         }
+        _validate_selector_state_has_evidence(state=state, candidate_ids=candidate_ids)
         prompt_input = (
             "You are Ratchet's measurement selector. Return only JSON matching the schema.\n\n"
             f"{json.dumps(prompt, separators=(',', ':'), default=str)}"
@@ -257,6 +261,22 @@ class MeasurementSelector:
             max_select=max_select,
         )
         return decision
+
+
+def _validate_selector_state_has_evidence(*, state: dict[str, Any], candidate_ids: list[str]) -> None:
+    ledger = state.get("evidence_ledger")
+    if not isinstance(ledger, dict):
+        raise OptimizerModelError("Measurement selector requires evidence_ledger in state.")
+    rows = ledger.get("candidate_evidence")
+    if not isinstance(rows, list):
+        raise OptimizerModelError("Measurement selector requires evidence_ledger.candidate_evidence.")
+    observed_ids = {str(row.get("candidate_id")) for row in rows if isinstance(row, dict)}
+    missing = [candidate_id for candidate_id in candidate_ids if candidate_id not in observed_ids]
+    if missing:
+        raise OptimizerModelError(
+            "Measurement selector requires ledger evidence for every candidate: "
+            + ", ".join(missing[:8])
+        )
 
 
 def _experiment_intent_schema() -> dict[str, Any]:
