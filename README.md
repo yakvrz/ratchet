@@ -165,8 +165,8 @@ Helper utilities:
 - `case_concurrency`
 - `stage_case_concurrency`
 - `expensive_candidate_cost_ratio`
-- `max_expensive_full_dev_candidates`
-- `max_expensive_holdout_candidates`
+- `max_dev_measurement_cost_usd`
+- `max_holdout_measurement_cost_usd`
 - `fail_fast`
 
 Optional eval health config:
@@ -203,6 +203,8 @@ min_correctness_delta = 0.0 # optional; defaults to strict improvement for corre
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
 Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and patch case with separate cache entries and aggregates case outcomes by majority vote / mean score.
 
+`max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. They are separate from deployed-policy cost constraints: an expensive model candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed the configured measurement budget.
+
 ## Commands
 
 - `python3 -m ratchet init --template python_function|python_cli --out <dir>`
@@ -233,16 +235,11 @@ Each run writes:
 
 ## Samples
 
-- `samples/python_api_grounding_agent/`
+- `samples/bfcl_function_calling_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
-- `samples/bfcl_function_calling_agent/`
-- `samples/policy_triage_agent/`
-- `samples/runbook_action_agent/`
-- `samples/public_docs_agent/`
-- `samples/kashi_agent/`
 
-The primary optimizer-development assessment vehicles are BANKING77, CLINC150, and BFCL. They use `ratchet.assessment.toml`, protected dev/holdout splits, and optional ideation assessment specs. Smaller sample configs remain for smoke checks and adapter examples.
+The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary agentic benchmark for function-call and output-contract behavior. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 

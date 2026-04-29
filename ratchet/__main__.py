@@ -56,8 +56,8 @@ def run_optimizer(
     fail_fast: bool | None = False,
     sanitize_examples: bool | None = None,
     expensive_candidate_cost_ratio: float | None = None,
-    max_expensive_full_dev_candidates: int | None = None,
-    max_expensive_holdout_candidates: int | None = None,
+    max_dev_measurement_cost_usd: float | None = None,
+    max_holdout_measurement_cost_usd: float | None = None,
     config: RatchetRunConfig | None = None,
 ) -> Path:
     config = config or resolve_run_config(
@@ -89,8 +89,8 @@ def run_optimizer(
         fail_fast=fail_fast,
         sanitize_examples=sanitize_examples,
         expensive_candidate_cost_ratio=expensive_candidate_cost_ratio,
-        max_expensive_full_dev_candidates=max_expensive_full_dev_candidates,
-        max_expensive_holdout_candidates=max_expensive_holdout_candidates,
+        max_dev_measurement_cost_usd=max_dev_measurement_cost_usd,
+        max_holdout_measurement_cost_usd=max_holdout_measurement_cost_usd,
     )
     adapter, cases = load_runtime(config)
     optimizer = RatchetOptimizer(
@@ -117,8 +117,8 @@ def run_optimizer(
         case_timeout_s=config.case_timeout_s,
         fail_fast=config.fail_fast,
         expensive_candidate_cost_ratio=config.expensive_candidate_cost_ratio,
-        max_expensive_full_dev_candidates=config.max_expensive_full_dev_candidates,
-        max_expensive_holdout_candidates=config.max_expensive_holdout_candidates,
+        max_dev_measurement_cost_usd=config.max_dev_measurement_cost_usd,
+        max_holdout_measurement_cost_usd=config.max_holdout_measurement_cost_usd,
         run_metadata={
             **config.to_manifest_dict(),
             "adapter_fingerprint": adapter_fingerprint(config.adapter),
@@ -667,8 +667,8 @@ def _apply_run_overrides(
         fail_fast=True if getattr(args, "fail_fast", False) else None,
         sanitize_examples=True if getattr(args, "sanitize_examples", False) else None,
         expensive_candidate_cost_ratio=getattr(args, "expensive_candidate_cost_ratio", None),
-        max_expensive_full_dev_candidates=getattr(args, "max_expensive_full_dev_candidates", None),
-        max_expensive_holdout_candidates=getattr(args, "max_expensive_holdout_candidates", None),
+        max_dev_measurement_cost_usd=getattr(args, "max_dev_measurement_cost_usd", None),
+        max_holdout_measurement_cost_usd=getattr(args, "max_holdout_measurement_cost_usd", None),
     )
 
 
@@ -710,17 +710,17 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--expensive-candidate-cost-ratio",
         type=float,
-        help="Treat candidates above this cost ratio as expensive for evaluation-budget caps.",
+        help="Report candidates above this deployed cost ratio as expensive tradeoffs.",
     )
     parser.add_argument(
-        "--max-expensive-full-dev-candidates",
-        type=int,
-        help="Maximum expensive candidates to evaluate on full dev; omit for no cap.",
+        "--max-dev-measurement-cost-usd",
+        type=float,
+        help="Maximum candidate measurement spend across dev stages; omit for no dollar ceiling.",
     )
     parser.add_argument(
-        "--max-expensive-holdout-candidates",
-        type=int,
-        help="Maximum expensive finalists to validate on holdout; omit for no cap.",
+        "--max-holdout-measurement-cost-usd",
+        type=float,
+        help="Maximum candidate measurement spend for holdout validation; omit for no dollar ceiling.",
     )
     parser.add_argument(
         "--fail-fast",

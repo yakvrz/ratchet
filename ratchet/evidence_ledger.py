@@ -162,13 +162,7 @@ def build_evidence_summary(
         sign_consistency=_sign_consistency(pass_gain=pass_gain, score_delta=comparison.score_delta),
         confidence_tier=confidence,
         baseline_instability_flags=flags,
-        measurement_cost={
-            "candidate_samples": candidate.sample_count,
-            "candidate_mean_cost_usd": candidate.mean_cost_usd,
-            "candidate_mean_total_tokens": candidate.mean_total_tokens,
-            "estimated_total_cost_usd": candidate.mean_cost_usd * candidate.sample_count,
-            "estimated_total_tokens": candidate.mean_total_tokens * candidate.sample_count,
-        },
+        measurement_cost=_measurement_cost(candidate),
         mechanism_class=mechanism_class,
         affordance_ids=list(affordance_ids),
         comparison_group=comparison_group,
@@ -177,6 +171,20 @@ def build_evidence_summary(
         constraint_warning=constraint_warning,
         passed_stage=rejection_reason is None,
     )
+
+
+def _measurement_cost(candidate: PatchSummary) -> dict[str, Any]:
+    fresh_evaluations = [evaluation for evaluation in candidate.evaluations if not evaluation.cached]
+    fresh_cost = sum(evaluation.record.metrics.cost_usd for evaluation in fresh_evaluations)
+    fresh_tokens = sum(evaluation.record.metrics.total_tokens for evaluation in fresh_evaluations)
+    return {
+        "candidate_samples": candidate.sample_count,
+        "fresh_candidate_samples": len(fresh_evaluations),
+        "candidate_mean_cost_usd": candidate.mean_cost_usd,
+        "candidate_mean_total_tokens": candidate.mean_total_tokens,
+        "estimated_total_cost_usd": fresh_cost,
+        "estimated_total_tokens": int(fresh_tokens),
+    }
 
 
 def confirmation_stability_result(

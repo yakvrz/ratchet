@@ -44,8 +44,8 @@ RUN_CONFIG_KEYS = {
     "case_timeout_s",
     "fail_fast",
     "expensive_candidate_cost_ratio",
-    "max_expensive_full_dev_candidates",
-    "max_expensive_holdout_candidates",
+    "max_dev_measurement_cost_usd",
+    "max_holdout_measurement_cost_usd",
 }
 OBJECTIVE_KEYS = {"mode", "constraints", "tie_breakers"}
 EVAL_HEALTH_KEYS = {
@@ -177,8 +177,8 @@ class RatchetRunConfig:
     case_timeout_s: int = 180
     fail_fast: bool = False
     expensive_candidate_cost_ratio: float = 10.0
-    max_expensive_full_dev_candidates: int | None = None
-    max_expensive_holdout_candidates: int | None = None
+    max_dev_measurement_cost_usd: float | None = None
+    max_holdout_measurement_cost_usd: float | None = None
     eval_health: EvalHealthConfig = field(default_factory=EvalHealthConfig)
     config_path: Path | None = None
 
@@ -189,7 +189,7 @@ class RatchetRunConfig:
             raise RatchetConfigError("case_concurrency must be positive.")
         if self.stage_case_concurrency is not None and self.stage_case_concurrency <= 0:
             raise RatchetConfigError("stage_case_concurrency must be positive when set.")
-        for name in ("max_expensive_full_dev_candidates", "max_expensive_holdout_candidates"):
+        for name in ("max_dev_measurement_cost_usd", "max_holdout_measurement_cost_usd"):
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise RatchetConfigError(f"{name} must be non-negative when set.")
@@ -220,8 +220,8 @@ class RatchetRunConfig:
             "case_timeout_s": self.case_timeout_s,
             "fail_fast": self.fail_fast,
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
-            "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
-            "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
+            "max_dev_measurement_cost_usd": self.max_dev_measurement_cost_usd,
+            "max_holdout_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
             "eval_health": self.eval_health.to_dict(),
             "config_path": str(self.config_path) if self.config_path else None,
         }
@@ -324,8 +324,8 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         case_timeout_s=int(payload.get("case_timeout_s", 180)),
         fail_fast=_as_bool(payload, "fail_fast", False),
         expensive_candidate_cost_ratio=float(payload.get("expensive_candidate_cost_ratio", 10.0)),
-        max_expensive_full_dev_candidates=_optional_int(payload.get("max_expensive_full_dev_candidates")),
-        max_expensive_holdout_candidates=_optional_int(payload.get("max_expensive_holdout_candidates")),
+        max_dev_measurement_cost_usd=_optional_float(payload.get("max_dev_measurement_cost_usd")),
+        max_holdout_measurement_cost_usd=_optional_float(payload.get("max_holdout_measurement_cost_usd")),
         eval_health=_eval_health_from_payload(payload),
         config_path=config_path,
     )
@@ -377,8 +377,8 @@ def resolve_run_config(
     fail_fast: bool | None,
     sanitize_examples: bool | None = None,
     expensive_candidate_cost_ratio: float | None = None,
-    max_expensive_full_dev_candidates: int | None = None,
-    max_expensive_holdout_candidates: int | None = None,
+    max_dev_measurement_cost_usd: float | None = None,
+    max_holdout_measurement_cost_usd: float | None = None,
     diagnoser_model: str | None = None,
     diagnoser_reasoning: str | None = None,
     research_planner_model: str | None = None,
@@ -444,15 +444,15 @@ def resolve_run_config(
             if expensive_candidate_cost_ratio is not None
             else base.expensive_candidate_cost_ratio
         ),
-        max_expensive_full_dev_candidates=(
-            max_expensive_full_dev_candidates
-            if max_expensive_full_dev_candidates is not None
-            else base.max_expensive_full_dev_candidates
+        max_dev_measurement_cost_usd=(
+            max_dev_measurement_cost_usd
+            if max_dev_measurement_cost_usd is not None
+            else base.max_dev_measurement_cost_usd
         ),
-        max_expensive_holdout_candidates=(
-            max_expensive_holdout_candidates
-            if max_expensive_holdout_candidates is not None
-            else base.max_expensive_holdout_candidates
+        max_holdout_measurement_cost_usd=(
+            max_holdout_measurement_cost_usd
+            if max_holdout_measurement_cost_usd is not None
+            else base.max_holdout_measurement_cost_usd
         ),
         eval_health=base.eval_health,
         config_path=base.config_path,
@@ -472,6 +472,12 @@ def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
     return int(value)
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
 
 
 def _optional_str(value: Any) -> str | None:

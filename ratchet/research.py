@@ -17,7 +17,7 @@ from ratchet.model_client import (
 
 
 RESEARCH_PLANNER_MAX_OUTPUT_TOKENS = 3500
-MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS = 2200
+MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS = 3000
 
 
 class ResearchPlanner:
@@ -210,10 +210,10 @@ class MeasurementSelector:
                 "Use evidence_ledger.candidate_evidence as the decision surface. "
                 "Small-dev evidence is triage evidence, not a final ranking; preserve mechanism-distinct "
                 "candidates when evidence is close or noisy. Base the decision on evidence confidence, "
-                "mechanism diversity, baseline stability, remaining budget, and expected information value. "
-                "Distinguish the cost of measuring a candidate from the candidate's deployed cost/latency tradeoff; "
-                "high-cost candidates can still deserve measurement when they test a capability, efficiency, or "
-                "quality-frontier question."
+                "mechanism diversity, baseline stability, remaining measurement budget, and expected information "
+                "value per measurement dollar. Distinguish the cost of measuring a candidate from the candidate's "
+                "deployed cost/latency tradeoff; high-cost candidates can still deserve measurement when they test "
+                "a capability, efficiency, or quality-frontier question."
             ),
             "stage": stage,
             "candidate_ids": candidate_ids,

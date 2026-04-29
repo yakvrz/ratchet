@@ -408,6 +408,56 @@ class CliConfigIntegrationTests(unittest.TestCase):
             )
             self.assertFalse(overridden.objective.constraints.sanitize_examples)
 
+    def test_measurement_budgets_replace_expensive_candidate_caps(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    max_dev_measurement_cost_usd = 0.25
+                    max_holdout_measurement_cost_usd = 0.10
+                    """
+                ).strip()
+            )
+
+            loaded = load_run_config(config_path)
+            self.assertEqual(loaded.max_dev_measurement_cost_usd, 0.25)
+            self.assertEqual(loaded.max_holdout_measurement_cost_usd, 0.10)
+
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    max_expensive_full_dev_candidates = 1
+                    """
+                ).strip()
+            )
+            with self.assertRaisesRegex(RatchetConfigError, "max_expensive_full_dev_candidates"):
+                load_run_config(config_path)
+
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    max_dev_measurement_cost_usd = -0.01
+                    """
+                ).strip()
+            )
+            with self.assertRaisesRegex(RatchetConfigError, "max_dev_measurement_cost_usd"):
+                load_run_config(config_path)
+
     def test_optimizer_role_models_fall_back_to_default_and_can_override(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

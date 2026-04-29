@@ -717,6 +717,11 @@ class RatchetReporter:
         return [
             f"- Ledger-estimated candidate measurement cost: `${float(measurement_cost.get('estimated_total_cost_usd') or 0.0):.6f}`",
             f"- Ledger-estimated candidate measurement tokens: {int(measurement_cost.get('estimated_total_tokens') or 0)}",
+            f"- Dev measurement budget used: `${float(result.manifest.get('dev_measurement_cost_used_usd') or 0.0):.6f}`"
+            f" / `{result.manifest.get('max_dev_measurement_cost_usd')}`",
+            f"- Holdout measurement budget used: `${float(result.manifest.get('holdout_measurement_cost_used_usd') or 0.0):.6f}`"
+            f" / `{result.manifest.get('max_holdout_measurement_cost_usd')}`",
+            f"- Expensive deployed-policy reporting threshold: `{result.manifest.get('expensive_candidate_cost_ratio')}x` baseline cost",
             f"- Total eval cost: `${float((run_cost.get('eval') or {}).get('cost_usd') or 0.0):.6f}`",
             f"- Fresh case evaluations: {((result.manifest.get('stats') or {}).get('fresh_case_evaluations', 0))}",
         ]
@@ -924,7 +929,7 @@ class RatchetReporter:
     @staticmethod
     def _quality_cost_tradeoff_rows(result: RatchetResult) -> list[str]:
         if not result.quality_cost_tradeoffs:
-            return ["No model substitutions were rejected by the cost guard."]
+            return ["No model substitutions failed promotion solely because of deployed cost/latency constraints."]
         return [
             "- "
             f"`{item.get('patch_hash')}`: {item.get('rejection_reason')} "

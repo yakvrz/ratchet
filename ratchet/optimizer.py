@@ -171,8 +171,8 @@ class RatchetOptimizer:
         case_timeout_s: int = 180,
         fail_fast: bool = False,
         expensive_candidate_cost_ratio: float = 10.0,
-        max_expensive_full_dev_candidates: int | None = None,
-        max_expensive_holdout_candidates: int | None = None,
+        max_dev_measurement_cost_usd: float | None = None,
+        max_holdout_measurement_cost_usd: float | None = None,
         run_metadata: dict[str, Any] | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
@@ -231,14 +231,14 @@ class RatchetOptimizer:
         if expensive_candidate_cost_ratio <= 0:
             raise ValueError("expensive_candidate_cost_ratio must be positive.")
         self.expensive_candidate_cost_ratio = expensive_candidate_cost_ratio
-        if max_expensive_full_dev_candidates is not None and max_expensive_full_dev_candidates < 0:
-            raise ValueError("max_expensive_full_dev_candidates must be non-negative when set.")
-        if max_expensive_holdout_candidates is not None and max_expensive_holdout_candidates < 0:
-            raise ValueError("max_expensive_holdout_candidates must be non-negative when set.")
-        self.max_expensive_full_dev_candidates = max_expensive_full_dev_candidates
-        self.max_expensive_holdout_candidates = max_expensive_holdout_candidates
-        self._expensive_full_dev_evaluations = 0
-        self._expensive_holdout_validations = 0
+        if max_dev_measurement_cost_usd is not None and max_dev_measurement_cost_usd < 0:
+            raise ValueError("max_dev_measurement_cost_usd must be non-negative when set.")
+        if max_holdout_measurement_cost_usd is not None and max_holdout_measurement_cost_usd < 0:
+            raise ValueError("max_holdout_measurement_cost_usd must be non-negative when set.")
+        self.max_dev_measurement_cost_usd = max_dev_measurement_cost_usd
+        self.max_holdout_measurement_cost_usd = max_holdout_measurement_cost_usd
+        self._dev_measurement_cost_usd = 0.0
+        self._holdout_measurement_cost_usd = 0.0
         self.run_metadata = dict(run_metadata or {})
         self.cache_namespace = build_cache_namespace(
             agent_spec=self.agent_spec,
@@ -263,8 +263,8 @@ class RatchetOptimizer:
         self._progress_path = self.out_dir / "progress.jsonl"
         self._progress_path.write_text("")
         self.optimizer_call_diagnostics = []
-        self._expensive_full_dev_evaluations = 0
-        self._expensive_holdout_validations = 0
+        self._dev_measurement_cost_usd = 0.0
+        self._holdout_measurement_cost_usd = 0.0
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
         self._emit_progress(
@@ -803,44 +803,47 @@ class RatchetOptimizer:
                 finalist_count=len(accepted_dev_patches),
             )
         for dev_summary in finalist_dev_patches:
-            expensive_for_validation = _is_expensive_summary(
-                baseline=baseline_dev,
-                candidate=dev_summary,
-                cost_ratio=self.expensive_candidate_cost_ratio,
-            )
-            if expensive_for_validation and self.max_expensive_holdout_candidates is not None:
-                if self._expensive_holdout_validations >= self.max_expensive_holdout_candidates:
-                    reason = (
-                        "holdout skipped by expensive evaluation cap "
-                        f"(candidate dev cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
-                        f"cap {self.max_expensive_holdout_candidates})"
-                    )
-                    finalist_statuses.append(
-                        {
-                            "patch_hash": dev_summary.patch_hash,
-                            "status": "deferred",
-                            "stage": "holdout_skipped",
-                            "reason": reason,
-                            "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
-                            "dev_metrics": dev_summary.to_dict(),
-                            "passed_final_gate": False,
-                        }
-                    )
-                    decision_log.append(
-                        {
-                            "type": "holdout_validation_skipped",
-                            "patch_hash": dev_summary.patch_hash,
-                            "reason": reason,
-                            "dev_metrics": dev_summary.to_dict(),
-                        }
-                    )
-                    self._emit_progress(
-                        "holdout_validation_skipped",
-                        patch_hash=dev_summary.patch_hash,
-                        reason=reason,
-                    )
-                    continue
-                self._expensive_holdout_validations += 1
+            holdout_measurement_cost = dev_summary.mean_cost_usd * len(holdout_cases) * self.samples_per_case
+            if _measurement_budget_exhausted(
+                used_usd=self._holdout_measurement_cost_usd,
+                marginal_usd=holdout_measurement_cost,
+                max_usd=self.max_holdout_measurement_cost_usd,
+            ):
+                reason = (
+                    "measurement_budget_exhausted: marginal holdout measurement cost "
+                    f"${holdout_measurement_cost:.6f} exceeds remaining holdout measurement budget"
+                )
+                finalist_statuses.append(
+                    {
+                        "patch_hash": dev_summary.patch_hash,
+                        "status": "deferred",
+                        "stage": "holdout_skipped",
+                        "reason": reason,
+                        "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
+                        "dev_metrics": dev_summary.to_dict(),
+                        "measurement_budget": {
+                            "marginal_measurement_cost_usd": holdout_measurement_cost,
+                            "measurement_cost_used_usd": self._holdout_measurement_cost_usd,
+                            "max_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+                        },
+                        "passed_final_gate": False,
+                    }
+                )
+                decision_log.append(
+                    {
+                        "type": "holdout_validation_skipped",
+                        "patch_hash": dev_summary.patch_hash,
+                        "reason": reason,
+                        "dev_metrics": dev_summary.to_dict(),
+                    }
+                )
+                self._emit_progress(
+                    "holdout_validation_skipped",
+                    patch_hash=dev_summary.patch_hash,
+                    reason=reason,
+                )
+                continue
+            self._holdout_measurement_cost_usd += holdout_measurement_cost
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
             if _requires_finalist_confirmation(dev_summary.patch, runtime_diagnostic):
@@ -1691,6 +1694,7 @@ class RatchetOptimizer:
                         baseline,
                         reference=reference,
                         stage_name=stage_name,
+                        stage_cases=stage_cases,
                         proposals_log=proposals_log,
                         decision_log=decision_log,
                         dev_evaluations_used=dev_evaluations_used,
@@ -1707,6 +1711,7 @@ class RatchetOptimizer:
                     baseline,
                     reference=reference,
                     stage_name=stage_name,
+                    stage_cases=stage_cases,
                     proposals_log=proposals_log,
                     decision_log=decision_log,
                     dev_evaluations_used=dev_evaluations_used,
@@ -1762,6 +1767,10 @@ class RatchetOptimizer:
                     rejection_reason=rejection_reason,
                     constraint_warning=constraint_warning,
                 )
+                if stage_name in {"smoke", "small_dev", "full_dev"}:
+                    self._dev_measurement_cost_usd += float(
+                        evidence_summary.measurement_cost.get("estimated_total_cost_usd") or 0.0
+                    )
                 state.stage_rows.append(
                     {
                         "stage": stage_name,
@@ -1818,6 +1827,7 @@ class RatchetOptimizer:
         *,
         reference: PatchSummary,
         stage_name: str,
+        stage_cases: tuple[EvalCase, ...],
         proposals_log: list[dict[str, Any]],
         decision_log: list[dict[str, Any]],
         dev_evaluations_used: int,
@@ -1842,6 +1852,10 @@ class RatchetOptimizer:
             dev_evaluations_used=dev_evaluations_used,
             dev_budget=self.dev_budget,
             evidence_ledger=evidence_ledger,
+            stage_cases=stage_cases,
+            samples_per_case=self.samples_per_case,
+            measurement_cost_used_usd=self._dev_measurement_cost_usd,
+            max_measurement_cost_usd=self.max_dev_measurement_cost_usd,
         )
         self._emit_progress(
             "measurement_selector_started",
@@ -1901,25 +1915,28 @@ class RatchetOptimizer:
             )
             state.frontier_status = "screened_out"
             state.accepted = False
-        if stage_name != "full_dev" or self.max_expensive_full_dev_candidates is None:
-            return selected
         kept: list[CandidateEvaluationState] = []
+        selected_measurement_cost = 0.0
         for state in selected:
-            if _is_expensive_summary(
-                baseline=baseline,
-                candidate=state.summary,
-                cost_ratio=self.expensive_candidate_cost_ratio,
+            marginal_cost = _estimated_marginal_measurement_cost_usd(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+            )
+            if _measurement_budget_exhausted(
+                used_usd=self._dev_measurement_cost_usd + selected_measurement_cost,
+                marginal_usd=marginal_cost,
+                max_usd=self.max_dev_measurement_cost_usd,
             ):
-                if self._expensive_full_dev_evaluations >= self.max_expensive_full_dev_candidates:
-                    state.rejection_reason = (
-                        "screened out before full_dev by expensive evaluation cap "
-                        f"(candidate cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
-                        f"cap {self.max_expensive_full_dev_candidates})"
-                    )
-                    state.frontier_status = "screened_out"
-                    state.accepted = False
-                    continue
-                self._expensive_full_dev_evaluations += 1
+                state.rejection_reason = (
+                    "measurement_budget_exhausted: marginal measurement cost "
+                    f"${marginal_cost:.6f} exceeds remaining dev measurement budget"
+                )
+                state.frontier_status = "screened_out"
+                state.accepted = False
+                continue
+            selected_measurement_cost += marginal_cost
             kept.append(state)
         return kept
 
@@ -2353,10 +2370,10 @@ class RatchetOptimizer:
             "case_concurrency": self.case_concurrency,
             "stage_case_concurrency": self.stage_case_concurrency,
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
-            "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
-            "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
-            "expensive_full_dev_evaluations": self._expensive_full_dev_evaluations,
-            "expensive_holdout_validations": self._expensive_holdout_validations,
+            "max_dev_measurement_cost_usd": self.max_dev_measurement_cost_usd,
+            "max_holdout_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+            "dev_measurement_cost_used_usd": self._dev_measurement_cost_usd,
+            "holdout_measurement_cost_used_usd": self._holdout_measurement_cost_usd,
             "selected_patch_hash": selected_patch_hash,
             "promoted": promoted,
             "progress_path": str(self.out_dir / "progress.jsonl"),
@@ -2504,9 +2521,27 @@ def _research_state_packet(
     dev_evaluations_used: int,
     dev_budget: int,
     evidence_ledger: EvidenceLedger,
+    stage_cases: tuple[EvalCase, ...],
+    samples_per_case: int,
+    measurement_cost_used_usd: float,
+    max_measurement_cost_usd: float | None,
 ) -> dict[str, Any]:
     candidate_ids = [state.patch_hash for state in states]
-    candidate_evidence = evidence_ledger.selector_rows(candidate_ids)
+    candidate_evidence = _selector_rows_with_measurement_context(
+        evidence_ledger=evidence_ledger,
+        states=states,
+        stage_cases=stage_cases,
+        reference=reference,
+        baseline=baseline,
+        samples_per_case=samples_per_case,
+        measurement_cost_used_usd=measurement_cost_used_usd,
+        max_measurement_cost_usd=max_measurement_cost_usd,
+    )
+    remaining_measurement_budget = (
+        None
+        if max_measurement_cost_usd is None
+        else max(0.0, max_measurement_cost_usd - measurement_cost_used_usd)
+    )
     return {
         "objective": objective.to_dict(),
         "decision_point": stage_name,
@@ -2514,6 +2549,9 @@ def _research_state_packet(
             "dev_evaluations_used": dev_evaluations_used,
             "dev_budget": dev_budget,
             "remaining_dev_budget": max(0, dev_budget - dev_evaluations_used),
+            "measurement_cost_used_usd": measurement_cost_used_usd,
+            "max_measurement_cost_usd": max_measurement_cost_usd,
+            "remaining_measurement_budget_usd": remaining_measurement_budget,
         },
         "measurement_policy": {
             "small_dev": "Triage only; use it to decide whether more measurement is worth buying, not as final ranking.",
@@ -2522,6 +2560,10 @@ def _research_state_packet(
                 "Candidate cost_delta and latency_delta describe the deployed policy tradeoff. "
                 "They are not the same as the cost of one more measurement. Expensive candidates may still be worth "
                 "measuring when they test capability, efficiency, or quality-frontier hypotheses."
+            ),
+            "measurement_budget": (
+                "Use marginal_measurement_cost_usd and remaining_measurement_budget_usd to decide whether the "
+                "expected information is worth buying. Deterministic code enforces hard dollar ceilings after selection."
             ),
             "quality_frontier": (
                 "For correctness objectives, a high-quality candidate that violates cost or latency constraints can still "
@@ -2551,6 +2593,114 @@ def _research_state_packet(
         "candidate_metadata": [_research_candidate_metadata(state) for state in states],
         "prior_full_dev_results": _compact_prior_stage_results(proposals_log, stage="full_dev", limit=8),
         "recent_candidate_history": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
+    }
+
+
+def _selector_rows_with_measurement_context(
+    *,
+    evidence_ledger: EvidenceLedger,
+    states: list[CandidateEvaluationState],
+    stage_cases: tuple[EvalCase, ...],
+    reference: PatchSummary,
+    baseline: PatchSummary,
+    samples_per_case: int,
+    measurement_cost_used_usd: float,
+    max_measurement_cost_usd: float | None,
+) -> list[dict[str, Any]]:
+    state_by_id = {state.patch_hash: state for state in states}
+    rows: list[dict[str, Any]] = []
+    remaining_budget = (
+        None
+        if max_measurement_cost_usd is None
+        else max(0.0, max_measurement_cost_usd - measurement_cost_used_usd)
+    )
+    for raw_row in evidence_ledger.selector_rows(state_by_id):
+        row = _compact_selector_evidence_row(raw_row)
+        candidate_id = str(row.get("candidate_id") or "")
+        state = state_by_id.get(candidate_id)
+        if state is None:
+            continue
+        row["marginal_measurement_cost_usd"] = _estimated_marginal_measurement_cost_usd(
+            state=state,
+            stage_cases=stage_cases,
+            evidence_ledger=evidence_ledger,
+            samples_per_case=samples_per_case,
+        )
+        row["remaining_measurement_budget_usd"] = remaining_budget
+        row["deployed_cost_ratio"] = _safe_ratio(
+            (state.summary.mean_cost_usd if state.summary is not None else 0.0),
+            baseline.mean_cost_usd,
+        )
+        row["deployed_latency_ratio"] = _safe_ratio(
+            (state.summary.median_latency_s if state.summary is not None else 0.0),
+            baseline.median_latency_s,
+        )
+        row["reference_cost_ratio"] = _safe_ratio(
+            (state.summary.mean_cost_usd if state.summary is not None else 0.0),
+            reference.mean_cost_usd,
+        )
+        rows.append(row)
+    return rows
+
+
+def _compact_selector_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
+    comparison = row.get("comparison_to_reference") or {}
+    measurement_cost = row.get("measurement_cost") or {}
+    return {
+        "candidate_id": row.get("candidate_id"),
+        "stage": row.get("stage"),
+        "case_count": row.get("case_count"),
+        "effect_size": row.get("effect_size"),
+        "pass_gain": row.get("pass_gain"),
+        "fixed_count": row.get("fixed_count"),
+        "regressed_count": row.get("regressed_count"),
+        "invalid_output_delta": row.get("invalid_output_delta"),
+        "finish_reason_delta": row.get("finish_reason_delta"),
+        "token_delta": row.get("token_delta"),
+        "cost_delta": row.get("cost_delta"),
+        "latency_delta": row.get("latency_delta"),
+        "sign_consistency": row.get("sign_consistency"),
+        "confidence_tier": row.get("confidence_tier"),
+        "baseline_instability_flags": list(row.get("baseline_instability_flags") or []),
+        "measurement_cost": {
+            "fresh_candidate_samples": measurement_cost.get("fresh_candidate_samples"),
+            "estimated_total_cost_usd": measurement_cost.get("estimated_total_cost_usd"),
+            "estimated_total_tokens": measurement_cost.get("estimated_total_tokens"),
+            "candidate_mean_cost_usd": measurement_cost.get("candidate_mean_cost_usd"),
+        },
+        "mechanism_class": row.get("mechanism_class"),
+        "affordance_ids": list(row.get("affordance_ids") or [])[:6],
+        "comparison_group": row.get("comparison_group"),
+        "candidate_role": row.get("candidate_role"),
+        "rejection_reason": row.get("rejection_reason"),
+        "constraint_warning": row.get("constraint_warning"),
+        "passed_stage": row.get("passed_stage"),
+        "comparison_to_reference": {
+            "score_delta": comparison.get("score_delta"),
+            "pass_rate_delta": comparison.get("pass_rate_delta"),
+            "cost_delta": comparison.get("cost_delta"),
+            "latency_delta": comparison.get("latency_delta"),
+            "token_delta": comparison.get("token_delta"),
+        },
+        "stage_history": [
+            _compact_selector_history_row(history)
+            for history in list(row.get("stage_history") or [])[-3:]
+            if isinstance(history, dict)
+        ],
+    }
+
+
+def _compact_selector_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    comparison = row.get("comparison_to_reference") or {}
+    return {
+        "stage": row.get("stage"),
+        "case_count": row.get("case_count"),
+        "confidence_tier": row.get("confidence_tier"),
+        "pass_gain": row.get("pass_gain"),
+        "effect_size": row.get("effect_size"),
+        "score_delta": comparison.get("score_delta"),
+        "rejection_reason": row.get("rejection_reason"),
+        "constraint_warning": row.get("constraint_warning"),
     }
 
 
@@ -2652,15 +2802,36 @@ def _efficiency_improved(reference: PatchSummary, candidate: PatchSummary) -> bo
     return score_noninferior and (cheaper or faster)
 
 
-def _is_expensive_summary(
+def _estimated_marginal_measurement_cost_usd(
     *,
-    baseline: PatchSummary,
-    candidate: PatchSummary | None,
-    cost_ratio: float,
+    state: CandidateEvaluationState,
+    stage_cases: tuple[EvalCase, ...],
+    evidence_ledger: EvidenceLedger,
+    samples_per_case: int,
+) -> float:
+    if state.summary is None:
+        return 0.0
+    latest = evidence_ledger.latest(state.patch_hash)
+    previously_measured = set(latest.case_ids) if latest is not None else set()
+    marginal_case_count = sum(1 for case in stage_cases if case.id not in previously_measured)
+    return max(0.0, state.summary.mean_cost_usd * marginal_case_count * max(1, samples_per_case))
+
+
+def _measurement_budget_exhausted(
+    *,
+    used_usd: float,
+    marginal_usd: float,
+    max_usd: float | None,
 ) -> bool:
-    if candidate is None or baseline.mean_cost_usd <= 0:
+    if max_usd is None:
         return False
-    return candidate.mean_cost_usd > baseline.mean_cost_usd * cost_ratio
+    return used_usd + marginal_usd > max_usd + 1e-12
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
 
 
 def _is_timeout_error(error: Exception) -> bool:
