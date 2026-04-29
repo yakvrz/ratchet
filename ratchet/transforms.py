@@ -6,9 +6,9 @@ from typing import Any
 
 from ratchet.experiments import CANDIDATE_ROLES, mechanism_error_for_family
 from ratchet.results import Comparison, PatchSummary
-from ratchet.surfaces import SurfaceSpec
+from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
 from ratchet.transform_program import TransformPatch, TransformProgram
-from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
+from ratchet.types import FailureDiagnosis, OptimizationObjective
 
 
 TRANSFORM_LIFECYCLE_STATES = {
@@ -815,9 +815,9 @@ def build_search_hypothesis(
     if not isinstance(surface, SurfaceSpec):
         raise TypeError(f"build_search_hypothesis requires SurfaceSpec, got {type(surface).__name__}.")
     profile = build_behavior_profile(summary)
-    surface_targets = _surface_targets_for_search(surface)
-    surface_kinds = {target.kind for target in surface_targets}
-    surface_ops = {op for target in surface_targets for op in target.allowed_ops}
+    targets = surface_targets(surface)
+    surface_kinds = {target.kind for target in targets}
+    surface_ops = {op for target in targets for op in target.allowed_ops}
     branch_history = select_branch_history(history, parent_patch_hash or summary.patch_hash)
     diagnosis_signals = _diagnosis_signals(diagnoses or [])
     context_states: dict[str, TransformContextState] = {}
@@ -845,7 +845,7 @@ def build_search_hypothesis(
         base_suitability, base_evidence = _suitability(family, profile, objective)
         for context_key in _candidate_context_keys(
             family=family,
-            surface=surface_targets,
+            surface=targets,
             profile=profile,
             diagnosis_signals=diagnosis_signals,
         ):
@@ -1260,7 +1260,7 @@ def _evidence_signals(
 def _candidate_context_keys(
     *,
     family: TransformFamily,
-    surface: list[EditableTarget],
+    surface: list[SurfaceTarget],
     profile: BehaviorProfile,
     diagnosis_signals: dict[str, set[str]],
 ) -> list[TransformContextKey]:
@@ -1284,102 +1284,6 @@ def _candidate_context_keys(
                 )
             )
     return keys or [TransformContextKey(family=family.name)]
-
-
-def _surface_targets_for_search(surface: SurfaceSpec) -> list[EditableTarget]:
-    targets: list[EditableTarget] = []
-    context_ops = ["add_context_section", "replace_context_section"]
-    if surface.context.removable_sections_allowed:
-        context_ops.append("remove_context_section")
-    if surface.context.reorderable_sections_allowed:
-        context_ops.extend(["move_context_section", "reorder_context_sections"])
-    for section in surface.context.graph.sections:
-        if section.name in surface.context.editable_sections:
-            targets.append(
-                EditableTarget(
-                    name=section.name,
-                    kind="context",
-                    path=f"context.{section.name}",
-                    current_value=section.content,
-                    allowed_ops=tuple(context_ops),
-                    description=f"Context section {section.name}.",
-                )
-            )
-    if surface.context.generated_sections_allowed:
-        targets.append(
-            EditableTarget(
-                name="generated_context",
-                kind="context",
-                path="context.generated",
-                current_value=None,
-                allowed_ops=("add_context_section", "render_state_section"),
-                description="Generated transform context sections.",
-            )
-        )
-    if surface.response.draft_response_interception_allowed:
-        response_ops = ["validate", "validate_claims"]
-        if surface.response.response_rewrite_allowed:
-            response_ops.append("rewrite_response")
-        if surface.response.response_blocking_allowed:
-            response_ops.append("block_response")
-        targets.append(
-            EditableTarget(
-                name="draft_response",
-                kind="response",
-                path="response.draft",
-                current_value=None,
-                allowed_ops=tuple(response_ops),
-                description="Intercepted draft response.",
-            )
-        )
-    if surface.state.supports_persistent_state:
-        targets.append(
-            EditableTarget(
-                name="state",
-                kind="state",
-                path="state",
-                current_value={"existing_fields": list(surface.state.existing_fields)},
-                allowed_ops=("define_state", "set_state", "append_state", "merge_state", "clear_state"),
-                description="Typed transform state.",
-            )
-        )
-    if (
-        surface.model.model_name_configurable
-        or surface.model.temperature_configurable
-        or surface.model.max_tokens_configurable
-        or surface.model.reasoning_effort_configurable
-        or surface.model.tool_choice_mode_configurable
-    ):
-        targets.append(
-            EditableTarget(
-                name="model_config",
-                kind="model",
-                path="model",
-                current_value=surface.model.to_dict(),
-                allowed_ops=("set_model_config",),
-                description="Model invocation configuration.",
-            )
-        )
-    tool_ops = []
-    if surface.tools.tool_metadata_allowed:
-        tool_ops.append("annotate_tool")
-    if surface.tools.tool_description_rewrite_allowed:
-        tool_ops.append("rewrite_tool_description")
-    if surface.tools.tool_call_interception_allowed:
-        tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
-    for tool in surface.tools.tools:
-        if tool_ops:
-            targets.append(
-                EditableTarget(
-                    name=tool.name,
-                    kind="tool",
-                    path=f"tools.{tool.name}",
-                    current_value=tool.to_dict(),
-                    allowed_ops=tuple(tool_ops),
-                    description=tool.description or f"Tool {tool.name}.",
-                )
-            )
-    return targets
 
 
 def _diagnosis_signals(diagnoses: list[FailureDiagnosis]) -> dict[str, set[str]]:

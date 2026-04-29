@@ -216,7 +216,6 @@ Objective config:
 mode = "correctness" # correctness | cost | latency
 
 [ratchet.objective.constraints]
-allowed_edits = ["instruction", "tool", "runtime", "model", "output"]
 allowed_models = ["gpt-4o-2024-08-06", "gpt-5.4-mini"]
 max_cost_ratio = 1.0
 max_latency_ratio = 1.1

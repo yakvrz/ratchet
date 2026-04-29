@@ -4,7 +4,7 @@ import unittest
 
 from ratchet.evidence_ledger import build_evidence_summary, confirmation_stability_result
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.types import AgentPatch, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.types import DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 def summary(
@@ -46,7 +46,7 @@ def summary(
         )
     return PatchSummary(
         patch_hash=patch_hash,
-        patch=AgentPatch.empty(),
+        patch=None,
         split="dev",
         evaluations=evaluations,
     )

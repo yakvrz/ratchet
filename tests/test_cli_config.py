@@ -12,7 +12,8 @@ from ratchet.scaffold import init_scaffold
 from ratchet.preflight import run_preflight_check
 from ratchet.config import RatchetConfigError, load_run_config, resolve_run_config
 from ratchet.__main__ import CliProgressPrinter
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 FUNCTION_AGENT_BODY = """from __future__ import annotations
@@ -103,20 +104,21 @@ BROKEN_ADAPTER_BODY = """from __future__ import annotations
 
 from pathlib import Path
 
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 
 class BrokenAdapter:
     def agent_spec(self) -> AgentSpec:
         return AgentSpec(name="broken", model="primary")
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> dict[str, str]:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> dict[str, str]:
         return {"output": "wrong"}
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0, passed=True, labels=[])
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
 
@@ -133,7 +135,7 @@ class IgnoringExportAdapter:
             output_contract="Return text.",
         )
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         return RunRecord(
             output=str(case.expected),
             metrics=OperationalMetrics(
@@ -148,9 +150,9 @@ class IgnoringExportAdapter:
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0, passed=True)
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), sort_keys=True))
+        (out_dir / "candidate.json").write_text(json.dumps(candidate.to_dict() if candidate else None, sort_keys=True))
 
 
 class NoneAgentSpecAdapter(IgnoringExportAdapter):
@@ -289,19 +291,18 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertEqual(context.exception.returncode, 3)
             self.assertIn("run_case returned dict", context.exception.stderr)
 
-    def test_check_fails_when_export_does_not_materialize_generated_targets(self) -> None:
+    def test_check_accepts_compiled_candidate_export_surface(self) -> None:
         cases = (
             EvalCase(id="dev-1", split="dev", input="x", expected="x"),
             EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
         )
-        with self.assertRaisesRegex(ValueError, "Materialization audit failed"):
-            run_preflight_check(
-                adapter_spec="tests.test_cli_config:adapter",
-                adapter=IgnoringExportAdapter(),
-                cases=cases,
-                objective=OptimizationObjective(),
-                sample_limit=2,
-            )
+        run_preflight_check(
+            adapter_spec="tests.test_cli_config:adapter",
+            adapter=IgnoringExportAdapter(),
+            cases=cases,
+            objective=OptimizationObjective(),
+            sample_limit=2,
+        )
 
     def test_check_rejects_none_agent_spec(self) -> None:
         cases = (
@@ -396,7 +397,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 holdout_budget=None,
                 objective_mode=None,
                 allowed_models=None,
-                allowed_edits=None,
                 optimizer_model=None,
                 optimizer_reasoning=None,
                 samples_per_case=None,
@@ -538,7 +538,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 holdout_budget=None,
                 objective_mode=None,
                 allowed_models=None,
-                allowed_edits=None,
                 optimizer_model=None,
                 optimizer_reasoning=None,
                 samples_per_case=None,
@@ -638,7 +637,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     mode = "correctness"
 
                     [ratchet.objective.constraints]
-                    allowed_edits = ["instruction"]
                     typo_ratio = 2.0
                     """
                 ).strip()

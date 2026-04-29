@@ -15,7 +15,7 @@ from ratchet.model_client import (
 )
 from ratchet.results import PatchSummary
 from ratchet.surfaces import SurfaceSpec
-from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
+from ratchet.types import FailureDiagnosis, OptimizationObjective
 
 
 DIAGNOSIS_FAILED_EXAMPLE_LIMIT = 8
@@ -40,7 +40,7 @@ class FailureDiagnoser:
     def diagnose(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget] | SurfaceSpec,
+        surface: SurfaceSpec,
         objective: OptimizationObjective | None = None,
     ) -> tuple[list[FailureDiagnosis], str]:
         failed_examples = summary.failed_examples(
@@ -59,7 +59,7 @@ class FailureDiagnoser:
     def _llm_diagnoses(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget] | SurfaceSpec,
+        surface: SurfaceSpec,
         failed_examples: list[dict[str, Any]],
         objective: OptimizationObjective,
     ) -> list[FailureDiagnosis]:
@@ -262,63 +262,38 @@ def _compact_category_metrics(metrics: dict[str, Any], *, limit: int) -> dict[st
     return {str(name): value for name, value in rows[:limit]}
 
 
-def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
-    current_value = target.current_value
-    if isinstance(current_value, str):
-        compact_value: Any = current_value[:420]
-    elif isinstance(current_value, list):
-        compact_value = {"type": "list", "count": len(current_value), "sample": current_value[:2]}
-    elif isinstance(current_value, dict):
-        compact_value = {"type": "object", "keys": sorted(str(key) for key in current_value.keys())[:12]}
-    else:
-        compact_value = current_value
+def _compact_surface(surface: SurfaceSpec) -> dict[str, Any]:
     return {
-        "name": target.name,
-        "kind": target.kind,
-        "current_value": compact_value,
-        "allowed_ops": list(target.allowed_ops),
-        "description": target.description[:180],
-        "choices": list(target.choices)[:12],
-        "value_schema": dict(target.value_schema),
+        "agent_id": surface.agent_id,
+        "context_sections": surface.context.graph.section_names(),
+        "editable_sections": list(surface.context.editable_sections),
+        "hooks": {
+            name: {
+                "supported": hook.supported,
+                "allowed_ops": list(hook.allowed_ops),
+                "available_inputs": list(hook.available_inputs),
+            }
+            for name, hook in sorted(surface.hooks.items())
+        },
+        "state": surface.state.to_dict(),
+        "model": surface.model.to_dict(),
+        "response": surface.response.to_dict(),
+        "immutable_boundaries": list(surface.immutable_boundaries),
     }
 
 
-def _compact_surface(surface: list[EditableTarget] | SurfaceSpec) -> Any:
-    if isinstance(surface, SurfaceSpec):
-        return {
-            "agent_id": surface.agent_id,
-            "context_sections": surface.context.graph.section_names(),
-            "editable_sections": list(surface.context.editable_sections),
-            "hooks": {
-                name: {
-                    "supported": hook.supported,
-                    "allowed_ops": list(hook.allowed_ops),
-                    "available_inputs": list(hook.available_inputs),
-                }
-                for name, hook in sorted(surface.hooks.items())
-            },
-            "state": surface.state.to_dict(),
-            "model": surface.model.to_dict(),
-            "response": surface.response.to_dict(),
-            "immutable_boundaries": list(surface.immutable_boundaries),
-        }
-    return [_compact_editable_target(target) for target in surface]
-
-
-def _surface_target_names(surface: list[EditableTarget] | SurfaceSpec) -> set[str]:
-    if isinstance(surface, SurfaceSpec):
-        names = set(surface.context.editable_sections)
-        names.update(f"context.{name}" for name in surface.context.editable_sections)
-        names.add("generated_context")
-        if surface.response.draft_response_interception_allowed:
-            names.add("draft_response")
-        if surface.state.supports_persistent_state:
-            names.add("state")
-        if surface.model.model_name_configurable or surface.model.max_tokens_configurable:
-            names.add("model_config")
-        names.update(tool.name for tool in surface.tools.tools)
-        return names
-    return {target.name for target in surface}
+def _surface_target_names(surface: SurfaceSpec) -> set[str]:
+    names = set(surface.context.editable_sections)
+    names.update(f"context.{name}" for name in surface.context.editable_sections)
+    names.add("generated_context")
+    if surface.response.draft_response_interception_allowed:
+        names.add("draft_response")
+    if surface.state.supports_persistent_state:
+        names.add("state")
+    if surface.model.model_name_configurable or surface.model.max_tokens_configurable:
+        names.add("model_config")
+    names.update(tool.name for tool in surface.tools.tools)
+    return names
 
 
 def _compact_patch(patch: dict[str, Any]) -> dict[str, Any]:

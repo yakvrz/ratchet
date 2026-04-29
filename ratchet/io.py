@@ -7,7 +7,7 @@ import re
 from typing import Any
 
 from ratchet.transform_program import CompiledCandidate, TransformProgram
-from ratchet.types import AgentPatch, AgentSpec, EvalCase
+from ratchet.types import AgentSpec, EvalCase
 
 
 def load_eval_cases(path: str | Path) -> tuple[EvalCase, ...]:
@@ -67,10 +67,6 @@ def extract_json_object(text: str) -> dict[str, Any]:
 
 def short_digest(payload: Any) -> str:
     return stable_digest(payload)[:12]
-
-
-def patch_hash(patch: AgentPatch | None) -> str:
-    return short_digest((patch or AgentPatch.empty()).to_dict())
 
 
 def transform_program_hash(program: TransformProgram) -> str:

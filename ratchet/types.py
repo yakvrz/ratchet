@@ -4,57 +4,6 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 
-PATCH_OPS = {
-    "add_context_section",
-    "add_instruction",
-    "append_state",
-    "block_response",
-    "clear_state",
-    "define_state",
-    "expose_state",
-    "hide_state",
-    "extract_claims",
-    "log_event",
-    "merge_state",
-    "move_context_section",
-    "normalize_tool_args",
-    "annotate_tool",
-    "remove_context_section",
-    "render_state_section",
-    "reorder_context_sections",
-    "replace_context_section",
-    "repair_tool_args",
-    "rewrite_response",
-    "rewrite_tool_description",
-    "revise_instruction",
-    "add_output_constraint",
-    "revise_tool_description",
-    "revise_tool_policy",
-    "set_model_config",
-    "set_runtime_param",
-    "set_state",
-    "trace_annotation",
-    "validate",
-    "validate_claims",
-    "change_model",
-    "add_few_shot",
-    "add_verifier_retry",
-}
-
-EDIT_KINDS = {
-    "context",
-    "instruction",
-    "output",
-    "response",
-    "state",
-    "tool",
-    "runtime",
-    "model",
-    "few_shot",
-    "verifier",
-}
-
-
 @dataclass(frozen=True)
 class TargetSemantics:
     role: str = "generic_policy"
@@ -182,118 +131,9 @@ class AgentSpec:
             metadata=dict(payload.get("metadata", {})),
         )
 
-    def apply_patch(self, patch: "AgentPatch | None") -> "AgentSpec":
-        if patch is None or not patch.operations:
-            return self
-        spec = self.to_dict()
-        for operation in patch.operations:
-            _apply_operation(spec, operation)
-        return AgentSpec.from_dict(spec)
-
-
-@dataclass(frozen=True)
-class EditableTarget:
-    name: str
-    kind: str
-    path: str
-    current_value: Any
-    allowed_ops: list[str]
-    description: str = ""
-    choices: list[str] = field(default_factory=list)
-    max_chars: int | None = None
-    value_schema: dict[str, Any] = field(default_factory=dict)
-    semantics: TargetSemantics = field(default_factory=TargetSemantics)
-
-    def __post_init__(self) -> None:
-        if self.kind not in EDIT_KINDS:
-            raise ValueError(f"Unsupported editable target kind: {self.kind}")
-        if not self.name or not self.path:
-            raise ValueError("EditableTarget name and path must be non-empty.")
-        unsupported = sorted(set(self.allowed_ops) - PATCH_OPS)
-        if unsupported:
-            raise ValueError(f"Unsupported editable target ops: {', '.join(unsupported)}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "EditableTarget":
-        return cls(
-            name=str(payload["name"]),
-            kind=str(payload["kind"]),
-            path=str(payload["path"]),
-            current_value=payload.get("current_value"),
-            allowed_ops=[str(item) for item in payload.get("allowed_ops", [])],
-            description=str(payload.get("description", "")),
-            choices=[str(item) for item in payload.get("choices", [])],
-            max_chars=int(payload["max_chars"]) if payload.get("max_chars") is not None else None,
-            value_schema=dict(payload.get("value_schema", {})),
-            semantics=TargetSemantics.from_dict(payload.get("semantics")),
-        )
-
-
-@dataclass(frozen=True)
-class PatchOperation:
-    op: str
-    target: str
-    value: Any
-    rationale: str = ""
-
-    def __post_init__(self) -> None:
-        if self.op not in PATCH_OPS:
-            raise ValueError(f"Unsupported patch operation: {self.op}")
-        if not self.target:
-            raise ValueError("PatchOperation target must be non-empty.")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "PatchOperation":
-        return cls(
-            op=str(payload["op"]),
-            target=str(payload["target"]),
-            value=payload.get("value"),
-            rationale=str(payload.get("rationale", "")),
-        )
-
-
-@dataclass(frozen=True)
-class AgentPatch:
-    operations: list[PatchOperation] = field(default_factory=list)
-    rationale: str = ""
-    expected_effect: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "operations": [operation.to_dict() for operation in self.operations],
-            "rationale": self.rationale,
-            "expected_effect": self.expected_effect,
-            "metadata": dict(self.metadata),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "AgentPatch":
-        return cls(
-            operations=[PatchOperation.from_dict(item) for item in payload.get("operations", [])],
-            rationale=str(payload.get("rationale", "")),
-            expected_effect=str(payload.get("expected_effect", "")),
-            metadata=dict(payload.get("metadata", {})),
-        )
-
-    @classmethod
-    def empty(cls) -> "AgentPatch":
-        return cls()
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.operations
-
 
 @dataclass(frozen=True)
 class OptimizationConstraints:
-    allowed_edits: list[str] = field(default_factory=lambda: sorted(EDIT_KINDS))
     allowed_models: list[str] = field(default_factory=list)
     max_cost_ratio: float | None = None
     max_latency_ratio: float | None = None
@@ -302,9 +142,6 @@ class OptimizationConstraints:
     sanitize_examples: bool = False
 
     def __post_init__(self) -> None:
-        unsupported = sorted(set(self.allowed_edits) - EDIT_KINDS)
-        if unsupported:
-            raise ValueError(f"Unsupported allowed edit kinds: {', '.join(unsupported)}")
         if self.max_patch_operations <= 0:
             raise ValueError("max_patch_operations must be positive.")
 
@@ -315,7 +152,6 @@ class OptimizationConstraints:
     def from_dict(cls, payload: dict[str, Any] | None) -> "OptimizationConstraints":
         payload = dict(payload or {})
         return cls(
-            allowed_edits=[str(item) for item in payload.get("allowed_edits", sorted(EDIT_KINDS))],
             allowed_models=[str(item) for item in payload.get("allowed_models", [])],
             max_cost_ratio=(
                 float(payload["max_cost_ratio"]) if payload.get("max_cost_ratio") is not None else None
@@ -622,85 +458,3 @@ class FailureDiagnosis:
             target_names=[str(item) for item in payload.get("target_names", payload.get("target_keys", []))],
             evidence=[dict(item) for item in payload.get("evidence", [])],
         )
-
-
-def _apply_operation(spec: dict[str, Any], operation: PatchOperation) -> None:
-    target = operation.target
-    value = operation.value
-    if operation.op == "change_model":
-        model = str(value)
-        options = [str(item) for item in spec.get("model_options", [])]
-        if options and model not in options:
-            raise ValueError(f"Model {model!r} is not in AgentSpec model_options.")
-        spec["model"] = model
-        return
-
-    if operation.op in {"add_instruction", "revise_instruction"}:
-        section = _strip_prefix(target, "instructions.")
-        instructions = dict(spec.get("instructions", {}))
-        current = str(instructions.get(section, ""))
-        if operation.op == "add_instruction" and current:
-            text = str(value).strip()
-            instructions[section] = f"{current.rstrip()}\n\n{text}" if text not in current else current
-        else:
-            instructions[section] = str(value)
-        spec["instructions"] = instructions
-        return
-
-    if operation.op == "add_output_constraint":
-        current = str(spec.get("output_contract", ""))
-        text = str(value).strip()
-        spec["output_contract"] = f"{current.rstrip()}\n\n{text}" if current and text not in current else text or current
-        return
-
-    if operation.op in {"revise_tool_description", "revise_tool_policy"}:
-        parts = target.split(".")
-        if len(parts) < 3 or parts[0] != "tools":
-            raise ValueError(f"Invalid tool target: {target}")
-        tool_name = parts[1]
-        field_name = "description" if operation.op == "revise_tool_description" else "policy"
-        tools = {name: dict(tool) for name, tool in spec.get("tools", {}).items()}
-        if tool_name not in tools:
-            raise ValueError(f"Unknown tool target: {tool_name}")
-        tools[tool_name][field_name] = str(value)
-        spec["tools"] = tools
-        return
-
-    if operation.op == "set_runtime_param":
-        if target.startswith("tools.") and target.endswith(".enabled"):
-            parts = target.split(".")
-            if len(parts) != 3:
-                raise ValueError(f"Invalid tool enabled target: {target}")
-            tool_name = parts[1]
-            tools = {name: dict(tool) for name, tool in spec.get("tools", {}).items()}
-            if tool_name not in tools:
-                raise ValueError(f"Unknown tool target: {tool_name}")
-            tools[tool_name]["enabled"] = bool(value)
-            spec["tools"] = tools
-            return
-        key = _strip_prefix(target, "runtime.")
-        runtime = dict(spec.get("runtime", {}))
-        runtime[key] = value
-        spec["runtime"] = runtime
-        return
-
-    if operation.op == "add_few_shot":
-        few_shot = [dict(item) for item in spec.get("few_shot", [])]
-        if isinstance(value, list):
-            few_shot.extend(dict(item) if isinstance(item, dict) else {"text": str(item)} for item in value)
-        else:
-            few_shot.append(dict(value) if isinstance(value, dict) else {"text": str(value)})
-        spec["few_shot"] = few_shot
-        return
-
-    if operation.op == "add_verifier_retry":
-        runtime = dict(spec.get("runtime", {}))
-        runtime["verifier_retry"] = value if value is not None else True
-        spec["runtime"] = runtime
-        return
-
-    raise ValueError(f"Unsupported patch operation: {operation.op}")
-
-
-def _strip_prefix(value: str, prefix: str) -> str:
-    return value[len(prefix) :] if value.startswith(prefix) else value

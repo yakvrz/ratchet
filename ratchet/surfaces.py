@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ratchet.context_graph import ContextGraph, ContextSection
-from ratchet.types import AgentSpec
+from ratchet.types import AgentSpec, TargetSemantics
 
 
 SUPPORTED_HOOKS = {
@@ -201,6 +201,139 @@ class SurfaceSpec:
             "safety_constraints": list(self.safety_constraints),
             "metadata": dict(self.metadata),
         }
+
+
+@dataclass(frozen=True)
+class SurfaceTarget:
+    name: str
+    kind: str
+    path: str
+    current_value: Any
+    allowed_ops: tuple[str, ...]
+    description: str = ""
+    choices: tuple[str, ...] = ()
+    max_chars: int | None = None
+    value_schema: dict[str, Any] = field(default_factory=dict)
+    semantics: TargetSemantics = field(default_factory=TargetSemantics)
+
+    def to_dict(self) -> dict[str, Any]:
+        row = asdict(self)
+        row["allowed_ops"] = list(self.allowed_ops)
+        row["choices"] = list(self.choices)
+        row["semantics"] = self.semantics.to_dict()
+        return row
+
+
+def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
+    targets: list[SurfaceTarget] = []
+    for section in surface.context.graph.sections:
+        if section.name not in surface.context.editable_sections:
+            continue
+        targets.append(
+            SurfaceTarget(
+                name=section.name,
+                kind="context",
+                path=f"context.{section.name}",
+                current_value=section.content,
+                allowed_ops=tuple(_context_allowed_ops(surface)),
+                description=f"Context section {section.name}.",
+                max_chars=8000,
+            )
+        )
+    if surface.context.generated_sections_allowed:
+        targets.append(
+            SurfaceTarget(
+                name="generated_context",
+                kind="context",
+                path="context.generated",
+                current_value=None,
+                allowed_ops=("add_context_section", "render_state_section"),
+                description="Generated context sections that candidates may add to the model context graph.",
+            )
+        )
+    if surface.response.draft_response_interception_allowed:
+        response_ops = ["validate", "validate_claims", "extract_claims"]
+        if surface.response.response_rewrite_allowed:
+            response_ops.append("rewrite_response")
+        if surface.response.response_blocking_allowed:
+            response_ops.append("block_response")
+        targets.append(
+            SurfaceTarget(
+                name="draft_response",
+                kind="response",
+                path="response.draft",
+                current_value=None,
+                allowed_ops=tuple(response_ops),
+                description="Draft response before it is returned to the user or evaluator.",
+            )
+        )
+    if surface.state.supports_persistent_state:
+        state_ops = ["define_state"]
+        if surface.state.add_fields_allowed:
+            state_ops.extend(["set_state", "append_state", "merge_state", "clear_state", "expose_state"])
+        targets.append(
+            SurfaceTarget(
+                name="state",
+                kind="state",
+                path="state",
+                current_value={"existing_fields": list(surface.state.existing_fields)},
+                allowed_ops=tuple(state_ops),
+                description="Typed per-task transform state.",
+            )
+        )
+    model_ops = []
+    if (
+        surface.model.model_name_configurable
+        or surface.model.temperature_configurable
+        or surface.model.max_tokens_configurable
+        or surface.model.reasoning_effort_configurable
+        or surface.model.tool_choice_mode_configurable
+    ):
+        model_ops.append("set_model_config")
+    if surface.model.auxiliary_model_calls_allowed:
+        model_ops.append("call_model")
+    if model_ops:
+        targets.append(
+            SurfaceTarget(
+                name="model_config",
+                kind="model",
+                path="model",
+                current_value=surface.model.to_dict(),
+                allowed_ops=tuple(model_ops),
+                description="Model invocation configuration exposed by the adapter.",
+            )
+        )
+    tool_ops = []
+    if surface.tools.tool_metadata_allowed:
+        tool_ops.append("annotate_tool")
+    if surface.tools.tool_description_rewrite_allowed:
+        tool_ops.append("rewrite_tool_description")
+    if surface.tools.tool_call_interception_allowed:
+        tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
+    for tool in surface.tools.tools:
+        if tool_ops:
+            targets.append(
+                SurfaceTarget(
+                    name=tool.name,
+                    kind="tool",
+                    path=f"tools.{tool.name}",
+                    current_value=tool.to_dict(),
+                    allowed_ops=tuple(tool_ops),
+                    description=tool.description or f"Tool {tool.name}.",
+                )
+            )
+    return targets
+
+
+def _context_allowed_ops(surface: SurfaceSpec) -> list[str]:
+    ops = ["add_context_section", "replace_context_section"]
+    if surface.context.removable_sections_allowed:
+        ops.append("remove_context_section")
+    if surface.context.reorderable_sections_allowed:
+        ops.extend(["move_context_section", "reorder_context_sections"])
+    if surface.state.expose_to_context:
+        ops.append("render_state_section")
+    return ops
 
 
 def unsupported_hooks() -> dict[str, HookSurface]:

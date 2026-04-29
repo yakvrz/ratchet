@@ -10,14 +10,15 @@ import unittest
 
 from ratchet.config import EvalHealthConfig, load_run_config
 from ratchet.eval_health import run_eval_health_check
-from ratchet.types import AgentPatch, AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, RunRecord
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, RunRecord
 
 
 class StableAdapter:
     def agent_spec(self) -> AgentSpec:
         return AgentSpec(name="stable", model="local")
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         return RunRecord(
             output=case.expected,
             metrics=OperationalMetrics(
@@ -33,7 +34,7 @@ class StableAdapter:
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0 if output == case.expected else 0.0, passed=output == case.expected)
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
 
@@ -41,7 +42,7 @@ class FlakyAdapter(StableAdapter):
     def __init__(self) -> None:
         self.calls = 0
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         self.calls += 1
         expected = dict(case.expected)
         output = expected if self.calls % 2 else {"label": "wrong"}
@@ -58,7 +59,7 @@ class FlakyAdapter(StableAdapter):
 
 
 class HeavyAdapter(StableAdapter):
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         return RunRecord(
             output=case.expected,
             metrics=OperationalMetrics(

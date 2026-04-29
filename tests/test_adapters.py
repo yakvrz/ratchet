@@ -9,7 +9,7 @@ from pathlib import Path
 
 from ratchet.adapters import adapter_fingerprint
 from ratchet.rendering import render_few_shot_prompt
-from ratchet.types import AgentPatch, AgentSpec, PatchOperation
+from ratchet.types import AgentSpec
 
 
 class AdapterFingerprintTests(unittest.TestCase):
@@ -22,13 +22,14 @@ class AdapterFingerprintTests(unittest.TestCase):
                 textwrap.dedent(
                     """
                     from pathlib import Path
-                    from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult
+                    from ratchet.transform_program import CompiledCandidate
+                    from ratchet.types import AgentSpec, EvalCase, GradeResult
 
                     class Adapter:
                         def agent_spec(self):
                             return AgentSpec(name="sidecar", model="primary")
 
-                        def run_case(self, case: EvalCase, patch: AgentPatch | None = None):
+                        def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None):
                             raise NotImplementedError
 
                         def grade(self, case, output):
@@ -65,13 +66,14 @@ class AdapterFingerprintTests(unittest.TestCase):
                 textwrap.dedent(
                     """
                     from pathlib import Path
-                    from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult
+                    from ratchet.transform_program import CompiledCandidate
+                    from ratchet.types import AgentSpec, EvalCase, GradeResult
 
                     class Adapter:
                         def agent_spec(self):
                             return AgentSpec(name="nested", model="primary")
 
-                        def run_case(self, case: EvalCase, patch: AgentPatch | None = None):
+                        def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None):
                             raise NotImplementedError
 
                         def grade(self, case, output):
@@ -105,7 +107,8 @@ class AdapterFingerprintTests(unittest.TestCase):
                 textwrap.dedent(
                     """
                     from pathlib import Path
-                    from ratchet.types import AgentPatch, AgentSpec, GradeResult
+                    from ratchet.transform_program import CompiledCandidate
+                    from ratchet.types import AgentSpec, GradeResult
 
                     VERSION = "v1"
 
@@ -113,7 +116,7 @@ class AdapterFingerprintTests(unittest.TestCase):
                         def agent_spec(self):
                             return AgentSpec(name="custom", model="primary")
 
-                        def run_case(self, case, patch: AgentPatch | None = None):
+                        def run_case(self, case, candidate: CompiledCandidate | None = None):
                             raise NotImplementedError
 
                         def grade(self, case, output):
@@ -142,27 +145,16 @@ class AdapterFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(first["custom_fingerprint_sha256"], second["custom_fingerprint_sha256"])
 
-    def test_few_shot_patch_reaches_rendered_prompt(self) -> None:
-        spec = AgentSpec(
-            name="few-shot-test",
-            model="gpt-4o-2024-08-06",
-            instructions={"base": "Base instruction."},
-            few_shot=[{"messages": [{"role": "user", "content": "Synthetic example."}]}],
-        )
-        patch = AgentPatch(
-            operations=[
-                PatchOperation(
-                    op="add_few_shot",
-                    target="few_shot",
-                    value={"messages": [{"role": "user", "content": "Patched example."}]},
-                )
+    def test_few_shot_renderer_includes_examples(self) -> None:
+        rendered = render_few_shot_prompt(
+            [
+                {"messages": [{"role": "user", "content": "Synthetic example."}]},
+                {"messages": [{"role": "user", "content": "Generated context example."}]},
             ]
         )
 
-        rendered = render_few_shot_prompt(spec.apply_patch(patch).few_shot)
-
         self.assertIn("Synthetic example.", rendered)
-        self.assertIn("Patched example.", rendered)
+        self.assertIn("Generated context example.", rendered)
 
 if __name__ == "__main__":
     unittest.main()

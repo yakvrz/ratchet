@@ -13,7 +13,6 @@ from ratchet.objectives import (
 from ratchet.reporting import build_outcome_analysis
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.types import (
-    AgentPatch,
     DiagnosticTrace,
     EvalCase,
     GradeResult,
@@ -53,7 +52,7 @@ def make_summary(
         )
     return PatchSummary(
         patch_hash=patch_hash_value,
-        patch=AgentPatch(metadata={"name": patch_hash_value}),
+        patch=None,
         split="holdout",
         evaluations=evaluations,
     )
@@ -87,7 +86,7 @@ def make_repeated_summary(
             )
     return PatchSummary(
         patch_hash=patch_hash_value,
-        patch=AgentPatch(metadata={"name": patch_hash_value}),
+        patch=None,
         split="holdout",
         evaluations=evaluations,
     )
@@ -333,7 +332,7 @@ class AcceptanceGateTests(unittest.TestCase):
                 )
         baseline = PatchSummary(
             patch_hash="baseline",
-            patch=AgentPatch.empty(),
+            patch=None,
             split="dev",
             evaluations=evaluations,
         )
@@ -375,7 +374,7 @@ class AcceptanceGateTests(unittest.TestCase):
             )
         summary = PatchSummary(
             patch_hash="split",
-            patch=AgentPatch.empty(),
+            patch=None,
             split="dev",
             evaluations=evaluations,
         )

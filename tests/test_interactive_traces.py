@@ -5,7 +5,7 @@ import unittest
 from ratchet.evidence import build_behavior_diagnostics
 from ratchet.interactive import InteractionRecorder
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.types import AgentPatch, DiagnosticTrace, EvalCase, GradeResult, InteractionTurn, OperationalMetrics, RunRecord, ToolCallTrace
+from ratchet.types import DiagnosticTrace, EvalCase, GradeResult, InteractionTurn, OperationalMetrics, RunRecord, ToolCallTrace
 
 
 class InteractiveTraceTests(unittest.TestCase):
@@ -117,7 +117,7 @@ class InteractiveTraceTests(unittest.TestCase):
         )
         summary = PatchSummary(
             patch_hash="baseline",
-            patch=AgentPatch.empty(),
+            patch=None,
             split="dev",
             evaluations=[evaluation],
         )

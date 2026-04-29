@@ -207,7 +207,6 @@ samples_per_case = 1
 mode = "correctness"
 
 [ratchet.objective.constraints]
-allowed_edits = ["instruction", "model", "runtime", "output"]
 allowed_models = ["gpt-5.4-mini", "gpt-5.4-nano"]
 max_latency_ratio = 1.1
 """

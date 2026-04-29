@@ -5,7 +5,7 @@ import unittest
 from ratchet.evidence import build_behavior_diagnostics, build_proposal_example_bank
 from ratchet.experiments import build_task_theory
 from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.types import AgentPatch, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.types import EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 def _evaluation(
@@ -64,7 +64,7 @@ class EvidenceTests(unittest.TestCase):
     def test_behavior_diagnostics_reports_confusions_and_weak_labels(self) -> None:
         summary = PatchSummary(
             patch_hash="baseline",
-            patch=AgentPatch.empty(),
+            patch=None,
             split="dev",
             evaluations=[
                 _evaluation(case_id="dev-1", expected="alpha", actual="alpha", passed=True),
@@ -84,7 +84,7 @@ class EvidenceTests(unittest.TestCase):
     def test_task_theory_exposes_experiment_opportunities_and_example_sources(self) -> None:
         summary = PatchSummary(
             patch_hash="baseline",
-            patch=AgentPatch.empty(),
+            patch=None,
             split="dev",
             evaluations=[
                 _evaluation(case_id="dev-1", expected="alpha", actual="alpha", passed=True),

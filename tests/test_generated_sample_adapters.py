@@ -6,7 +6,7 @@ import unittest
 from ratchet.adapter_generation import GeneratedSingleCallAdapter
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
-from ratchet.types import AgentPatch, EvalCase, PatchOperation
+from ratchet.types import EvalCase
 from samples.banking77_intent_agent.ratchet_adapter import Banking77IntentAdapter
 from samples.bfcl_function_calling_agent.ratchet_adapter import BfclFunctionCallingAdapter
 from samples.clinc150_intent_agent.ratchet_adapter import Clinc150IntentAdapter
@@ -110,18 +110,7 @@ class GeneratedSampleAdapterTests(unittest.TestCase):
         self.assertTrue(patched.diagnostics.metadata["transform_trace"])
 
         with self.assertRaisesRegex(TypeError, "CompiledCandidate"):
-            adapter.run_case(
-                case,
-                AgentPatch(
-                    operations=[
-                        PatchOperation(
-                            op="add_instruction",
-                            target="instructions.label_rule",
-                            value="legacy patches are not adapter candidates",
-                        )
-                    ]
-                ),  # type: ignore[arg-type]
-            )
+            adapter.run_case(case, object())  # type: ignore[arg-type]
 
     def test_clinc150_uses_generated_single_call_adapter(self) -> None:
         adapter = Clinc150IntentAdapter(client=FakeClient({"label": "weather"}))

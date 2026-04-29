@@ -25,7 +25,6 @@ RUN_CONFIG_KEYS = {
     "objective",
     "mode",
     "allowed_models",
-    "allowed_edits",
     "sanitize_examples",
     "optimizer_model",
     "optimizer_reasoning",
@@ -70,7 +69,6 @@ EVAL_HEALTH_KEYS = {
     "max_estimated_eval_tokens",
 }
 CONSTRAINT_KEYS = {
-    "allowed_edits",
     "allowed_models",
     "max_cost_ratio",
     "max_latency_ratio",
@@ -301,8 +299,6 @@ def _objective_from_payload(payload: dict[str, Any]) -> OptimizationObjective:
     _reject_unknown_keys(constraints, CONSTRAINT_KEYS, "ratchet.objective.constraints")
     if "allowed_models" in payload:
         constraints["allowed_models"] = payload["allowed_models"]
-    if "allowed_edits" in payload:
-        constraints["allowed_edits"] = payload["allowed_edits"]
     if "sanitize_examples" in payload:
         constraints["sanitize_examples"] = payload["sanitize_examples"]
     raw_objective["constraints"] = constraints
@@ -399,7 +395,6 @@ def resolve_run_config(
     holdout_budget: int | None,
     objective_mode: str | None,
     allowed_models: list[str] | None,
-    allowed_edits: list[str] | None,
     optimizer_model: str | None,
     optimizer_reasoning: str | None,
     samples_per_case: int | None,
@@ -441,8 +436,6 @@ def resolve_run_config(
     constraints_payload = base.objective.constraints.to_dict()
     if allowed_models is not None:
         constraints_payload["allowed_models"] = allowed_models
-    if allowed_edits is not None:
-        constraints_payload["allowed_edits"] = allowed_edits
     if sanitize_examples is not None:
         constraints_payload["sanitize_examples"] = sanitize_examples
     objective = OptimizationObjective(

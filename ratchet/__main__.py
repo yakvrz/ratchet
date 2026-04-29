@@ -37,7 +37,6 @@ def run_optimizer(
     holdout_budget: int | None = 5,
     objective_mode: str | None = "correctness",
     allowed_models: list[str] | None = None,
-    allowed_edits: list[str] | None = None,
     optimizer_model: str | None = "gpt-5.4",
     optimizer_reasoning: str | None = "medium",
     diagnoser_model: str | None = None,
@@ -76,7 +75,6 @@ def run_optimizer(
         holdout_budget=holdout_budget,
         objective_mode=objective_mode,
         allowed_models=allowed_models,
-        allowed_edits=allowed_edits,
         optimizer_model=optimizer_model,
         optimizer_reasoning=optimizer_reasoning,
         diagnoser_model=diagnoser_model,
@@ -666,7 +664,6 @@ def _apply_run_overrides(
         holdout_budget=getattr(args, "holdout_budget", None),
         objective_mode=getattr(args, "mode", None),
         allowed_models=_split_csv(getattr(args, "allowed_models", None)),
-        allowed_edits=_split_csv(getattr(args, "allowed_edits", None)),
         optimizer_model=getattr(args, "optimizer_model", None),
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
         diagnoser_model=getattr(args, "diagnoser_model", None),
@@ -710,8 +707,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--dev-budget", type=int, help="Max dev patch evaluations after baseline")
     parser.add_argument("--holdout-budget", type=int, help="Holdout finalist validation budget")
     parser.add_argument("--mode", choices=["correctness", "cost", "latency"], help="Primary optimization objective")
-    parser.add_argument("--allowed-models", help="Comma-separated model allowlist for change_model patches")
-    parser.add_argument("--allowed-edits", help="Comma-separated edit kinds to allow")
+    parser.add_argument("--allowed-models", help="Comma-separated model allowlist for model-config transforms")
     parser.add_argument("--optimizer-model", help="Model used by Ratchet's research loop")
     parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's research loop")
     parser.add_argument("--diagnoser-model", help="Override model for Ratchet's failure diagnoser")

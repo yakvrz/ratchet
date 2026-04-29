@@ -4,9 +4,9 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from ratchet.experiments import MECHANISMS_BY_FAMILY, mechanism_error_for_family
-from ratchet.surfaces import SurfaceSpec
+from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
 from ratchet.transforms import TransformFamily, transform_registry
-from ratchet.types import EditableTarget, OptimizationObjective
+from ratchet.types import OptimizationObjective
 
 
 @dataclass(frozen=True)
@@ -95,7 +95,7 @@ class OptimizationAffordance:
 class AffordanceProvider(Protocol):
     def generate(
         self,
-        target: EditableTarget,
+        target: SurfaceTarget,
         *,
         family: TransformFamily,
         objective: OptimizationObjective,
@@ -133,7 +133,7 @@ def _generate_surface_affordances(
     registry = transform_registry()
     active = set(active_families or registry)
     affordances: list[OptimizationAffordance] = []
-    for target in _surface_targets(surface):
+    for target in surface_targets(surface):
         for family_name in sorted(active):
             family = registry.get(family_name)
             if family is None or target.kind not in family.supported_edit_kinds:
@@ -175,118 +175,6 @@ def _generate_surface_affordances(
         _dedupe_affordances(affordances),
         key=lambda item: (-item.suitability, item.affordance_id),
     )
-
-
-def _surface_targets(surface: SurfaceSpec) -> list[EditableTarget]:
-    targets: list[EditableTarget] = []
-    for section in surface.context.graph.sections:
-        if section.name not in surface.context.editable_sections:
-            continue
-        targets.append(
-            EditableTarget(
-                name=section.name,
-                kind="context",
-                path=f"context.{section.name}",
-                current_value=section.content,
-                allowed_ops=tuple(_context_allowed_ops(surface)),
-                description=f"Context section {section.name}.",
-                max_chars=8000,
-            )
-        )
-    if surface.context.generated_sections_allowed:
-        targets.append(
-            EditableTarget(
-                name="generated_context",
-                kind="context",
-                path="context.generated",
-                current_value=None,
-                allowed_ops=("add_context_section", "render_state_section"),
-                description="Generated context sections that candidates may add to the model context graph.",
-            )
-        )
-    if surface.response.draft_response_interception_allowed:
-        response_ops = ["validate", "validate_claims", "extract_claims"]
-        if surface.response.response_rewrite_allowed:
-            response_ops.append("rewrite_response")
-        if surface.response.response_blocking_allowed:
-            response_ops.append("block_response")
-        targets.append(
-            EditableTarget(
-                name="draft_response",
-                kind="response",
-                path="response.draft",
-                current_value=None,
-                allowed_ops=tuple(response_ops),
-                description="Draft response before it is returned to the user or evaluator.",
-            )
-        )
-    if surface.state.supports_persistent_state:
-        state_ops = ["define_state"]
-        if surface.state.add_fields_allowed:
-            state_ops.extend(["set_state", "append_state", "merge_state", "clear_state", "expose_state"])
-        targets.append(
-            EditableTarget(
-                name="state",
-                kind="state",
-                path="state",
-                current_value={"existing_fields": list(surface.state.existing_fields)},
-                allowed_ops=tuple(state_ops),
-                description="Typed per-task transform state.",
-            )
-        )
-    model_ops = []
-    if (
-        surface.model.model_name_configurable
-        or surface.model.temperature_configurable
-        or surface.model.max_tokens_configurable
-        or surface.model.reasoning_effort_configurable
-        or surface.model.tool_choice_mode_configurable
-    ):
-        model_ops.append("set_model_config")
-    if surface.model.auxiliary_model_calls_allowed:
-        model_ops.append("call_model")
-    if model_ops:
-        targets.append(
-            EditableTarget(
-                name="model_config",
-                kind="model",
-                path="model",
-                current_value=surface.model.to_dict(),
-                allowed_ops=tuple(model_ops),
-                description="Model invocation configuration exposed by the adapter.",
-            )
-        )
-    tool_ops = []
-    if surface.tools.tool_metadata_allowed:
-        tool_ops.append("annotate_tool")
-    if surface.tools.tool_description_rewrite_allowed:
-        tool_ops.append("rewrite_tool_description")
-    if surface.tools.tool_call_interception_allowed:
-        tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
-    if tool_ops:
-        for tool in surface.tools.tools or ():
-            targets.append(
-                EditableTarget(
-                    name=tool.name,
-                    kind="tool",
-                    path=f"tools.{tool.name}",
-                    current_value=tool.to_dict(),
-                    allowed_ops=tuple(tool_ops),
-                    description=tool.description or f"Tool {tool.name}.",
-                )
-            )
-    return targets
-
-
-def _context_allowed_ops(surface: SurfaceSpec) -> list[str]:
-    ops = ["add_context_section", "replace_context_section"]
-    if surface.context.removable_sections_allowed:
-        ops.append("remove_context_section")
-    if surface.context.reorderable_sections_allowed:
-        ops.extend(["move_context_section", "reorder_context_sections"])
-    if surface.state.expose_to_context:
-        ops.append("render_state_section")
-    return ops
 
 
 def _surface_mechanism(
@@ -352,7 +240,7 @@ def affordance_mechanism(affordance_id: str) -> str:
 class PromptAffordanceProvider:
     def generate(
         self,
-        target: EditableTarget,
+        target: SurfaceTarget,
         *,
         family: TransformFamily,
         objective: OptimizationObjective,
@@ -391,7 +279,7 @@ class PromptAffordanceProvider:
 
 
 class OutputContractAffordanceProvider:
-    def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
+    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
         if family.name != "output_contract_tightening" or target.kind != "output":
             return []
         return [
@@ -412,7 +300,7 @@ class OutputContractAffordanceProvider:
 
 
 class FewShotAffordanceProvider:
-    def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
+    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
         if family.name != "targeted_few_shot" or target.kind != "few_shot":
             return []
         rows = []
@@ -439,7 +327,7 @@ class FewShotAffordanceProvider:
 
 
 class ModelAffordanceProvider:
-    def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
+    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
         if family.name != "model_substitution" or target.kind != "model":
             return []
         mechanisms = ["model_capability_probe", "efficiency_probe"]
@@ -465,7 +353,7 @@ class ModelAffordanceProvider:
 
 
 class RuntimeAffordanceProvider:
-    def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
+    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
         if family.name != "runtime_tuning" or target.kind != "runtime":
             return []
         mechanisms = ["runtime_defect_fix", "efficiency_probe"]
@@ -491,7 +379,7 @@ class RuntimeAffordanceProvider:
 
 
 class PassthroughAffordanceProvider:
-    def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
+    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
         if family.name not in {"tool_policy_revision", "verifier_retry"}:
             return []
         if family.name == "tool_policy_revision":
@@ -529,7 +417,7 @@ def _providers() -> list[AffordanceProvider]:
 
 def _make_affordance(
     *,
-    target: EditableTarget,
+    target: SurfaceTarget,
     family: TransformFamily,
     mechanism: str,
     label: str,
@@ -567,7 +455,7 @@ def _make_affordance(
     )
 
 
-def _supports(family: TransformFamily, target: EditableTarget, mechanism: str) -> bool:
+def _supports(family: TransformFamily, target: SurfaceTarget, mechanism: str) -> bool:
     return (
         target.kind in family.supported_edit_kinds
         and bool(set(target.allowed_ops) & set(family.supported_ops))
@@ -575,7 +463,7 @@ def _supports(family: TransformFamily, target: EditableTarget, mechanism: str) -
     )
 
 
-def _affordance_id(family: str, mechanism: str, target: EditableTarget) -> str:
+def _affordance_id(family: str, mechanism: str, target: SurfaceTarget) -> str:
     return ".".join(
         [
             family,
@@ -594,11 +482,11 @@ def _label(verb: str, role: str) -> str:
     return f"{verb} {role.replace('_', ' ')}"
 
 
-def _axes_for_target(mechanism: str, target: EditableTarget) -> list[str]:
+def _axes_for_target(mechanism: str, target: SurfaceTarget) -> list[str]:
     return _merge_unique(_axes_for_mechanism(mechanism, target.semantics.role), target.semantics.axes)
 
 
-def _risk_for_target(target: EditableTarget, default: str) -> str:
+def _risk_for_target(target: SurfaceTarget, default: str) -> str:
     return target.semantics.risks[0] if target.semantics.risks else default
 
 
@@ -637,7 +525,7 @@ def _measurements_for(mechanism: str, family: TransformFamily) -> list[str]:
     return measurements_by_mechanism.get(mechanism, list(family.required_measurements))
 
 
-def _suitability(*, mechanism: str, target: EditableTarget, objective: OptimizationObjective, evidence: dict[str, Any]) -> float:
+def _suitability(*, mechanism: str, target: SurfaceTarget, objective: OptimizationObjective, evidence: dict[str, Any]) -> float:
     score = 0.25
     role = target.semantics.role
     bottleneck = str(evidence.get("bottleneck_class") or "")
@@ -706,7 +594,7 @@ def _suitability(*, mechanism: str, target: EditableTarget, objective: Optimizat
     return round(min(score, 1.0), 3)
 
 
-def _evidence_for(mechanism: str, target: EditableTarget, evidence: dict[str, Any]) -> list[str]:
+def _evidence_for(mechanism: str, target: SurfaceTarget, evidence: dict[str, Any]) -> list[str]:
     rows: list[str] = []
     if evidence.get("bottleneck_class"):
         rows.append(f"task theory bottleneck: {evidence['bottleneck_class']}")
@@ -733,7 +621,7 @@ def _evidence_for(mechanism: str, target: EditableTarget, evidence: dict[str, An
     return rows
 
 
-def _tool_mechanisms_for_target(target: EditableTarget) -> list[str]:
+def _tool_mechanisms_for_target(target: SurfaceTarget) -> list[str]:
     if target.kind != "tool":
         return []
     role = target.semantics.role
