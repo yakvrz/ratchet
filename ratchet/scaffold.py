@@ -19,6 +19,8 @@ def run_agent(spec: dict[str, Any], case_payload: dict[str, Any]) -> dict[str, A
     - output
     - raw_output_text
     - tool_calls
+    - turns
+    - terminal_reason
     - latency_s
     - input_tokens
     - output_tokens
@@ -68,6 +70,7 @@ from ratchet.types import (
     DiagnosticTrace,
     EvalCase,
     GradeResult,
+    InteractionTurn,
     OperationalMetrics,
     RunRecord,
 )
@@ -93,6 +96,11 @@ class ScaffoldAdapter:
         total_tokens = int(payload.get("total_tokens", int(payload.get("input_tokens", 0)) + int(payload.get("output_tokens", 0))))
         output = payload.get("output")
         raw_output = str(payload.get("raw_output_text", output if output is not None else ""))
+        turns = [
+            InteractionTurn.from_dict(turn)
+            for turn in payload.get("turns", [])
+            if isinstance(turn, dict)
+        ]
         return RunRecord(
             output=output,
             metrics=OperationalMetrics(
@@ -101,10 +109,16 @@ class ScaffoldAdapter:
                 output_tokens=int(payload.get("output_tokens", 0)),
                 total_tokens=total_tokens,
                 cost_usd=float(payload.get("cost_usd", 0.0)),
+                model_calls=int(payload.get("model_calls", 1)),
+                tool_calls=int(payload.get("tool_call_count", len(payload.get("tool_calls", [])))),
+                turns=int(payload.get("turn_count", len(turns) or 1)),
             ),
             diagnostics=DiagnosticTrace(
                 tool_calls=[str(item) for item in payload.get("tool_calls", [])],
                 raw_output_text=raw_output,
+                turns=turns,
+                terminal_state=dict(payload.get("terminal_state", {})),
+                terminal_reason=str(payload.get("terminal_reason", "")),
             ),
         )
 
@@ -135,6 +149,7 @@ from ratchet.types import (
     DiagnosticTrace,
     EvalCase,
     GradeResult,
+    InteractionTurn,
     OperationalMetrics,
     RunRecord,
 )
@@ -168,6 +183,11 @@ class ScaffoldCliAdapter:
         total_tokens = int(payload.get("total_tokens", int(payload.get("input_tokens", 0)) + int(payload.get("output_tokens", 0))))
         output = payload.get("output")
         raw_output = str(payload.get("raw_output_text", output if output is not None else ""))
+        turns = [
+            InteractionTurn.from_dict(turn)
+            for turn in payload.get("turns", [])
+            if isinstance(turn, dict)
+        ]
         return RunRecord(
             output=output,
             metrics=OperationalMetrics(
@@ -176,10 +196,16 @@ class ScaffoldCliAdapter:
                 output_tokens=int(payload.get("output_tokens", 0)),
                 total_tokens=total_tokens,
                 cost_usd=float(payload.get("cost_usd", 0.0)),
+                model_calls=int(payload.get("model_calls", 1)),
+                tool_calls=int(payload.get("tool_call_count", len(payload.get("tool_calls", [])))),
+                turns=int(payload.get("turn_count", len(turns) or 1)),
             ),
             diagnostics=DiagnosticTrace(
                 tool_calls=[str(item) for item in payload.get("tool_calls", [])],
                 raw_output_text=raw_output,
+                turns=turns,
+                terminal_state=dict(payload.get("terminal_state", {})),
+                terminal_reason=str(payload.get("terminal_reason", "")),
             ),
         )
 

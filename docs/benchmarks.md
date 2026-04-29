@@ -26,11 +26,11 @@ Good Ratchet behavior on BFCL means discovering mechanism-relevant candidates, p
 
 BFCL is not a full leaderboard run in this repo. The sample is a fixed development assessment split large enough to inspect optimizer behavior while remaining affordable and reproducible.
 
-## tau-bench Action
+## tau-bench
 
-The tau-bench action sample is the primary workflow/action-policy probe.
+The tau-bench action sample is currently a workflow/action-policy development probe, not the official interactive benchmark.
 
-It is built from public `sierra-research/tau2-bench` task data across airline, retail, and telecom. The adapter does not run the full interactive tau-bench simulator. Instead, it turns each public task into an action-policy planning case: the agent sees task context, a compact tool catalog, and a policy excerpt, then predicts the required workflow action names.
+It is built from the original public `sierra-research/tau-bench` retail and airline task files. The adapter does not run the full interactive tau-bench simulator. Instead, it turns each public task into an action-policy planning case: the agent sees task context, a compact tool catalog, and a policy excerpt, then predicts the required workflow action names.
 
 This is useful for:
 
@@ -42,6 +42,16 @@ This is useful for:
 - few-shot and instruction improvements
 
 It should be interpreted as a Ratchet development assessment, not an official tau-bench leaderboard result. Official tau-bench evaluation requires the simulator, user model, domain state, and environment dynamics.
+
+Ratchet now has the core substrate needed for faithful tau-style adapters:
+
+- `DiagnosticTrace` can record multi-turn trajectories, tool calls, terminal state, and terminal reason.
+- `InteractionRecorder` helps adapters produce those traces without custom bookkeeping.
+- tool/action affordances can be generated from observed trajectory failures.
+- measurement budgets can cap candidate dollars, tool calls, and turns.
+- `ratchet.benchmarks.taubench` provides an optional bridge for converting original tau-bench retail/airline results into `RunRecord`s when the external `tau-bench` package is installed.
+
+The next tau-bench milestone should replace the static action probe with an adapter backed by the official simulator, not tune Ratchet against the proxy.
 
 ## BANKING77
 
@@ -81,17 +91,6 @@ Removed samples should stay removed unless they are replaced by a public benchma
 - configurable behavior surface
 - output contract
 - tool policy
-- retrieval policy
 - stateful or workflow decisions
 - cost/latency tradeoffs
 - multi-mechanism failures
-
-## Open Benchmark Gaps
-
-Ratchet still needs stronger public benchmarks for:
-
-- grounded retrieval QA
-
-For grounded retrieval QA, candidates worth evaluating include KILT-style tasks and RAG-focused benchmarks with public corpora and clear provenance requirements.
-
-These should be added only after the adapter/eval shape is clear enough to avoid reintroducing synthetic samples under a different name.

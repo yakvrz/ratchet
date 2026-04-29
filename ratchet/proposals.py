@@ -47,7 +47,7 @@ PROPOSER_INSTRUCTIONS = (
     "allowed ops, and value schemas from the cited affordances. "
     "Do not copy diagnostic_only_examples into patch values; only proposal-safe train examples may be copied, "
     "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
-    "preserve correctness and explore model/runtime/retrieval/tool efficiency even when failures are absent. "
+    "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
     "Return empty experiments only when no safe evaluable candidate exists."
 )
 

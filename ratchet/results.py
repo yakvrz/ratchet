@@ -125,6 +125,18 @@ class PatchSummary:
         return statistics.fmean(evaluation.record.metrics.total_tokens for evaluation in self.evaluations)
 
     @property
+    def mean_model_calls(self) -> float:
+        return statistics.fmean(evaluation.record.metrics.model_calls for evaluation in self.evaluations)
+
+    @property
+    def mean_tool_calls(self) -> float:
+        return statistics.fmean(evaluation.record.metrics.tool_calls for evaluation in self.evaluations)
+
+    @property
+    def mean_turns(self) -> float:
+        return statistics.fmean(evaluation.record.metrics.turns for evaluation in self.evaluations)
+
+    @property
     def median_latency_s(self) -> float:
         return statistics.median(evaluation.record.metrics.latency_s for evaluation in self.evaluations)
 
@@ -202,6 +214,16 @@ class PatchSummary:
                     else _compact_prompt_value(evaluation.record.output, max_text_chars=max_text_chars),
                     "error": evaluation.record.metrics.error,
                     "tool_calls": evaluation.record.diagnostics.tool_calls,
+                    "turns": [
+                        {
+                            "index": turn.index,
+                            "actor": turn.actor,
+                            "tool_calls": [tool_call.name for tool_call in turn.tool_calls],
+                            "outcome": turn.outcome,
+                        }
+                        for turn in evaluation.record.diagnostics.turns[:8]
+                    ],
+                    "terminal_reason": evaluation.record.diagnostics.terminal_reason,
                     "raw_output_text": redacted
                     if sanitize_text
                     else _compact_prompt_value(
@@ -232,6 +254,9 @@ class PatchSummary:
             "operational": {
                 "mean_cost_usd": self.mean_cost_usd,
                 "mean_total_tokens": self.mean_total_tokens,
+                "mean_model_calls": self.mean_model_calls,
+                "mean_tool_calls": self.mean_tool_calls,
+                "mean_turns": self.mean_turns,
                 "median_latency_s": self.median_latency_s,
                 "runtime_error_count": self.runtime_error_count,
             },
@@ -240,6 +265,9 @@ class PatchSummary:
             "pass_count": self.pass_count,
             "mean_cost_usd": self.mean_cost_usd,
             "mean_total_tokens": self.mean_total_tokens,
+            "mean_model_calls": self.mean_model_calls,
+            "mean_tool_calls": self.mean_tool_calls,
+            "mean_turns": self.mean_turns,
             "median_latency_s": self.median_latency_s,
             "operation_count": self.operation_count,
             "evaluations": [
@@ -315,6 +343,9 @@ class Comparison:
     token_ci: tuple[float, float]
     latency_delta: float
     latency_ci: tuple[float, float]
+    model_call_delta: float = 0.0
+    tool_call_delta: float = 0.0
+    turn_delta: float = 0.0
     pass_significance: PassSignificance | None = None
 
     def to_dict(self) -> dict[str, Any]:

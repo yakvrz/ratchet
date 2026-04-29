@@ -46,6 +46,10 @@ RUN_CONFIG_KEYS = {
     "expensive_candidate_cost_ratio",
     "max_dev_measurement_cost_usd",
     "max_holdout_measurement_cost_usd",
+    "max_dev_measurement_tool_calls",
+    "max_holdout_measurement_tool_calls",
+    "max_dev_measurement_turns",
+    "max_holdout_measurement_turns",
 }
 OBJECTIVE_KEYS = {"mode", "constraints", "tie_breakers"}
 EVAL_HEALTH_KEYS = {
@@ -179,6 +183,10 @@ class RatchetRunConfig:
     expensive_candidate_cost_ratio: float = 10.0
     max_dev_measurement_cost_usd: float | None = None
     max_holdout_measurement_cost_usd: float | None = None
+    max_dev_measurement_tool_calls: int | None = None
+    max_holdout_measurement_tool_calls: int | None = None
+    max_dev_measurement_turns: int | None = None
+    max_holdout_measurement_turns: int | None = None
     eval_health: EvalHealthConfig = field(default_factory=EvalHealthConfig)
     config_path: Path | None = None
 
@@ -190,6 +198,15 @@ class RatchetRunConfig:
         if self.stage_case_concurrency is not None and self.stage_case_concurrency <= 0:
             raise RatchetConfigError("stage_case_concurrency must be positive when set.")
         for name in ("max_dev_measurement_cost_usd", "max_holdout_measurement_cost_usd"):
+            value = getattr(self, name)
+            if value is not None and value < 0:
+                raise RatchetConfigError(f"{name} must be non-negative when set.")
+        for name in (
+            "max_dev_measurement_tool_calls",
+            "max_holdout_measurement_tool_calls",
+            "max_dev_measurement_turns",
+            "max_holdout_measurement_turns",
+        ):
             value = getattr(self, name)
             if value is not None and value < 0:
                 raise RatchetConfigError(f"{name} must be non-negative when set.")
@@ -222,6 +239,10 @@ class RatchetRunConfig:
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
             "max_dev_measurement_cost_usd": self.max_dev_measurement_cost_usd,
             "max_holdout_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+            "max_dev_measurement_tool_calls": self.max_dev_measurement_tool_calls,
+            "max_holdout_measurement_tool_calls": self.max_holdout_measurement_tool_calls,
+            "max_dev_measurement_turns": self.max_dev_measurement_turns,
+            "max_holdout_measurement_turns": self.max_holdout_measurement_turns,
             "eval_health": self.eval_health.to_dict(),
             "config_path": str(self.config_path) if self.config_path else None,
         }
@@ -326,6 +347,10 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         expensive_candidate_cost_ratio=float(payload.get("expensive_candidate_cost_ratio", 10.0)),
         max_dev_measurement_cost_usd=_optional_float(payload.get("max_dev_measurement_cost_usd")),
         max_holdout_measurement_cost_usd=_optional_float(payload.get("max_holdout_measurement_cost_usd")),
+        max_dev_measurement_tool_calls=_optional_int(payload.get("max_dev_measurement_tool_calls")),
+        max_holdout_measurement_tool_calls=_optional_int(payload.get("max_holdout_measurement_tool_calls")),
+        max_dev_measurement_turns=_optional_int(payload.get("max_dev_measurement_turns")),
+        max_holdout_measurement_turns=_optional_int(payload.get("max_holdout_measurement_turns")),
         eval_health=_eval_health_from_payload(payload),
         config_path=config_path,
     )
@@ -379,6 +404,10 @@ def resolve_run_config(
     expensive_candidate_cost_ratio: float | None = None,
     max_dev_measurement_cost_usd: float | None = None,
     max_holdout_measurement_cost_usd: float | None = None,
+    max_dev_measurement_tool_calls: int | None = None,
+    max_holdout_measurement_tool_calls: int | None = None,
+    max_dev_measurement_turns: int | None = None,
+    max_holdout_measurement_turns: int | None = None,
     diagnoser_model: str | None = None,
     diagnoser_reasoning: str | None = None,
     research_planner_model: str | None = None,
@@ -453,6 +482,26 @@ def resolve_run_config(
             max_holdout_measurement_cost_usd
             if max_holdout_measurement_cost_usd is not None
             else base.max_holdout_measurement_cost_usd
+        ),
+        max_dev_measurement_tool_calls=(
+            max_dev_measurement_tool_calls
+            if max_dev_measurement_tool_calls is not None
+            else base.max_dev_measurement_tool_calls
+        ),
+        max_holdout_measurement_tool_calls=(
+            max_holdout_measurement_tool_calls
+            if max_holdout_measurement_tool_calls is not None
+            else base.max_holdout_measurement_tool_calls
+        ),
+        max_dev_measurement_turns=(
+            max_dev_measurement_turns
+            if max_dev_measurement_turns is not None
+            else base.max_dev_measurement_turns
+        ),
+        max_holdout_measurement_turns=(
+            max_holdout_measurement_turns
+            if max_holdout_measurement_turns is not None
+            else base.max_holdout_measurement_turns
         ),
         eval_health=base.eval_health,
         config_path=base.config_path,

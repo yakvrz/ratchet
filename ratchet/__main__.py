@@ -58,6 +58,10 @@ def run_optimizer(
     expensive_candidate_cost_ratio: float | None = None,
     max_dev_measurement_cost_usd: float | None = None,
     max_holdout_measurement_cost_usd: float | None = None,
+    max_dev_measurement_tool_calls: int | None = None,
+    max_holdout_measurement_tool_calls: int | None = None,
+    max_dev_measurement_turns: int | None = None,
+    max_holdout_measurement_turns: int | None = None,
     config: RatchetRunConfig | None = None,
 ) -> Path:
     config = config or resolve_run_config(
@@ -91,6 +95,10 @@ def run_optimizer(
         expensive_candidate_cost_ratio=expensive_candidate_cost_ratio,
         max_dev_measurement_cost_usd=max_dev_measurement_cost_usd,
         max_holdout_measurement_cost_usd=max_holdout_measurement_cost_usd,
+        max_dev_measurement_tool_calls=max_dev_measurement_tool_calls,
+        max_holdout_measurement_tool_calls=max_holdout_measurement_tool_calls,
+        max_dev_measurement_turns=max_dev_measurement_turns,
+        max_holdout_measurement_turns=max_holdout_measurement_turns,
     )
     adapter, cases = load_runtime(config)
     optimizer = RatchetOptimizer(
@@ -119,6 +127,10 @@ def run_optimizer(
         expensive_candidate_cost_ratio=config.expensive_candidate_cost_ratio,
         max_dev_measurement_cost_usd=config.max_dev_measurement_cost_usd,
         max_holdout_measurement_cost_usd=config.max_holdout_measurement_cost_usd,
+        max_dev_measurement_tool_calls=config.max_dev_measurement_tool_calls,
+        max_holdout_measurement_tool_calls=config.max_holdout_measurement_tool_calls,
+        max_dev_measurement_turns=config.max_dev_measurement_turns,
+        max_holdout_measurement_turns=config.max_holdout_measurement_turns,
         run_metadata={
             **config.to_manifest_dict(),
             "adapter_fingerprint": adapter_fingerprint(config.adapter),
@@ -669,6 +681,10 @@ def _apply_run_overrides(
         expensive_candidate_cost_ratio=getattr(args, "expensive_candidate_cost_ratio", None),
         max_dev_measurement_cost_usd=getattr(args, "max_dev_measurement_cost_usd", None),
         max_holdout_measurement_cost_usd=getattr(args, "max_holdout_measurement_cost_usd", None),
+        max_dev_measurement_tool_calls=getattr(args, "max_dev_measurement_tool_calls", None),
+        max_holdout_measurement_tool_calls=getattr(args, "max_holdout_measurement_tool_calls", None),
+        max_dev_measurement_turns=getattr(args, "max_dev_measurement_turns", None),
+        max_holdout_measurement_turns=getattr(args, "max_holdout_measurement_turns", None),
     )
 
 
@@ -721,6 +737,26 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
         "--max-holdout-measurement-cost-usd",
         type=float,
         help="Maximum candidate measurement spend for holdout validation; omit for no dollar ceiling.",
+    )
+    parser.add_argument(
+        "--max-dev-measurement-tool-calls",
+        type=int,
+        help="Maximum candidate tool calls across dev stages; omit for no tool-call ceiling.",
+    )
+    parser.add_argument(
+        "--max-holdout-measurement-tool-calls",
+        type=int,
+        help="Maximum candidate tool calls for holdout validation; omit for no tool-call ceiling.",
+    )
+    parser.add_argument(
+        "--max-dev-measurement-turns",
+        type=int,
+        help="Maximum candidate interaction turns across dev stages; omit for no turn ceiling.",
+    )
+    parser.add_argument(
+        "--max-holdout-measurement-turns",
+        type=int,
+        help="Maximum candidate interaction turns for holdout validation; omit for no turn ceiling.",
     )
     parser.add_argument(
         "--fail-fast",

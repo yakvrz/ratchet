@@ -173,6 +173,10 @@ class RatchetOptimizer:
         expensive_candidate_cost_ratio: float = 10.0,
         max_dev_measurement_cost_usd: float | None = None,
         max_holdout_measurement_cost_usd: float | None = None,
+        max_dev_measurement_tool_calls: int | None = None,
+        max_holdout_measurement_tool_calls: int | None = None,
+        max_dev_measurement_turns: int | None = None,
+        max_holdout_measurement_turns: int | None = None,
         run_metadata: dict[str, Any] | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
@@ -235,10 +239,26 @@ class RatchetOptimizer:
             raise ValueError("max_dev_measurement_cost_usd must be non-negative when set.")
         if max_holdout_measurement_cost_usd is not None and max_holdout_measurement_cost_usd < 0:
             raise ValueError("max_holdout_measurement_cost_usd must be non-negative when set.")
+        for name, value in {
+            "max_dev_measurement_tool_calls": max_dev_measurement_tool_calls,
+            "max_holdout_measurement_tool_calls": max_holdout_measurement_tool_calls,
+            "max_dev_measurement_turns": max_dev_measurement_turns,
+            "max_holdout_measurement_turns": max_holdout_measurement_turns,
+        }.items():
+            if value is not None and value < 0:
+                raise ValueError(f"{name} must be non-negative when set.")
         self.max_dev_measurement_cost_usd = max_dev_measurement_cost_usd
         self.max_holdout_measurement_cost_usd = max_holdout_measurement_cost_usd
+        self.max_dev_measurement_tool_calls = max_dev_measurement_tool_calls
+        self.max_holdout_measurement_tool_calls = max_holdout_measurement_tool_calls
+        self.max_dev_measurement_turns = max_dev_measurement_turns
+        self.max_holdout_measurement_turns = max_holdout_measurement_turns
         self._dev_measurement_cost_usd = 0.0
         self._holdout_measurement_cost_usd = 0.0
+        self._dev_measurement_tool_calls = 0.0
+        self._holdout_measurement_tool_calls = 0.0
+        self._dev_measurement_turns = 0.0
+        self._holdout_measurement_turns = 0.0
         self.run_metadata = dict(run_metadata or {})
         self.cache_namespace = build_cache_namespace(
             agent_spec=self.agent_spec,
@@ -265,6 +285,10 @@ class RatchetOptimizer:
         self.optimizer_call_diagnostics = []
         self._dev_measurement_cost_usd = 0.0
         self._holdout_measurement_cost_usd = 0.0
+        self._dev_measurement_tool_calls = 0.0
+        self._holdout_measurement_tool_calls = 0.0
+        self._dev_measurement_turns = 0.0
+        self._holdout_measurement_turns = 0.0
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
         self._emit_progress(
@@ -804,14 +828,24 @@ class RatchetOptimizer:
             )
         for dev_summary in finalist_dev_patches:
             holdout_measurement_cost = dev_summary.mean_cost_usd * len(holdout_cases) * self.samples_per_case
-            if _measurement_budget_exhausted(
+            holdout_measurement_tool_calls = dev_summary.mean_tool_calls * len(holdout_cases) * self.samples_per_case
+            holdout_measurement_turns = dev_summary.mean_turns * len(holdout_cases) * self.samples_per_case
+            budget_reason = _measurement_budget_reason(
                 used_usd=self._holdout_measurement_cost_usd,
                 marginal_usd=holdout_measurement_cost,
                 max_usd=self.max_holdout_measurement_cost_usd,
-            ):
+                used_tool_calls=self._holdout_measurement_tool_calls,
+                marginal_tool_calls=holdout_measurement_tool_calls,
+                max_tool_calls=self.max_holdout_measurement_tool_calls,
+                used_turns=self._holdout_measurement_turns,
+                marginal_turns=holdout_measurement_turns,
+                max_turns=self.max_holdout_measurement_turns,
+                stage="holdout",
+            )
+            if budget_reason is not None:
                 reason = (
-                    "measurement_budget_exhausted: marginal holdout measurement cost "
-                    f"${holdout_measurement_cost:.6f} exceeds remaining holdout measurement budget"
+                    "measurement_budget_exhausted: "
+                    f"{budget_reason}"
                 )
                 finalist_statuses.append(
                     {
@@ -823,8 +857,14 @@ class RatchetOptimizer:
                         "dev_metrics": dev_summary.to_dict(),
                         "measurement_budget": {
                             "marginal_measurement_cost_usd": holdout_measurement_cost,
+                            "marginal_measurement_tool_calls": holdout_measurement_tool_calls,
+                            "marginal_measurement_turns": holdout_measurement_turns,
                             "measurement_cost_used_usd": self._holdout_measurement_cost_usd,
                             "max_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+                            "measurement_tool_calls_used": self._holdout_measurement_tool_calls,
+                            "max_measurement_tool_calls": self.max_holdout_measurement_tool_calls,
+                            "measurement_turns_used": self._holdout_measurement_turns,
+                            "max_measurement_turns": self.max_holdout_measurement_turns,
                         },
                         "passed_final_gate": False,
                     }
@@ -844,6 +884,8 @@ class RatchetOptimizer:
                 )
                 continue
             self._holdout_measurement_cost_usd += holdout_measurement_cost
+            self._holdout_measurement_tool_calls += holdout_measurement_tool_calls
+            self._holdout_measurement_turns += holdout_measurement_turns
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
             if _requires_finalist_confirmation(dev_summary.patch, runtime_diagnostic):
@@ -1771,6 +1813,12 @@ class RatchetOptimizer:
                     self._dev_measurement_cost_usd += float(
                         evidence_summary.measurement_cost.get("estimated_total_cost_usd") or 0.0
                     )
+                    self._dev_measurement_tool_calls += float(
+                        evidence_summary.measurement_cost.get("estimated_tool_calls") or 0.0
+                    )
+                    self._dev_measurement_turns += float(
+                        evidence_summary.measurement_cost.get("estimated_turns") or 0.0
+                    )
                 state.stage_rows.append(
                     {
                         "stage": stage_name,
@@ -1856,6 +1904,10 @@ class RatchetOptimizer:
             samples_per_case=self.samples_per_case,
             measurement_cost_used_usd=self._dev_measurement_cost_usd,
             max_measurement_cost_usd=self.max_dev_measurement_cost_usd,
+            measurement_tool_calls_used=self._dev_measurement_tool_calls,
+            max_measurement_tool_calls=self.max_dev_measurement_tool_calls,
+            measurement_turns_used=self._dev_measurement_turns,
+            max_measurement_turns=self.max_dev_measurement_turns,
         )
         self._emit_progress(
             "measurement_selector_started",
@@ -1917,6 +1969,8 @@ class RatchetOptimizer:
             state.accepted = False
         kept: list[CandidateEvaluationState] = []
         selected_measurement_cost = 0.0
+        selected_measurement_tool_calls = 0.0
+        selected_measurement_turns = 0.0
         for state in selected:
             marginal_cost = _estimated_marginal_measurement_cost_usd(
                 state=state,
@@ -1924,19 +1978,43 @@ class RatchetOptimizer:
                 evidence_ledger=evidence_ledger,
                 samples_per_case=self.samples_per_case,
             )
-            if _measurement_budget_exhausted(
+            marginal_tool_calls = _estimated_marginal_measurement_units(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+                unit="tool_calls",
+            )
+            marginal_turns = _estimated_marginal_measurement_units(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+                unit="turns",
+            )
+            budget_reason = _measurement_budget_reason(
                 used_usd=self._dev_measurement_cost_usd + selected_measurement_cost,
                 marginal_usd=marginal_cost,
                 max_usd=self.max_dev_measurement_cost_usd,
-            ):
+                used_tool_calls=self._dev_measurement_tool_calls + selected_measurement_tool_calls,
+                marginal_tool_calls=marginal_tool_calls,
+                max_tool_calls=self.max_dev_measurement_tool_calls,
+                used_turns=self._dev_measurement_turns + selected_measurement_turns,
+                marginal_turns=marginal_turns,
+                max_turns=self.max_dev_measurement_turns,
+                stage=stage_name,
+            )
+            if budget_reason is not None:
                 state.rejection_reason = (
-                    "measurement_budget_exhausted: marginal measurement cost "
-                    f"${marginal_cost:.6f} exceeds remaining dev measurement budget"
+                    "measurement_budget_exhausted: "
+                    f"{budget_reason}"
                 )
                 state.frontier_status = "screened_out"
                 state.accepted = False
                 continue
             selected_measurement_cost += marginal_cost
+            selected_measurement_tool_calls += marginal_tool_calls
+            selected_measurement_turns += marginal_turns
             kept.append(state)
         return kept
 
@@ -2219,6 +2297,9 @@ class RatchetOptimizer:
             error=evaluation.record.metrics.error,
             latency_s=evaluation.record.metrics.latency_s,
             cost_usd=evaluation.record.metrics.cost_usd,
+            model_calls=evaluation.record.metrics.model_calls,
+            tool_calls=evaluation.record.metrics.tool_calls,
+            turns=evaluation.record.metrics.turns,
         )
 
     def _execute_case(self, patch: AgentPatch, case: EvalCase, *, sample_index: int = 0) -> CaseEvaluation:
@@ -2258,6 +2339,9 @@ class RatchetOptimizer:
                         diagnostics=DiagnosticTrace(
                             tool_calls=list(record.diagnostics.tool_calls),
                             raw_output_text=record.diagnostics.raw_output_text,
+                            turns=list(record.diagnostics.turns),
+                            terminal_state=dict(record.diagnostics.terminal_state),
+                            terminal_reason=record.diagnostics.terminal_reason,
                             metadata=diagnostic_metadata,
                         ),
                     )
@@ -2372,8 +2456,16 @@ class RatchetOptimizer:
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
             "max_dev_measurement_cost_usd": self.max_dev_measurement_cost_usd,
             "max_holdout_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+            "max_dev_measurement_tool_calls": self.max_dev_measurement_tool_calls,
+            "max_holdout_measurement_tool_calls": self.max_holdout_measurement_tool_calls,
+            "max_dev_measurement_turns": self.max_dev_measurement_turns,
+            "max_holdout_measurement_turns": self.max_holdout_measurement_turns,
             "dev_measurement_cost_used_usd": self._dev_measurement_cost_usd,
             "holdout_measurement_cost_used_usd": self._holdout_measurement_cost_usd,
+            "dev_measurement_tool_calls_used": self._dev_measurement_tool_calls,
+            "holdout_measurement_tool_calls_used": self._holdout_measurement_tool_calls,
+            "dev_measurement_turns_used": self._dev_measurement_turns,
+            "holdout_measurement_turns_used": self._holdout_measurement_turns,
             "selected_patch_hash": selected_patch_hash,
             "promoted": promoted,
             "progress_path": str(self.out_dir / "progress.jsonl"),
@@ -2525,6 +2617,10 @@ def _research_state_packet(
     samples_per_case: int,
     measurement_cost_used_usd: float,
     max_measurement_cost_usd: float | None,
+    measurement_tool_calls_used: float,
+    max_measurement_tool_calls: int | None,
+    measurement_turns_used: float,
+    max_measurement_turns: int | None,
 ) -> dict[str, Any]:
     candidate_ids = [state.patch_hash for state in states]
     candidate_evidence = _selector_rows_with_measurement_context(
@@ -2536,6 +2632,10 @@ def _research_state_packet(
         samples_per_case=samples_per_case,
         measurement_cost_used_usd=measurement_cost_used_usd,
         max_measurement_cost_usd=max_measurement_cost_usd,
+        measurement_tool_calls_used=measurement_tool_calls_used,
+        max_measurement_tool_calls=max_measurement_tool_calls,
+        measurement_turns_used=measurement_turns_used,
+        max_measurement_turns=max_measurement_turns,
     )
     remaining_measurement_budget = (
         None
@@ -2552,6 +2652,20 @@ def _research_state_packet(
             "measurement_cost_used_usd": measurement_cost_used_usd,
             "max_measurement_cost_usd": max_measurement_cost_usd,
             "remaining_measurement_budget_usd": remaining_measurement_budget,
+            "measurement_tool_calls_used": measurement_tool_calls_used,
+            "max_measurement_tool_calls": max_measurement_tool_calls,
+            "remaining_measurement_tool_calls": (
+                None
+                if max_measurement_tool_calls is None
+                else max(0.0, max_measurement_tool_calls - measurement_tool_calls_used)
+            ),
+            "measurement_turns_used": measurement_turns_used,
+            "max_measurement_turns": max_measurement_turns,
+            "remaining_measurement_turns": (
+                None
+                if max_measurement_turns is None
+                else max(0.0, max_measurement_turns - measurement_turns_used)
+            ),
         },
         "measurement_policy": {
             "small_dev": "Triage only; use it to decide whether more measurement is worth buying, not as final ranking.",
@@ -2563,7 +2677,8 @@ def _research_state_packet(
             ),
             "measurement_budget": (
                 "Use marginal_measurement_cost_usd and remaining_measurement_budget_usd to decide whether the "
-                "expected information is worth buying. Deterministic code enforces hard dollar ceilings after selection."
+                "expected information is worth buying. For interactive tasks, also consider marginal tool calls and "
+                "turns. Deterministic code enforces hard resource ceilings after selection."
             ),
             "quality_frontier": (
                 "For correctness objectives, a high-quality candidate that violates cost or latency constraints can still "
@@ -2606,6 +2721,10 @@ def _selector_rows_with_measurement_context(
     samples_per_case: int,
     measurement_cost_used_usd: float,
     max_measurement_cost_usd: float | None,
+    measurement_tool_calls_used: float,
+    max_measurement_tool_calls: int | None,
+    measurement_turns_used: float,
+    max_measurement_turns: int | None,
 ) -> list[dict[str, Any]]:
     state_by_id = {state.patch_hash: state for state in states}
     rows: list[dict[str, Any]] = []
@@ -2626,7 +2745,38 @@ def _selector_rows_with_measurement_context(
             evidence_ledger=evidence_ledger,
             samples_per_case=samples_per_case,
         )
+        row["marginal_measurement_model_calls"] = _estimated_marginal_measurement_units(
+            state=state,
+            stage_cases=stage_cases,
+            evidence_ledger=evidence_ledger,
+            samples_per_case=samples_per_case,
+            unit="model_calls",
+        )
+        row["marginal_measurement_tool_calls"] = _estimated_marginal_measurement_units(
+            state=state,
+            stage_cases=stage_cases,
+            evidence_ledger=evidence_ledger,
+            samples_per_case=samples_per_case,
+            unit="tool_calls",
+        )
+        row["marginal_measurement_turns"] = _estimated_marginal_measurement_units(
+            state=state,
+            stage_cases=stage_cases,
+            evidence_ledger=evidence_ledger,
+            samples_per_case=samples_per_case,
+            unit="turns",
+        )
         row["remaining_measurement_budget_usd"] = remaining_budget
+        row["remaining_measurement_tool_calls"] = (
+            None
+            if max_measurement_tool_calls is None
+            else max(0.0, max_measurement_tool_calls - measurement_tool_calls_used)
+        )
+        row["remaining_measurement_turns"] = (
+            None
+            if max_measurement_turns is None
+            else max(0.0, max_measurement_turns - measurement_turns_used)
+        )
         row["deployed_cost_ratio"] = _safe_ratio(
             (state.summary.mean_cost_usd if state.summary is not None else 0.0),
             baseline.mean_cost_usd,
@@ -2659,6 +2809,9 @@ def _compact_selector_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
         "token_delta": row.get("token_delta"),
         "cost_delta": row.get("cost_delta"),
         "latency_delta": row.get("latency_delta"),
+        "model_call_delta": row.get("model_call_delta"),
+        "tool_call_delta": row.get("tool_call_delta"),
+        "turn_delta": row.get("turn_delta"),
         "sign_consistency": row.get("sign_consistency"),
         "confidence_tier": row.get("confidence_tier"),
         "baseline_instability_flags": list(row.get("baseline_instability_flags") or []),
@@ -2666,7 +2819,13 @@ def _compact_selector_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
             "fresh_candidate_samples": measurement_cost.get("fresh_candidate_samples"),
             "estimated_total_cost_usd": measurement_cost.get("estimated_total_cost_usd"),
             "estimated_total_tokens": measurement_cost.get("estimated_total_tokens"),
+            "estimated_model_calls": measurement_cost.get("estimated_model_calls"),
+            "estimated_tool_calls": measurement_cost.get("estimated_tool_calls"),
+            "estimated_turns": measurement_cost.get("estimated_turns"),
             "candidate_mean_cost_usd": measurement_cost.get("candidate_mean_cost_usd"),
+            "candidate_mean_model_calls": measurement_cost.get("candidate_mean_model_calls"),
+            "candidate_mean_tool_calls": measurement_cost.get("candidate_mean_tool_calls"),
+            "candidate_mean_turns": measurement_cost.get("candidate_mean_turns"),
         },
         "mechanism_class": row.get("mechanism_class"),
         "affordance_ids": list(row.get("affordance_ids") or [])[:6],
@@ -2681,6 +2840,9 @@ def _compact_selector_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
             "cost_delta": comparison.get("cost_delta"),
             "latency_delta": comparison.get("latency_delta"),
             "token_delta": comparison.get("token_delta"),
+            "model_call_delta": comparison.get("model_call_delta"),
+            "tool_call_delta": comparison.get("tool_call_delta"),
+            "turn_delta": comparison.get("turn_delta"),
         },
         "stage_history": [
             _compact_selector_history_row(history)
@@ -2699,6 +2861,8 @@ def _compact_selector_history_row(row: dict[str, Any]) -> dict[str, Any]:
         "pass_gain": row.get("pass_gain"),
         "effect_size": row.get("effect_size"),
         "score_delta": comparison.get("score_delta"),
+        "tool_call_delta": comparison.get("tool_call_delta"),
+        "turn_delta": comparison.get("turn_delta"),
         "rejection_reason": row.get("rejection_reason"),
         "constraint_warning": row.get("constraint_warning"),
     }
@@ -2817,6 +2981,29 @@ def _estimated_marginal_measurement_cost_usd(
     return max(0.0, state.summary.mean_cost_usd * marginal_case_count * max(1, samples_per_case))
 
 
+def _estimated_marginal_measurement_units(
+    *,
+    state: CandidateEvaluationState,
+    stage_cases: tuple[EvalCase, ...],
+    evidence_ledger: EvidenceLedger,
+    samples_per_case: int,
+    unit: str,
+) -> float:
+    if state.summary is None:
+        return 0.0
+    latest = evidence_ledger.latest(state.patch_hash)
+    previously_measured = set(latest.case_ids) if latest is not None else set()
+    marginal_case_count = sum(1 for case in stage_cases if case.id not in previously_measured)
+    multiplier = max(1, samples_per_case) * marginal_case_count
+    if unit == "model_calls":
+        return max(0.0, state.summary.mean_model_calls * multiplier)
+    if unit == "tool_calls":
+        return max(0.0, state.summary.mean_tool_calls * multiplier)
+    if unit == "turns":
+        return max(0.0, state.summary.mean_turns * multiplier)
+    raise ValueError(f"Unsupported marginal measurement unit: {unit}")
+
+
 def _measurement_budget_exhausted(
     *,
     used_usd: float,
@@ -2826,6 +3013,37 @@ def _measurement_budget_exhausted(
     if max_usd is None:
         return False
     return used_usd + marginal_usd > max_usd + 1e-12
+
+
+def _measurement_budget_reason(
+    *,
+    used_usd: float,
+    marginal_usd: float,
+    max_usd: float | None,
+    used_tool_calls: float,
+    marginal_tool_calls: float,
+    max_tool_calls: int | None,
+    used_turns: float,
+    marginal_turns: float,
+    max_turns: int | None,
+    stage: str,
+) -> str | None:
+    if max_usd is not None and used_usd + marginal_usd > max_usd + 1e-12:
+        return (
+            f"marginal {stage} measurement cost ${marginal_usd:.6f} exceeds remaining "
+            "measurement dollar budget"
+        )
+    if max_tool_calls is not None and used_tool_calls + marginal_tool_calls > max_tool_calls + 1e-12:
+        return (
+            f"marginal {stage} measurement tool calls {marginal_tool_calls:.1f} exceed remaining "
+            "measurement tool-call budget"
+        )
+    if max_turns is not None and used_turns + marginal_turns > max_turns + 1e-12:
+        return (
+            f"marginal {stage} measurement turns {marginal_turns:.1f} exceed remaining "
+            "measurement turn budget"
+        )
+    return None
 
 
 def _safe_ratio(numerator: float, denominator: float) -> float | None:
@@ -3178,6 +3396,9 @@ def _summary_progress_fields(summary: PatchSummary) -> dict[str, Any]:
         "pass_count": summary.pass_count,
         "mean_score": round(summary.mean_score, 4),
         "mean_cost_usd": summary.mean_cost_usd,
+        "mean_model_calls": summary.mean_model_calls,
+        "mean_tool_calls": summary.mean_tool_calls,
+        "mean_turns": summary.mean_turns,
         "median_latency_s": summary.median_latency_s,
     }
 
@@ -3186,10 +3407,17 @@ def _affordance_evidence_from_theory(task_theory: TaskTheory, diagnoses: list[Fa
     row = task_theory.to_dict()
     runtime = row.get("runtime_defects") or {}
     output = row.get("output_defects") or {}
+    tool = row.get("tool_defects") or {}
     return {
         "bottleneck_class": row.get("bottleneck_class"),
         "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
         "invalid_output": bool(output.get("invalid_output_count")),
+        "tool_trajectory_defect": bool(
+            tool.get("tool_error_case_ids")
+            or tool.get("invalid_tool_call_case_ids")
+            or tool.get("premature_stop_case_ids")
+            or tool.get("turn_outcome_counts")
+        ),
         "example_coverage": bool((row.get("example_coverage") or {}).get("example_count")),
         "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }

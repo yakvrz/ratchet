@@ -6,6 +6,8 @@ Bring your Python agent and evals. Ratchet runs the original agent as an immutab
 
 The adapter is intentionally minimal. It runs the agent, grades outputs, optionally exposes a descriptive `AgentSpec`, and exports the selected patch. Ratchet owns the optimization surface, research loop, objective handling, measurement decisions, evidence ledger, and promotion gates.
 
+For interactive agent benchmarks, one eval case may contain a full conversation with model turns, tool/environment calls, and terminal state. Adapters should return these trajectories through `DiagnosticTrace`; Ratchet uses them as evidence rather than flattening the case into one final string.
+
 ## Scope
 
 - Python agents only
@@ -103,6 +105,8 @@ Public serializable types:
 - `EvalCase`
 - `OperationalMetrics`
 - `DiagnosticTrace`
+- `InteractionTurn`
+- `ToolCallTrace`
 - `RunRecord`
 - `GradeResult`
 - `FailureDiagnosis`
@@ -118,16 +122,19 @@ Internal optimization artifacts also appear in run outputs:
 
 Helper utilities:
 
+- `InteractionRecorder` for adapters that execute multi-turn tool/environment cases
 - `exact_text_grade(...)`
 - `numeric_tolerance_grade(...)`
 - `json_field_grade(...)`
 - `estimate_cost_usd(...)` is available in `ratchet.pricing`
+- `TauBenchRunner` and `taubench_result_to_run_record(...)` provide an optional bridge for original `tau-bench` retail/airline simulations when the external benchmark package is installed
 
 ## Contract Model
 
 - The eval set scores the agent's external contract: inputs, externally visible outputs, and success criteria.
 - The adapter describes the current agent and scorer; it does not choose the optimization strategy.
 - Ratchet generates editable targets from `AgentSpec`, then derives ranked optimization affordances from the surface, traces, failures, objective mode, and constraints.
+- Tool/environment traces are evidence. Tool-related affordances are legal moves generated from the agent surface plus observed trajectory failures.
 - The research planner sees affordances, not raw source files or task-specific recipes.
 - Candidate implementations must cite concrete affordance IDs; family and mechanism metadata are derived from those affordances.
 - The scorer, including any LLM judge used by an eval, is frozen and outside the optimization surface.
@@ -162,6 +169,10 @@ Helper utilities:
 - `expensive_candidate_cost_ratio`
 - `max_dev_measurement_cost_usd`
 - `max_holdout_measurement_cost_usd`
+- `max_dev_measurement_tool_calls`
+- `max_holdout_measurement_tool_calls`
+- `max_dev_measurement_turns`
+- `max_holdout_measurement_turns`
 - `fail_fast`
 - `sanitize_examples`
 
@@ -189,7 +200,7 @@ Objective config:
 mode = "correctness" # correctness | cost | latency
 
 [ratchet.objective.constraints]
-allowed_edits = ["instruction", "tool", "retrieval", "runtime", "model", "output"]
+allowed_edits = ["instruction", "tool", "runtime", "model", "output"]
 allowed_models = ["gpt-4o-2024-08-06", "gpt-5.4-mini"]
 max_cost_ratio = 1.0
 max_latency_ratio = 1.1
@@ -200,7 +211,7 @@ min_correctness_delta = 0.0 # optional; defaults to strict improvement for corre
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
 Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and patch case with separate cache entries and aggregates case outcomes by majority vote / mean score.
 
-`max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. They are separate from deployed-policy cost constraints: an expensive model candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed the configured measurement budget.
+`max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. Interactive runs can also set tool-call and turn ceilings. These are separate from deployed-policy constraints: an expensive or long-horizon candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed configured measurement budgets.
 
 ## Commands
 

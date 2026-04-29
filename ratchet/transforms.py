@@ -626,34 +626,16 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
             }
         },
     ),
-    "retrieval_tuning": TransformFamily(
-        name="retrieval_tuning",
-        category="retrieval",
-        purpose="Tune retrieval parameters or retrieval query policy exposed by the agent surface.",
-        supported_edit_kinds=["retrieval"],
-        supported_ops=["set_retrieval_param"],
-        activation_signals=["retrieval_dependent_failures", "cost_objective", "latency_objective"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["retrieval recall regression", "retrieval cost increase"],
-        required_measurements=["score_delta", "retrieval_param_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "retrieval_param": "retrieval setting being changed",
-                "expected_tradeoff": "quality, cost, or latency tradeoff",
-            }
-        },
-    ),
     "tool_policy_revision": TransformFamily(
         name="tool_policy_revision",
         category="tools",
         purpose="Revise tool descriptions, enablement, or tool-use policy exposed by the agent surface.",
         supported_edit_kinds=["tool"],
         supported_ops=["revise_tool_description", "revise_tool_policy", "set_runtime_param"],
-        activation_signals=["tool_dependent_slice", "cost_objective", "latency_objective"],
+        activation_signals=["tool_dependent_slice", "tool_trajectory_defect", "cost_objective", "latency_objective"],
         expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
         risks=["tool overuse", "tool underuse", "tool-call regression"],
-        required_measurements=["score_delta", "tool_call_delta", "cost_delta", "latency_delta"],
+        required_measurements=["score_delta", "tool_call_delta", "tool_error_delta", "turn_delta", "cost_delta", "latency_delta"],
         complexity_cost=1.25,
         parameter_contract={
             "recommended": {
@@ -690,7 +672,6 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "targeted_few_shot": 1.0,
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
-        "retrieval_tuning": 1.0,
         "tool_policy_revision": 1.0,
         "verifier_retry": 1.0,
     },
@@ -706,25 +687,21 @@ SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
         "prompt_rewrite": 1.0,
         "model_substitution": 1.0,
         "targeted_few_shot": 1.0,
-        "retrieval_tuning": 0.4,
         "tool_policy_revision": 0.4,
     },
     "cost_objective": {
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
-        "retrieval_tuning": 0.8,
         "tool_policy_revision": 0.8,
     },
     "high_cost_cases": {
         "runtime_tuning": 1.0,
-        "retrieval_tuning": 0.8,
         "tool_policy_revision": 0.8,
         "model_substitution": 1.0,
     },
     "latency_objective": {
         "model_substitution": 1.0,
         "runtime_tuning": 1.0,
-        "retrieval_tuning": 0.8,
         "tool_policy_revision": 0.8,
     },
     "high_latency_cases": {
@@ -1664,7 +1641,7 @@ def _operation_mechanism_signature(operation: PatchOperation) -> str:
     value = operation.value
     if operation.op == "change_model":
         return f"model:{_normalize_token(str(value), default='unknown')}"
-    if operation.op in {"set_runtime_param", "set_retrieval_param"}:
+    if operation.op == "set_runtime_param":
         return f"{operation.op}:{_value_class(value)}"
     if operation.op == "add_few_shot":
         return f"few_shot:{_few_shot_shape(value)}"
@@ -1737,7 +1714,7 @@ def _text_mechanism_class(text: str) -> str:
         "format_contract": ("json", "schema", "format", "field", "valid", "parse", "contract"),
         "grounding": ("source", "evidence", "cite", "citation", "ground", "fact", "document"),
         "fallback": ("unknown", "cannot", "insufficient", "not available", "fallback"),
-        "tool_use": ("tool", "search", "retrieve", "retrieval", "web", "lookup"),
+        "tool_use": ("tool", "search", "web", "lookup"),
         "classification": ("label", "category", "class", "priority", "intent"),
         "brevity": ("concise", "short", "brief", "limit"),
     }

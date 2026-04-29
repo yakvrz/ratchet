@@ -422,6 +422,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     out = "results/run"
                     max_dev_measurement_cost_usd = 0.25
                     max_holdout_measurement_cost_usd = 0.10
+                    max_dev_measurement_tool_calls = 40
+                    max_holdout_measurement_tool_calls = 12
+                    max_dev_measurement_turns = 80
+                    max_holdout_measurement_turns = 24
                     """
                 ).strip()
             )
@@ -429,6 +433,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             loaded = load_run_config(config_path)
             self.assertEqual(loaded.max_dev_measurement_cost_usd, 0.25)
             self.assertEqual(loaded.max_holdout_measurement_cost_usd, 0.10)
+            self.assertEqual(loaded.max_dev_measurement_tool_calls, 40)
+            self.assertEqual(loaded.max_holdout_measurement_tool_calls, 12)
+            self.assertEqual(loaded.max_dev_measurement_turns, 80)
+            self.assertEqual(loaded.max_holdout_measurement_turns, 24)
 
             config_path.write_text(
                 textwrap.dedent(
@@ -456,6 +464,20 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 ).strip()
             )
             with self.assertRaisesRegex(RatchetConfigError, "max_dev_measurement_cost_usd"):
+                load_run_config(config_path)
+
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    max_dev_measurement_turns = -1
+                    """
+                ).strip()
+            )
+            with self.assertRaisesRegex(RatchetConfigError, "max_dev_measurement_turns"):
                 load_run_config(config_path)
 
     def test_optimizer_role_models_fall_back_to_default_and_can_override(self) -> None:

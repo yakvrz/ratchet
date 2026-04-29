@@ -146,7 +146,6 @@ class TransformLibraryTests(unittest.TestCase):
             model="large",
             model_options=["small", "large"],
             instructions={"system_prompt": "Answer."},
-            retrieval={"top_k": 5},
             runtime={"output_cap": 128},
         )
         objective = OptimizationObjective(mode="cost")
