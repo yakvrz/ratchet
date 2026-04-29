@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ratchet.io import stable_digest
-from ratchet.types import AgentSpec, EditableTarget, OptimizationObjective
+from ratchet.types import AgentSpec, EditableTarget, OptimizationObjective, TargetSemantics
 
 
 def _text_value_schema(max_chars: int) -> dict[str, Any]:
@@ -71,6 +71,15 @@ class SurfaceGenerator:
                     description="Generic wrapper instruction applied around the original agent when no AgentSpec is available.",
                     max_chars=1200,
                     value_schema=_text_value_schema(1200),
+                    semantics=TargetSemantics(
+                        role="wrapper_instruction",
+                        axes=["task_framing", "instruction_following"],
+                        scope="global",
+                        risks=["broad_behavior_shift"],
+                        measurement_hints=["score_delta", "non_target_regression"],
+                        confidence=0.7,
+                        source="inferred",
+                    ),
                 )
             ]
         constraints = objective.constraints
@@ -90,6 +99,7 @@ class SurfaceGenerator:
                         description="Model used by the optimized agent.",
                         choices=choices,
                         value_schema=_infer_value_schema(spec.model, choices=choices),
+                        semantics=_target_semantics(spec, name="model", kind="model", path="model"),
                     )
                 )
         if "instruction" in allowed:
@@ -105,6 +115,12 @@ class SurfaceGenerator:
                         description=f"Instruction section {name}.",
                         max_chars=max_chars,
                         value_schema=_text_value_schema(max_chars),
+                        semantics=_target_semantics(
+                            spec,
+                            name=f"instructions.{name}",
+                            kind="instruction",
+                            path=f"instructions.{name}",
+                        ),
                     )
                 )
         if "output" in allowed:
@@ -119,6 +135,12 @@ class SurfaceGenerator:
                     description="Externally visible answer format and output constraints.",
                     max_chars=max_chars,
                     value_schema=_text_value_schema(max_chars),
+                    semantics=_target_semantics(
+                        spec,
+                        name="output_contract",
+                        kind="output",
+                        path="output_contract",
+                    ),
                 )
             )
         if "tool" in allowed:
@@ -134,6 +156,12 @@ class SurfaceGenerator:
                         description=f"Description for tool {name}.",
                         max_chars=description_max_chars,
                         value_schema=_text_value_schema(description_max_chars),
+                        semantics=_target_semantics(
+                            spec,
+                            name=f"tools.{name}.description",
+                            kind="tool",
+                            path=f"tools.{name}.description",
+                        ),
                     )
                 )
                 policy_max_chars = max(len(tool.policy) + 400, 700)
@@ -147,6 +175,12 @@ class SurfaceGenerator:
                         description=f"Use policy for tool {name}.",
                         max_chars=policy_max_chars,
                         value_schema=_text_value_schema(policy_max_chars),
+                        semantics=_target_semantics(
+                            spec,
+                            name=f"tools.{name}.policy",
+                            kind="tool",
+                            path=f"tools.{name}.policy",
+                        ),
                     )
                 )
                 if not tool.enabled:
@@ -159,6 +193,12 @@ class SurfaceGenerator:
                             allowed_ops=["set_runtime_param"],
                             description=f"Enable tool {name}.",
                             value_schema=_infer_value_schema(False),
+                            semantics=_target_semantics(
+                                spec,
+                                name=f"tools.{name}.enabled",
+                                kind="tool",
+                                path=f"tools.{name}.enabled",
+                            ),
                         )
                     )
         if "retrieval" in allowed:
@@ -172,6 +212,12 @@ class SurfaceGenerator:
                         allowed_ops=["set_retrieval_param"],
                         description=f"Retrieval parameter {key}.",
                         value_schema=_infer_value_schema(value),
+                        semantics=_target_semantics(
+                            spec,
+                            name=f"retrieval.{key}",
+                            kind="retrieval",
+                            path=f"retrieval.{key}",
+                        ),
                     )
                 )
         if "runtime" in allowed:
@@ -185,6 +231,12 @@ class SurfaceGenerator:
                         allowed_ops=["set_runtime_param"],
                         description=f"Runtime parameter {key}.",
                         value_schema=_infer_value_schema(value),
+                        semantics=_target_semantics(
+                            spec,
+                            name=f"runtime.{key}",
+                            kind="runtime",
+                            path=f"runtime.{key}",
+                        ),
                     )
                 )
         if "few_shot" in allowed:
@@ -199,6 +251,7 @@ class SurfaceGenerator:
                         "Few-shot examples appended to the agent spec. Values must be arrays of proposal-safe "
                         "examples that cite source_case_id from the provided train example bank."
                     ),
+                    semantics=_target_semantics(spec, name="few_shot", kind="few_shot", path="few_shot"),
                     value_schema={
                         "type": "array",
                         "shape": "few_shot_examples",
@@ -227,6 +280,272 @@ class SurfaceGenerator:
                     allowed_ops=["add_verifier_retry"],
                     description="Generic verifier/retry wrapper setting.",
                     value_schema=_infer_value_schema(False),
+                    semantics=_target_semantics(
+                        spec,
+                        name="verifier_retry",
+                        kind="verifier",
+                        path="runtime.verifier_retry",
+                    ),
                 )
             )
         return targets
+
+
+def _target_semantics(spec: AgentSpec, *, name: str, kind: str, path: str) -> TargetSemantics:
+    for key in _semantic_keys(name=name, path=path):
+        explicit = spec.target_semantics.get(key)
+        if explicit is not None:
+            return explicit
+    return _infer_target_semantics(name=name, kind=kind, path=path)
+
+
+def _semantic_keys(*, name: str, path: str) -> list[str]:
+    keys = [name, path]
+    for value in (name, path):
+        if value.startswith("instructions."):
+            keys.append(value.removeprefix("instructions."))
+        if value.startswith("runtime."):
+            keys.append(value.removeprefix("runtime."))
+        if value.startswith("retrieval."):
+            keys.append(value.removeprefix("retrieval."))
+    return list(dict.fromkeys(keys))
+
+
+def _infer_target_semantics(*, name: str, kind: str, path: str) -> TargetSemantics:
+    simple_name = name.rsplit(".", 1)[-1]
+    if kind == "instruction":
+        return _infer_instruction_semantics(simple_name)
+    if kind == "output":
+        return TargetSemantics(
+            role="external_output_contract",
+            axes=["format_validity", "parser_compatibility", "contract_preservation"],
+            scope="global",
+            risks=["contract_regression"],
+            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        )
+    if kind == "few_shot":
+        return TargetSemantics(
+            role="example_bank",
+            axes=["example_anchoring", "target_slice_recall"],
+            scope="slice",
+            risks=["neighbor_label_regression", "example_overfit"],
+            measurement_hints=["target_slice_score_delta", "non_target_regression", "example_token_delta"],
+            confidence=0.9,
+            source="inferred",
+        )
+    if kind == "model":
+        return TargetSemantics(
+            role="model_choice",
+            axes=["model_capability", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["cost_latency_regression", "quality_regression"],
+            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
+            confidence=0.95,
+            source="inferred",
+        )
+    if kind == "runtime":
+        return _infer_runtime_semantics(simple_name)
+    if kind == "tool":
+        return _infer_tool_semantics(name=name)
+    if kind == "retrieval":
+        return TargetSemantics(
+            role="retrieval_policy",
+            axes=["recall_precision_tradeoff", "context_relevance"],
+            scope="global",
+            risks=["cost_latency_regression", "quality_regression"],
+            measurement_hints=["score_delta", "latency_delta", "retrieval_volume_delta"],
+            confidence=0.8,
+            source="inferred",
+        )
+    if kind == "verifier":
+        return TargetSemantics(
+            role="verifier_retry_policy",
+            axes=["runtime_reliability", "contract_preservation"],
+            scope="global",
+            risks=["latency_regression", "cost_latency_regression"],
+            measurement_hints=["invalid_output_delta", "score_delta", "latency_delta"],
+            confidence=0.8,
+            source="inferred",
+        )
+    return TargetSemantics(
+        role=f"{kind}_policy",
+        axes=[f"{kind}_behavior"],
+        scope="global",
+        risks=["quality_regression"],
+        measurement_hints=["score_delta", "non_target_regression"],
+        confidence=0.4,
+        source="inferred",
+    )
+
+
+def _infer_instruction_semantics(name: str) -> TargetSemantics:
+    semantics_by_name = {
+        "task_rule": TargetSemantics(
+            role="task_instructions",
+            axes=["task_framing", "instruction_following"],
+            scope="global",
+            risks=["broad_behavior_shift"],
+            measurement_hints=["score_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        ),
+        "label_rule": TargetSemantics(
+            role="label_space",
+            axes=["classification_boundary", "label_validity"],
+            scope="global",
+            risks=["label_space_regression"],
+            measurement_hints=["target_label_score_delta", "wrong_label_delta", "non_target_regression"],
+            confidence=0.95,
+            source="inferred",
+        ),
+        "label_descriptions": TargetSemantics(
+            role="label_description",
+            axes=["classification_boundary", "semantic_grounding"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=0.95,
+            source="inferred",
+        ),
+        "label_aliases": TargetSemantics(
+            role="label_alias_mapping",
+            axes=["classification_boundary", "confusion_resolution"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=0.95,
+            source="inferred",
+        ),
+        "confusable_label_rules": TargetSemantics(
+            role="confusable_label_policy",
+            axes=["classification_boundary", "confusion_resolution", "tie_breaking"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=0.95,
+            source="inferred",
+        ),
+        "decision_rule": TargetSemantics(
+            role="decision_policy",
+            axes=["selection_policy", "tie_breaking"],
+            scope="global",
+            risks=["broad_behavior_shift"],
+            measurement_hints=["score_delta", "confusion_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        ),
+        "schema_rule": TargetSemantics(
+            role="schema_adherence_policy",
+            axes=["schema_grounding", "argument_name_validity"],
+            scope="global",
+            risks=["contract_regression"],
+            measurement_hints=["wrong_call_delta", "invalid_output_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        ),
+        "argument_rule": TargetSemantics(
+            role="argument_extraction_policy",
+            axes=["argument_selection", "literal_value_grounding"],
+            scope="slice",
+            risks=["neighbor_case_regression"],
+            measurement_hints=["wrong_argument_delta", "target_slice_score_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        ),
+        "no_call_rule": TargetSemantics(
+            role="no_call_policy",
+            axes=["tool_relevance_boundary", "abstention"],
+            scope="slice",
+            risks=["false_negative_calls", "false_positive_calls"],
+            measurement_hints=["wrong_call_count_delta", "target_slice_score_delta", "non_target_regression"],
+            confidence=0.9,
+            source="inferred",
+        ),
+        "output_rule": TargetSemantics(
+            role="output_format_rule",
+            axes=["format_validity", "parser_compatibility"],
+            scope="global",
+            risks=["contract_regression"],
+            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
+            confidence=0.95,
+            source="inferred",
+        ),
+    }
+    return semantics_by_name.get(
+        name,
+        TargetSemantics(
+            role="instruction_policy",
+            axes=["instruction_following"],
+            scope="global",
+            risks=["quality_regression"],
+            measurement_hints=["score_delta", "non_target_regression"],
+            confidence=0.55,
+            source="inferred",
+        ),
+    )
+
+
+def _infer_runtime_semantics(name: str) -> TargetSemantics:
+    if name in {"output_cap", "max_output_tokens", "max_tokens"}:
+        return TargetSemantics(
+            role="output_budget_control",
+            axes=["completion_integrity", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["truncation_regression", "cost_latency_regression"],
+            measurement_hints=["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
+            confidence=0.9,
+            source="inferred",
+        )
+    if name == "reasoning_effort":
+        return TargetSemantics(
+            role="reasoning_effort_control",
+            axes=["reasoning_depth", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["cost_latency_regression", "quality_regression"],
+            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
+            confidence=0.9,
+            source="inferred",
+        )
+    return TargetSemantics(
+        role="runtime_control",
+        axes=["runtime_reliability", "cost_latency_tradeoff"],
+        scope="global",
+        risks=["cost_latency_regression", "quality_regression"],
+        measurement_hints=["score_delta", "cost_delta", "latency_delta"],
+        confidence=0.7,
+        source="inferred",
+    )
+
+
+def _infer_tool_semantics(*, name: str) -> TargetSemantics:
+    if name.endswith(".description"):
+        return TargetSemantics(
+            role="tool_description",
+            axes=["tool_selection", "schema_grounding"],
+            scope="slice",
+            risks=["wrong_tool_regression"],
+            measurement_hints=["wrong_call_delta", "target_slice_score_delta", "non_target_regression"],
+            confidence=0.85,
+            source="inferred",
+        )
+    if name.endswith(".policy"):
+        return TargetSemantics(
+            role="tool_policy",
+            axes=["tool_selection", "action_policy"],
+            scope="slice",
+            risks=["wrong_tool_regression"],
+            measurement_hints=["wrong_call_delta", "target_slice_score_delta", "non_target_regression"],
+            confidence=0.85,
+            source="inferred",
+        )
+    return TargetSemantics(
+        role="tool_enablement",
+        axes=["tool_availability", "runtime_reliability"],
+        scope="global",
+        risks=["tool_surface_regression"],
+        measurement_hints=["score_delta", "wrong_call_delta", "non_target_regression"],
+        confidence=0.75,
+        source="inferred",
+    )
