@@ -18,7 +18,7 @@ except ModuleNotFoundError:
 
 BASE_SPEC = AgentSpec(
     name="taubench-action-agent",
-    model="gemini-2.5-flash-lite",
+    model="gemini-3-flash-preview",
     model_options=[
         "gemini-3.1-flash-lite-preview",
         "gemini-3-flash-preview",
@@ -35,10 +35,10 @@ BASE_SPEC = AgentSpec(
             "to satisfy the user while following policy."
         ),
         "sequencing_rule": "Return actions in the likely execution order. Prefer a short necessary sequence over extra speculative steps.",
-        "output_rule": "Return JSON with actions and message. Each action has name and arguments. Use {} when arguments are uncertain.",
+        "output_rule": "Return JSON with actions and message. Each action has only a name. Do not include arguments.",
     },
-    output_contract="Return JSON: {\"actions\":[{\"name\":\"tool_name\",\"arguments\":{}}],\"message\":\"...\"}.",
-    runtime={"reasoning_effort": "low", "output_cap": 512},
+    output_contract="Return JSON: {\"actions\":[{\"name\":\"tool_name\"}],\"message\":\"...\"}.",
+    runtime={"reasoning_effort": "low", "output_cap": 2048},
 )
 
 
