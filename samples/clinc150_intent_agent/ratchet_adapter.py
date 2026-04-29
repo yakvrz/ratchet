@@ -6,7 +6,7 @@ from pathlib import Path
 
 from ratchet.model_client import ResponsesModelClient
 from ratchet.rendering import render_few_shot_prompt
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
+from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord, TargetSemantics
 
 try:
     from agent import CLINC150_LABELS, Clinc150IntentRunner
@@ -92,6 +92,116 @@ BASE_SPEC = AgentSpec(
     },
     output_contract="Return JSON with a single string field named label whose value is one allowed label.",
     runtime={"reasoning_effort": "low", "output_cap": 512},
+    target_semantics={
+        "task_rule": TargetSemantics(
+            role="task_instructions",
+            axes=["task_framing", "intent_classification"],
+            scope="global",
+            risks=["broad_behavior_shift"],
+            measurement_hints=["score_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "label_rule": TargetSemantics(
+            role="label_space",
+            axes=["classification_boundary", "label_validity"],
+            scope="global",
+            risks=["label_space_regression"],
+            measurement_hints=["target_label_score_delta", "wrong_label_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "label_descriptions": TargetSemantics(
+            role="label_description",
+            axes=["classification_boundary", "semantic_grounding"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "label_aliases": TargetSemantics(
+            role="label_alias_mapping",
+            axes=["classification_boundary", "confusion_resolution"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "confusable_label_rules": TargetSemantics(
+            role="confusable_label_policy",
+            axes=["classification_boundary", "confusion_resolution", "tie_breaking"],
+            scope="slice",
+            risks=["neighbor_label_regression"],
+            measurement_hints=["target_label_score_delta", "confusion_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "decision_rule": TargetSemantics(
+            role="decision_policy",
+            axes=["selection_policy", "tie_breaking"],
+            scope="global",
+            risks=["broad_behavior_shift"],
+            measurement_hints=["score_delta", "confusion_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "output_rule": TargetSemantics(
+            role="output_format_rule",
+            axes=["format_validity", "parser_compatibility"],
+            scope="global",
+            risks=["contract_regression"],
+            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "output_contract": TargetSemantics(
+            role="external_output_contract",
+            axes=["format_validity", "parser_compatibility", "contract_preservation"],
+            scope="global",
+            risks=["contract_regression"],
+            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "few_shot": TargetSemantics(
+            role="example_bank",
+            axes=["example_anchoring", "target_slice_recall"],
+            scope="slice",
+            risks=["neighbor_label_regression", "example_overfit"],
+            measurement_hints=["target_slice_score_delta", "non_target_regression", "example_token_delta"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "model": TargetSemantics(
+            role="model_choice",
+            axes=["model_capability", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["cost_latency_regression", "quality_regression"],
+            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "output_cap": TargetSemantics(
+            role="output_budget_control",
+            axes=["completion_integrity", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["truncation_regression", "cost_latency_regression"],
+            measurement_hints=["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
+            confidence=1.0,
+            source="adapter",
+        ),
+        "reasoning_effort": TargetSemantics(
+            role="reasoning_effort_control",
+            axes=["reasoning_depth", "cost_latency_tradeoff"],
+            scope="global",
+            risks=["cost_latency_regression", "quality_regression"],
+            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
+            confidence=1.0,
+            source="adapter",
+        ),
+    },
 )
 
 

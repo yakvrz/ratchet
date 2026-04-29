@@ -49,7 +49,7 @@ def _state(index: int) -> CandidateEvaluationState:
         ),
         applications=[
             CandidateAffordanceApplication(
-                affordance_id="prompt_rewrite.semantic_boundary_rewrite.instruction.instructions_system",
+                affordance_id="prompt_rewrite.semantic_boundary_rewrite.task_instructions.instructions_system",
                 operation=PatchOperation(
                     op="add_instruction",
                     target="instructions.system",
