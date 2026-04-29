@@ -4,7 +4,7 @@ import json
 import unittest
 
 from ratchet.adapter_generation import GeneratedSingleCallAdapter
-from ratchet.types import EvalCase
+from ratchet.types import AgentPatch, EvalCase, PatchOperation
 from samples.banking77_intent_agent.ratchet_adapter import Banking77IntentAdapter
 from samples.bfcl_function_calling_agent.ratchet_adapter import BfclFunctionCallingAdapter
 from samples.clinc150_intent_agent.ratchet_adapter import Clinc150IntentAdapter
@@ -69,7 +69,8 @@ class GeneratedSampleAdapterTests(unittest.TestCase):
         self.assertIn("task_rule", record.diagnostics.metadata["rendered_context_sections"])
 
     def test_banking77_uses_generated_single_call_adapter(self) -> None:
-        adapter = Banking77IntentAdapter(client=FakeClient({"label": "cash_withdrawal_charge"}))
+        client = FakeClient({"label": "cash_withdrawal_charge"})
+        adapter = Banking77IntentAdapter(client=client)
         case = EvalCase(
             id="banking-1",
             split="dev",
@@ -83,6 +84,25 @@ class GeneratedSampleAdapterTests(unittest.TestCase):
         self.assertIsInstance(adapter, GeneratedSingleCallAdapter)
         self.assertTrue(grade.passed)
         self.assertIn("label_rule", record.diagnostics.metadata["rendered_context_sections"])
+
+        patched = adapter.run_case(
+            case,
+            AgentPatch(
+                operations=[
+                    PatchOperation(
+                        op="add_instruction",
+                        target="instructions.label_rule",
+                        value="Use concise labels.",
+                    )
+                ]
+            ),
+        )
+        self.assertIn("Use concise labels.", str(client.calls[-1]["instructions"]))
+        self.assertEqual(
+            patched.diagnostics.metadata["transform_compile_report"]["status"],
+            "compiled",
+        )
+        self.assertTrue(patched.diagnostics.metadata["transform_trace"])
 
     def test_clinc150_uses_generated_single_call_adapter(self) -> None:
         adapter = Clinc150IntentAdapter(client=FakeClient({"label": "weather"}))

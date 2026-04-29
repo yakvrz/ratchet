@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 import json
 from pathlib import Path
 import time
@@ -12,7 +13,8 @@ from ratchet.pricing import estimate_cost_usd
 from ratchet.rendering import render_few_shot_prompt
 from ratchet.runtime import RuntimeContext, TransformRuntime
 from ratchet.surfaces import SurfaceSpec, surface_from_agent_spec
-from ratchet.transform_program import CompiledCandidate
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import CompiledCandidate, TransformPatch, TransformProgram
 from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, OperationalMetrics, RunRecord, DiagnosticTrace
 
 
@@ -76,9 +78,8 @@ class GeneratedSingleCallAdapter:
 
     def run_case(self, case: EvalCase, candidate: AgentPatch | CompiledCandidate | None = None) -> RunRecord:
         base_spec = self.harness.agent_spec()
-        compiled = candidate if isinstance(candidate, CompiledCandidate) else None
-        spec = base_spec.apply_patch(candidate) if isinstance(candidate, AgentPatch) else base_spec
-        request = self.harness.build_model_request(spec, case)
+        compiled = self._compiled_candidate(candidate)
+        request = self.harness.build_model_request(base_spec, case)
         runtime = TransformRuntime(compiled)
         ctx = RuntimeContext(
             case=case,
@@ -143,9 +144,11 @@ class GeneratedSingleCallAdapter:
 
     def export(self, candidate: AgentPatch | CompiledCandidate, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        if isinstance(candidate, CompiledCandidate):
-            (out_dir / "compiled_candidate.json").write_text(json.dumps(candidate.to_dict(), indent=2, sort_keys=True))
+        compiled = self._compiled_candidate(candidate)
+        if compiled is not None:
+            (out_dir / "compiled_candidate.json").write_text(json.dumps(compiled.to_dict(), indent=2, sort_keys=True))
             (out_dir / "surface_spec.json").write_text(json.dumps(self.surface_spec().to_dict(), indent=2, sort_keys=True))
+        if isinstance(candidate, CompiledCandidate):
             return
         spec = self.harness.agent_spec().apply_patch(candidate)
         (out_dir / "patch.json").write_text(json.dumps(candidate.to_dict(), indent=2, sort_keys=True))
@@ -155,6 +158,153 @@ class GeneratedSingleCallAdapter:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
         return self._client
+
+    def _compiled_candidate(self, candidate: AgentPatch | CompiledCandidate | None) -> CompiledCandidate | None:
+        if candidate is None:
+            return None
+        if isinstance(candidate, CompiledCandidate):
+            return candidate
+        if candidate.is_empty:
+            return None
+        program = transform_program_from_agent_patch(candidate, self.surface_spec())
+        return TransformCompiler().compile_or_raise(program, self.surface_spec())
+
+
+def transform_program_from_agent_patch(patch: AgentPatch, surface: SurfaceSpec) -> TransformProgram:
+    patches: list[TransformPatch] = []
+    for index, operation in enumerate(patch.operations):
+        target = operation.target
+        value = operation.value
+        if operation.op == "add_instruction":
+            section = _strip_prefix(target, "instructions.")
+            current = _surface_section_content(surface, section)
+            if current is None:
+                patches.append(
+                    TransformPatch.from_dict(
+                        {
+                            "hook": "before_model_call",
+                            "op": "add_context_section",
+                            "section": section,
+                            "content": str(value),
+                            "position": "end",
+                            "required": True,
+                        }
+                    )
+                )
+            else:
+                text = str(value).strip()
+                content = f"{current.rstrip()}\n\n{text}" if text and text not in current else current
+                patches.append(
+                    TransformPatch.from_dict(
+                        {
+                            "hook": "before_model_call",
+                            "op": "replace_context_section",
+                            "section": section,
+                            "content": content,
+                        }
+                    )
+                )
+            continue
+        if operation.op == "revise_instruction":
+            patches.append(
+                TransformPatch.from_dict(
+                    {
+                        "hook": "before_model_call",
+                        "op": "replace_context_section",
+                        "section": _strip_prefix(target, "instructions."),
+                        "content": str(value),
+                    }
+                )
+            )
+            continue
+        if operation.op == "add_output_constraint":
+            patches.append(
+                TransformPatch.from_dict(
+                    {
+                        "hook": "before_model_call",
+                        "op": "add_context_section",
+                        "section": f"output_constraint_patch_{index}",
+                        "content": str(value),
+                        "position": "end",
+                        "required": True,
+                    }
+                )
+            )
+            continue
+        if operation.op == "change_model":
+            patches.append(
+                TransformPatch.from_dict(
+                    {
+                        "hook": "before_model_call",
+                        "op": "set_model_config",
+                        "field": "model",
+                        "value": str(value),
+                    }
+                )
+            )
+            continue
+        if operation.op == "set_runtime_param":
+            field = _runtime_field(target)
+            patches.append(
+                TransformPatch.from_dict(
+                    {
+                        "hook": "before_model_call",
+                        "op": "set_model_config",
+                        "field": field,
+                        "value": value,
+                    }
+                )
+            )
+            continue
+        if operation.op == "add_few_shot":
+            examples = value if isinstance(value, list) else [value]
+            patches.append(
+                TransformPatch.from_dict(
+                    {
+                        "hook": "before_model_call",
+                        "op": "add_context_section",
+                        "section": f"few_shot_patch_{index}",
+                        "content": render_few_shot_prompt(
+                            [dict(item) if isinstance(item, dict) else {"text": str(item)} for item in examples]
+                        ),
+                        "position": "end",
+                    }
+                )
+            )
+            continue
+        if operation.op in {"revise_tool_description", "revise_tool_policy", "add_verifier_retry"}:
+            raise ValueError(f"Patch operation {operation.op!r} is not expressible on generated single-call adapters.")
+        raise ValueError(f"Unsupported patch operation: {operation.op}")
+    digest = sha256(json.dumps(patch.to_dict(), sort_keys=True, default=str).encode("utf-8")).hexdigest()[:12]
+    return TransformProgram(
+        candidate_id=str(patch.metadata.get("candidate_id") or f"agent_patch_{digest}"),
+        patches=tuple(patches),
+        metadata={
+            **dict(patch.metadata),
+            "source_patch": patch.to_dict(),
+            "lowered_from": "AgentPatch",
+            "rationale": patch.rationale,
+            "expected_effect": patch.expected_effect,
+        },
+    )
+
+
+def _strip_prefix(value: str, prefix: str) -> str:
+    return value[len(prefix) :] if value.startswith(prefix) else value
+
+
+def _surface_section_content(surface: SurfaceSpec, section_name: str) -> str | None:
+    for section in surface.context.graph.sections:
+        if section.name == section_name:
+            return str(section.content)
+    return None
+
+
+def _runtime_field(target: str) -> str:
+    field = _strip_prefix(target, "runtime.")
+    if field == "output_cap":
+        return "max_tokens"
+    return field
 
 
 def context_graph_from_spec(
