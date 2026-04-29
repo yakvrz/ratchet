@@ -1591,6 +1591,7 @@ class RatchetOptimizer:
             affordances=affordances,
             current_dev=current_dev,
             proposals_log=proposals_log,
+            objective=self.objective,
         )
         state = ResearchState(
             objective=self.objective.to_dict(),
@@ -2802,6 +2803,7 @@ def _task_theory_with_affordance_opportunities(
     affordances: list[OptimizationAffordance],
     current_dev: PatchSummary,
     proposals_log: list[dict[str, Any]],
+    objective: OptimizationObjective,
 ) -> dict[str, Any]:
     payload = task_theory.to_dict()
     opportunities = list(payload.get("experiment_opportunities") or [])
@@ -2841,8 +2843,66 @@ def _task_theory_with_affordance_opportunities(
             *list(payload.get("evidence") or []),
             "model capability affordance available for residual correctness failures",
         ]
+    efficiency_affordances = [
+        affordance
+        for affordance in affordances
+        if affordance.family == "model_substitution"
+        and affordance.mechanism == "efficiency_probe"
+    ]
+    if efficiency_affordances and _model_efficiency_probe_is_relevant(objective):
+        if "efficiency_probe" in existing_mechanisms:
+            for opportunity in opportunities:
+                if isinstance(opportunity, dict) and opportunity.get("mechanism_class") == "efficiency_probe":
+                    existing_ids = [
+                        str(item)
+                        for item in opportunity.get("affordance_ids", [])
+                        if item
+                    ]
+                    opportunity["affordance_ids"] = list(
+                        dict.fromkeys(
+                            [
+                                *existing_ids,
+                                *[affordance.affordance_id for affordance in efficiency_affordances[:3]],
+                            ]
+                        )
+                    )
+                    opportunity["rationale"] = (
+                        str(opportunity.get("rationale") or "")
+                        + " Model-choice affordances can also test cheaper or faster equivalent policies."
+                    ).strip()
+                    break
+        else:
+            opportunities.append(
+                {
+                    "mechanism_class": "efficiency_probe",
+                    "target_slices": ["global"],
+                    "candidate_roles": ["atomic", "control"],
+                    "measurements": ["score_delta", "cost_delta", "latency_delta", "correctness_guard"],
+                    "affordance_ids": [affordance.affordance_id for affordance in efficiency_affordances[:3]],
+                    "rationale": (
+                        "Model-choice affordances are available; test whether a different allowed model "
+                        "can preserve quality while reducing cost or latency."
+                    ),
+                    "disconfirming_result": "The model change reduces cost or latency only by causing correctness regressions.",
+                }
+            )
+        payload["evidence"] = [
+            *list(payload.get("evidence") or []),
+            "model efficiency affordance available for cost/latency tradeoff testing",
+        ]
     payload["experiment_opportunities"] = opportunities[:8]
     return payload
+
+
+def _model_efficiency_probe_is_relevant(objective: OptimizationObjective) -> bool:
+    constraints = objective.constraints
+    return (
+        objective.mode in {"cost", "latency"}
+        or constraints.max_cost_ratio is not None
+        or constraints.max_latency_ratio is not None
+        or "lower_cost" in objective.tie_breakers
+        or "lower_latency" in objective.tie_breakers
+    )
 
 
 def _capability_probe_insert_index(opportunities: list[dict[str, Any]]) -> int:

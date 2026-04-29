@@ -462,6 +462,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             affordances=affordances,
             current_dev=summary,
             proposals_log=[],
+            objective=objective,
         )
 
         mechanisms = [
@@ -469,6 +470,51 @@ class GeneratedSurfaceTests(unittest.TestCase):
             for row in enriched["experiment_opportunities"]
         ]
         self.assertIn("model_capability_probe", mechanisms)
+
+    def test_task_theory_exposes_model_efficiency_without_residual_failures(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="large",
+            model_options=["small", "large"],
+            instructions={"system_prompt": "Classify."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective(
+            mode="cost",
+            constraints=OptimizationConstraints(allowed_edits=["model"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        summary = make_labeled_summary("baseline", [[], [], []])
+        task_theory = build_task_theory(
+            summary=summary,
+            diagnoses=[],
+            objective=objective,
+        )
+        affordances = generate_optimization_affordances(
+            surface,
+            objective=objective,
+            active_families=["model_substitution"],
+            evidence={"bottleneck_class": task_theory.bottleneck_class},
+        )
+
+        enriched = _task_theory_with_affordance_opportunities(
+            task_theory=task_theory,
+            affordances=affordances,
+            current_dev=summary,
+            proposals_log=[],
+            objective=objective,
+        )
+
+        efficiency_opportunities = [
+            row
+            for row in enriched["experiment_opportunities"]
+            if row.get("mechanism_class") == "efficiency_probe"
+        ]
+        self.assertTrue(efficiency_opportunities)
+        self.assertIn(
+            "model_substitution.efficiency_probe.model.model",
+            efficiency_opportunities[0]["affordance_ids"],
+        )
 
     def test_diagnoser_json_failure_is_fatal(self) -> None:
         spec = AgentSpec(
