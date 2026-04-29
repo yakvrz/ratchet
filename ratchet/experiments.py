@@ -61,7 +61,6 @@ class ExperimentIntent:
     target_slices: list[str] = field(default_factory=list)
     candidate_roles: list[str] = field(default_factory=list)
     measurements: list[str] = field(default_factory=list)
-    allowed_families: list[str] = field(default_factory=list)
     affordance_ids: list[str] = field(default_factory=list)
     success_criteria: str = ""
     disconfirming_result: str = ""
@@ -75,6 +74,8 @@ class ExperimentIntent:
         unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
         if unknown_roles:
             raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
+        if not self.affordance_ids:
+            raise ValueError("intent affordance_ids must be non-empty")
         if self.priority < 1:
             raise ValueError("intent priority must be positive")
 
@@ -90,11 +91,6 @@ class ExperimentIntent:
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
-            allowed_families=[
-                str(item)
-                for item in payload.get("allowed_families", [])
-                if item and str(item).lower() not in {"all", "any", "*"}
-            ],
             affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
             success_criteria=str(payload.get("success_criteria") or ""),
             disconfirming_result=str(payload.get("disconfirming_result") or ""),

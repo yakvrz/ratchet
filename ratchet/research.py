@@ -80,11 +80,6 @@ class ResearchPlanner:
             for affordance in state.affordances
             if affordance.get("affordance_id")
         }
-        active_families = {
-            str(affordance.get("family") or affordance.get("transform_family"))
-            for affordance in state.affordances
-            if affordance.get("family") or affordance.get("transform_family")
-        }
         intents: list[ExperimentIntent] = []
         for index, raw_intent in enumerate(raw_intents, start=1):
             if not isinstance(raw_intent, dict):
@@ -97,11 +92,6 @@ class ResearchPlanner:
             if unknown_affordances:
                 raise OptimizerModelError(
                     f"Research planner intent {intent.intent_id!r} used unknown affordance_ids: {unknown_affordances}"
-                )
-            unknown_families = sorted(set(intent.allowed_families) - active_families)
-            if unknown_families:
-                raise OptimizerModelError(
-                    f"Research planner intent {intent.intent_id!r} used unknown allowed_families: {unknown_families}"
                 )
             intents.append(intent)
         return intents
@@ -375,8 +365,7 @@ def _experiment_intent_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
             },
             "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
-            "allowed_families": {"type": "array", "items": {"type": "string", "maxLength": 80}},
-            "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 180}},
+            "affordance_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 180}},
             "success_criteria": {"type": "string", "maxLength": 300},
             "disconfirming_result": {"type": "string", "maxLength": 300},
             "priority": {"type": "integer"},

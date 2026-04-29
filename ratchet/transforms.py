@@ -478,7 +478,7 @@ class CandidateProposal:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
         if "patch" in payload:
-            raise ValueError("candidate patch must be inside intervention.payload.patch")
+            raise ValueError("candidate patch is derived from applications[]; do not emit a candidate-level patch")
         if payload.get("transform_parameters"):
             raise ValueError("candidate transform_parameters are derived; put candidate-specific data in applications[]")
         if payload.get("transform_family") or payload.get("mechanism_class") or payload.get("affordance_ids"):

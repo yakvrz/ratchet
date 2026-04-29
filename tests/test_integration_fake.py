@@ -301,13 +301,6 @@ def _fake_research_plan_response(payload: dict[str, object]) -> object:
                             "candidate_roles": ["atomic", "control"],
                             "measurements": measurements[:4],
                             "affordance_ids": matching_affordances,
-                            "allowed_families": sorted(
-                                {
-                                    str(affordance.get("family") or affordance.get("transform_family"))
-                                    for affordance in affordances
-                                    if isinstance(affordance, dict) and affordance.get("affordance_id") in matching_affordances
-                                }
-                            ),
                             "success_criteria": "Improve objective on dev without regressions.",
                             "disconfirming_result": "No improvement on staged eval.",
                             "priority": 1,

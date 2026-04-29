@@ -919,6 +919,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
                     intent_id="requested_intent",
                     mechanism_class="semantic_boundary_rewrite",
                     hypothesis="Implement only this requested intent.",
+                    affordance_ids=["prompt_rewrite.semantic_boundary_rewrite.instruction.instructions_system_prompt"],
                 )
             ],
         )
@@ -1135,7 +1136,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertTrue(any("must use selection" in reason for reason in reasons))
         self.assertTrue(any("unknown few-shot source_case_ids" in reason for reason in reasons))
 
-    def test_targeted_few_shot_rejects_legacy_source_ids_outside_intervention(self) -> None:
+    def test_targeted_few_shot_rejects_source_ids_outside_applications(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -1159,7 +1160,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
                     "candidate_role": "atomic",
                     "transform_parameters": {"source_case_ids": ["train-card-1"]},
                     "intervention": {"kind": "example_selection", "payload": {}},
-                    "hypothesis": "Legacy transform_parameters should not satisfy the contract.",
+                    "hypothesis": "Candidate-level transform_parameters should not satisfy the contract.",
                 }
             ]
         )
@@ -1183,7 +1184,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
             any("candidate transform_parameters are derived" in reason for reason in (engine.last_stats.invalid_reasons or {}))
         )
 
-    def test_candidate_implementer_rejects_legacy_bare_patches(self) -> None:
+    def test_candidate_implementer_rejects_bare_patches(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -1205,7 +1206,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
                             "value": "Answer exactly.",
                         }
                     ],
-                    "rationale": "Legacy bare patch.",
+                    "rationale": "Bare patch.",
                     "expected_effect": "Should not be accepted.",
                 }
             ]

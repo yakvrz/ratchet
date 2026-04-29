@@ -190,17 +190,17 @@ class ResearchRoleTests(unittest.TestCase):
                 max_select=1,
             )
 
-    def test_experiment_intent_normalizes_all_family_marker_and_rejects_unknown_roles(self) -> None:
+    def test_experiment_intent_rejects_unknown_roles(self) -> None:
         intent = ExperimentIntent.from_dict(
             {
                 "intent_id": "intent_1",
                 "mechanism_class": "runtime_defect_fix",
                 "hypothesis": "Test runtime.",
-                "allowed_families": ["all"],
+                "affordance_ids": ["runtime.output_cap"],
             },
         )
 
-        self.assertEqual(intent.allowed_families, [])
+        self.assertEqual(intent.affordance_ids, ["runtime.output_cap"])
         with self.assertRaises(ValueError):
             ExperimentIntent.from_dict(
                 {

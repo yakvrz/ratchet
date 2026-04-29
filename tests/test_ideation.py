@@ -6,7 +6,7 @@ from ratchet.ideation import build_ideation_metrics
 
 
 class IdeationMetricsTests(unittest.TestCase):
-    def test_counts_valid_current_proposal_rows_without_legacy_type_marker(self) -> None:
+    def test_counts_valid_current_proposal_rows_without_type_marker(self) -> None:
         metrics = build_ideation_metrics(
             decision_log=[
                 {

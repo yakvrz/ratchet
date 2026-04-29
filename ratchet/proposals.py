@@ -608,17 +608,6 @@ class CandidateImplementer:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
-                candidate_families = {application.family for application in candidate.applications}
-                if intent is not None and intent.allowed_families and not candidate_families <= set(intent.allowed_families):
-                    reason = (
-                        f"candidate families {sorted(candidate_families)!r} are not allowed by experiment intent "
-                        f"{intent.intent_id!r}"
-                    )
-                    self._last_parse_invalid_reasons[reason] += 1
-                    self._last_parse_invalid_candidate_rows.append(
-                        _invalid_raw_candidate_row(raw_candidate, reason)
-                    )
-                    continue
                 if intent is not None and intent.affordance_ids:
                     unknown_for_intent = sorted(set(candidate.affordance_ids) - set(intent.affordance_ids))
                     if unknown_for_intent:
@@ -796,7 +785,6 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
         "target_slices": list(intent.target_slices)[:5],
         "candidate_roles": list(intent.candidate_roles)[:5],
         "measurements": list(intent.measurements)[:5],
-        "allowed_families": list(intent.allowed_families)[:5],
         "affordance_ids": list(intent.affordance_ids)[:8],
         "success_criteria": intent.success_criteria[:240],
         "disconfirming_result": intent.disconfirming_result[:240],
