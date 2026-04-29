@@ -67,9 +67,8 @@ class TauBenchActionConfig:
                                 "type": "object",
                                 "properties": {
                                     "name": {"type": "string"},
-                                    "arguments": {"type": "object", "additionalProperties": True},
                                 },
-                                "required": ["name", "arguments"],
+                                "required": ["name"],
                                 "additionalProperties": False,
                             },
                         },
@@ -136,6 +135,5 @@ def _is_action_payload(value: Any) -> bool:
     return all(
         isinstance(action, dict)
         and isinstance(action.get("name"), str)
-        and isinstance(action.get("arguments"), dict)
         for action in actions
     )
