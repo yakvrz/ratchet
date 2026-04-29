@@ -21,7 +21,7 @@ class PartialRunOutputTests(unittest.TestCase):
                             {
                                 "event": "case_started",
                                 "elapsed_s": 1.0,
-                                "patch_hash": "patch-1",
+                                "candidate_id": "patch-1",
                                 "case_id": "case-1",
                                 "sample_index": 0,
                                 "split": "dev",
@@ -31,7 +31,7 @@ class PartialRunOutputTests(unittest.TestCase):
                             {
                                 "event": "case_started",
                                 "elapsed_s": 2.0,
-                                "patch_hash": "patch-1",
+                                "candidate_id": "patch-1",
                                 "case_id": "case-2",
                                 "sample_index": 0,
                                 "split": "dev",
@@ -41,7 +41,7 @@ class PartialRunOutputTests(unittest.TestCase):
                             {
                                 "event": "case_completed",
                                 "elapsed_s": 3.0,
-                                "patch_hash": "patch-1",
+                                "candidate_id": "patch-1",
                                 "case_id": "case-1",
                                 "sample_index": 0,
                                 "split": "dev",
@@ -51,7 +51,7 @@ class PartialRunOutputTests(unittest.TestCase):
                 )
                 + "\n"
             )
-            (out_dir / "case_results.jsonl").write_text(json.dumps({"patch_hash": "patch-1"}) + "\n")
+            (out_dir / "case_results.jsonl").write_text(json.dumps({"candidate_id": "patch-1"}) + "\n")
 
             manifest = write_partial_run_outputs(out_dir, status="failed", reason="test failure")
 

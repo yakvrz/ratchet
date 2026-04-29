@@ -160,8 +160,8 @@ def run_optimizer(
         )
         print(f"Partial report: {config.out / 'partial_report.md'}", file=sys.stderr)
         raise
-    outcome = "promoted optimized patch" if result.promoted else "kept baseline"
-    print(f"Ratchet finished: {outcome}; selected patch {result.selected_patch_hash}")
+    outcome = "promoted optimized candidate" if result.promoted else "kept baseline"
+    print(f"Ratchet finished: {outcome}; selected candidate {result.selected_candidate_id}")
     print(f"Report: {config.out / 'report.md'}")
     return config.out
 
@@ -211,7 +211,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
     if event == "parent_started":
         return (
             "Frontier",
-            f"examining parent #{row.get('parent_rank')} patch={_short_hash(row.get('parent_patch_hash'))} "
+            f"examining parent #{row.get('parent_rank')} candidate={_short_hash(row.get('parent_candidate_id'))} "
             + _score_brief(row),
         )
     if event == "diagnosis_started":
@@ -326,7 +326,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         reason = row.get("rejection_reason") or row.get("constraint_warning")
         return (
             "Candidate",
-            f"{_humanize_key(status)} patch={_short_hash(row.get('patch_hash'))} "
+            f"{_humanize_key(status)} candidate={_short_hash(row.get('candidate_id'))} "
             f"family={_humanize_key(row.get('transform_family'))} "
             f"score {_format_signed(row.get('score_delta'), digits=3)} "
             f"cost {_format_money_delta(row.get('cost_delta'))} "
@@ -337,54 +337,54 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
     if event == "retry_started":
         return "Retry", f"parent #{row.get('parent_rank')} because {_short_reason(row.get('reason'))}"
     if event == "frontier_updated":
-        patches = _join_limited([_short_hash(item) for item in row.get("frontier_patch_hashes") or []], limit=4)
-        return "Frontier", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} patches={patches}"
+        candidates = _join_limited([_short_hash(item) for item in row.get("frontier_candidate_ids") or []], limit=4)
+        return "Frontier", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} candidates={candidates}"
     if event == "search_stopped":
         return "Search", f"stopped: {_short_reason(row.get('reason'))}"
     if event == "simplification_started":
         return (
             "Simplify",
-            f"testing simpler variant={_short_hash(row.get('patch_hash'))} of parent={_short_hash(row.get('parent_patch_hash'))}",
+            f"testing simpler variant={_short_hash(row.get('candidate_id'))} of parent={_short_hash(row.get('parent_candidate_id'))}",
         )
     if event == "simplification_completed":
         status = "accepted" if row.get("accepted") else "rejected"
         reason = row.get("rejection_reason")
         return (
             "Simplify",
-            f"{status} variant={_short_hash(row.get('variant_patch_hash'))} {_score_brief(row)}"
+            f"{status} variant={_short_hash(row.get('variant_candidate_id'))} {_score_brief(row)}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "confirmation_started":
         return (
             "Confirm",
-            f"checking suspicious finalist patch={_short_hash(row.get('patch_hash'))} cases={row.get('case_count')} "
+            f"checking suspicious finalist candidate={_short_hash(row.get('candidate_id'))} cases={row.get('case_count')} "
             f"samples={row.get('sample_count')}",
         )
     if event == "confirmation_completed":
         status = "passed" if row.get("passed") else "failed"
-        return "Confirm", f"{status} patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+        return "Confirm", f"{status} candidate={_short_hash(row.get('candidate_id'))} reason={_short_reason(row.get('reason'))}"
     if event == "confirmation_skipped":
-        return "Confirm", f"skipped patch={_short_hash(row.get('patch_hash'))} reason={_short_reason(row.get('reason'))}"
+        return "Confirm", f"skipped candidate={_short_hash(row.get('candidate_id'))} reason={_short_reason(row.get('reason'))}"
     if event == "holdout_candidate_started":
-        return "Holdout", f"validating finalist patch={_short_hash(row.get('patch_hash'))} on {row.get('case_count')} protected case(s)"
+        return "Holdout", f"validating finalist candidate={_short_hash(row.get('candidate_id'))} on {row.get('case_count')} protected case(s)"
     if event == "holdout_candidate_completed":
         status = row.get("finalist_status") or ("validated" if row.get("passed_final_gate") else "rejected")
         reason = row.get("rejection_reason")
         return (
             "Holdout",
-            f"{_humanize_key(status)} patch={_short_hash(row.get('patch_hash'))} {_score_brief(row)}"
+            f"{_humanize_key(status)} candidate={_short_hash(row.get('candidate_id'))} {_score_brief(row)}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "holdout_validation_skipped":
-        patch = row.get("patch_hash")
-        patch_text = f" patch={_short_hash(patch)}" if patch else ""
-        return "Holdout", f"skipped{patch_text} reason={_short_reason(row.get('reason'))}"
+        candidate = row.get("candidate_id")
+        candidate_text = f" candidate={_short_hash(candidate)}" if candidate else ""
+        return "Holdout", f"skipped{candidate_text} reason={_short_reason(row.get('reason'))}"
     if event == "case_batch_started":
         if int(row.get("fresh_count") or 0) <= 0:
             return "Evaluate", None
         return "Evaluate", (
             f"running {row.get('fresh_count')} fresh {row.get('split')} case(s) "
-            f"for patch={_short_hash(row.get('patch_hash'))} concurrency={row.get('concurrency')}"
+            f"for candidate={_short_hash(row.get('candidate_id'))} concurrency={row.get('concurrency')}"
         )
     if event == "case_batch_completed":
         return "Evaluate", None
@@ -392,8 +392,8 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         status = "promoted" if row.get("promoted") else "baseline kept"
         return (
             "Done",
-            f"{status}; selected={_short_hash(row.get('selected_patch_hash'))} "
-            f"accepted_dev={row.get('accepted_dev_patches')} holdout_validations={row.get('holdout_validations')} "
+            f"{status}; selected={_short_hash(row.get('selected_candidate_id'))} "
+            f"accepted_dev={row.get('accepted_dev_candidates')} holdout_validations={row.get('holdout_validations')} "
             f"reason={_short_reason(row.get('selection_reason'))}",
         )
     return event.upper()[:10] or "EVENT", None
@@ -704,7 +704,7 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--evals", help="Path to evals JSONL")
     parser.add_argument("--out", help="Output directory")
     parser.add_argument("--env-file", help="Path to .env with model provider API keys")
-    parser.add_argument("--dev-budget", type=int, help="Max dev patch evaluations after baseline")
+    parser.add_argument("--dev-budget", type=int, help="Max dev candidate evaluations after baseline")
     parser.add_argument("--holdout-budget", type=int, help="Holdout finalist validation budget")
     parser.add_argument("--mode", choices=["correctness", "cost", "latency"], help="Primary optimization objective")
     parser.add_argument("--allowed-models", help="Comma-separated model allowlist for model-config transforms")

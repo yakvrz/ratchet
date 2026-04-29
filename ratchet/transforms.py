@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ratchet.experiments import CANDIDATE_ROLES, mechanism_error_for_family
-from ratchet.results import Comparison, PatchSummary
+from ratchet.results import Comparison, CandidateSummary
 from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
 from ratchet.transform_program import TransformPatch, TransformProgram
 from ratchet.types import FailureDiagnosis, OptimizationObjective
@@ -161,7 +161,6 @@ class TransformContextKey:
             transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
         )
 
-    @classmethod
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TransformContextKey":
         existing = row.get("transform_context")
@@ -739,7 +738,7 @@ def transform_registry() -> dict[str, TransformFamily]:
     return dict(TRANSFORM_FAMILIES)
 
 
-def build_behavior_profile(summary: PatchSummary) -> BehaviorProfile:
+def build_behavior_profile(summary: CandidateSummary) -> BehaviorProfile:
     case_rows = summary._case_rows()
     costs = []
     latencies = []
@@ -804,11 +803,11 @@ def build_behavior_profile(summary: PatchSummary) -> BehaviorProfile:
 
 def build_search_hypothesis(
     *,
-    summary: PatchSummary,
+    summary: CandidateSummary,
     surface: SurfaceSpec,
     objective: OptimizationObjective,
     history: list[dict[str, Any]],
-    parent_patch_hash: str | None = None,
+    parent_candidate_id: str | None = None,
     diagnoses: list[FailureDiagnosis] | None = None,
     proposal_example_count: int = 0,
 ) -> SearchHypothesis:
@@ -818,7 +817,7 @@ def build_search_hypothesis(
     targets = surface_targets(surface)
     surface_kinds = {target.kind for target in targets}
     surface_ops = {op for target in targets for op in target.allowed_ops}
-    branch_history = select_branch_history(history, parent_patch_hash or summary.patch_hash)
+    branch_history = select_branch_history(history, parent_candidate_id or summary.candidate_id)
     diagnosis_signals = _diagnosis_signals(diagnoses or [])
     context_states: dict[str, TransformContextState] = {}
     for family in TRANSFORM_FAMILIES.values():
@@ -976,17 +975,17 @@ def validate_candidate_context(
     return None
 
 
-def select_branch_history(history: list[dict[str, Any]], parent_patch_hash: str | None) -> list[dict[str, Any]]:
-    if not parent_patch_hash:
+def select_branch_history(history: list[dict[str, Any]], parent_candidate_id: str | None) -> list[dict[str, Any]]:
+    if not parent_candidate_id:
         return list(history)
     producing_parent_by_child: dict[str, str] = {}
     for row in history:
-        child = row.get("patch_hash")
-        parent = row.get("parent_patch_hash")
+        child = row.get("candidate_id")
+        parent = row.get("parent_candidate_id")
         if row.get("accepted") and isinstance(child, str) and isinstance(parent, str):
             producing_parent_by_child[child] = parent
-    lineage = {parent_patch_hash}
-    cursor = parent_patch_hash
+    lineage = {parent_candidate_id}
+    cursor = parent_candidate_id
     while cursor in producing_parent_by_child:
         cursor = producing_parent_by_child[cursor]
         if cursor in lineage:
@@ -995,7 +994,7 @@ def select_branch_history(history: list[dict[str, Any]], parent_patch_hash: str 
     return [
         row
         for row in history
-        if row.get("patch_hash") in lineage or row.get("parent_patch_hash") == parent_patch_hash
+        if row.get("candidate_id") in lineage or row.get("parent_candidate_id") == parent_candidate_id
     ]
 
 
@@ -1163,10 +1162,10 @@ def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, d
             "best_cost_delta": min(cost_deltas) if cost_deltas else None,
             "best_latency_delta": min(latency_deltas) if latency_deltas else None,
             "invalid_reasons": dict(sorted(invalid_reasons.items())),
-            "patch_hashes": [
-                str(row.get("patch_hash"))
+            "candidate_ids": [
+                str(row.get("candidate_id"))
                 for row in evaluated_rows
-                if row.get("patch_hash")
+                if row.get("candidate_id")
             ][:8],
             "reason": reason,
         }
@@ -1556,7 +1555,7 @@ def _suitability_reason(family: str, evidence: list[str], suitability: float) ->
     return f"{family} is plausible because " + "; ".join(evidence) + "."
 
 
-def _target_slices(summary: PatchSummary) -> list[str]:
+def _target_slices(summary: CandidateSummary) -> list[str]:
     slices: list[str] = []
     for category, metrics in summary.category_metrics.items():
         count = int(metrics.get("count", 0))

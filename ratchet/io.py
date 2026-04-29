@@ -73,7 +73,7 @@ def transform_program_hash(program: TransformProgram) -> str:
     return short_digest(program.to_dict())
 
 
-def candidate_hash(candidate: CompiledCandidate | None) -> str:
+def compiled_candidate_id(candidate: CompiledCandidate | None) -> str:
     return short_digest(candidate.to_dict() if candidate is not None else {"candidate": "baseline"})
 
 

@@ -13,7 +13,7 @@ from ratchet.model_client import (
     error_response_diagnostics,
     response_diagnostics,
 )
-from ratchet.results import PatchSummary
+from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.types import FailureDiagnosis, OptimizationObjective
 
@@ -39,7 +39,7 @@ class FailureDiagnoser:
 
     def diagnose(
         self,
-        summary: PatchSummary,
+        summary: CandidateSummary,
         surface: SurfaceSpec,
         objective: OptimizationObjective | None = None,
     ) -> tuple[list[FailureDiagnosis], str]:
@@ -58,7 +58,7 @@ class FailureDiagnoser:
 
     def _llm_diagnoses(
         self,
-        summary: PatchSummary,
+        summary: CandidateSummary,
         surface: SurfaceSpec,
         failed_examples: list[dict[str, Any]],
         objective: OptimizationObjective,
@@ -67,7 +67,7 @@ class FailureDiagnoser:
             self._client = ResponsesModelClient(env_path=self.env_path)
         prompt = {
             "objective": objective.to_dict(),
-            "current_candidate": summary.patch.to_dict() if summary.patch is not None else None,
+            "current_candidate": summary.candidate.to_dict() if summary.candidate is not None else None,
             "behavior": {
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ratchet.profiling import runtime_reliability_diagnostics
-from ratchet.results import CaseEvaluation, PatchSummary
+from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
@@ -20,7 +20,7 @@ def _candidate() -> object:
     return TransformCompiler().compile_or_raise(program, surface_from_agent_spec(AgentSpec(name="sample", model="base")))
 
 
-def _summary(patch: object | None, *, passed: bool, invalid: bool, finish_reason: str = "stop") -> PatchSummary:
+def _summary(candidate: object | None, *, passed: bool, invalid: bool, finish_reason: str = "stop") -> CandidateSummary:
     evaluation = CaseEvaluation(
         case=EvalCase(id="case-1", split="dev", input="x"),
         record=RunRecord(
@@ -30,7 +30,7 @@ def _summary(patch: object | None, *, passed: bool, invalid: bool, finish_reason
         ),
         grade=GradeResult(score=1.0 if passed else 0.0, passed=passed, labels=[] if passed else ["invalid_output"]),
     )
-    return PatchSummary(patch_hash="candidate" if patch else "baseline", patch=patch, split="dev", evaluations=[evaluation])
+    return CandidateSummary(candidate_id="candidate" if candidate else "baseline", candidate=candidate, split="dev", evaluations=[evaluation])
 
 
 class ProfilingTests(unittest.TestCase):

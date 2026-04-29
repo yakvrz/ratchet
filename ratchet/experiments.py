@@ -4,7 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
-from ratchet.results import PatchSummary
+from ratchet.results import CandidateSummary
 from ratchet.types import FailureDiagnosis, OptimizationObjective
 
 
@@ -403,7 +403,7 @@ class MeasurementDecision:
 
 def build_task_theory(
     *,
-    summary: PatchSummary,
+    summary: CandidateSummary,
     diagnoses: list[FailureDiagnosis],
     objective: OptimizationObjective,
     proposal_example_bank: ProposalExampleBank | None = None,
@@ -462,7 +462,7 @@ def build_task_theory(
 
 def build_evidence_packet(
     *,
-    summary: PatchSummary,
+    summary: CandidateSummary,
     diagnoses: list[FailureDiagnosis],
     objective: OptimizationObjective,
     proposal_example_bank: ProposalExampleBank | None = None,

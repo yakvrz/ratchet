@@ -15,14 +15,14 @@ class IdeationBenchmarkTests(unittest.TestCase):
             (root / "run_manifest.json").write_text(
                 json.dumps(
                     {
-                        "selected_patch_hash": "patch-1",
+                        "selected_candidate_id": "patch-1",
                         "promoted": True,
-                        "finalist_statuses": [{"patch_hash": "patch-1", "status": "validated"}],
+                        "finalist_statuses": [{"candidate_id": "patch-1", "status": "validated"}],
                         "run_cost": {"total_cost_usd": 0.12, "optimizer_tokens": 1000},
                     }
                 )
             )
-            (root / "patch_metrics.json").write_text(
+            (root / "candidate_metrics.json").write_text(
                 json.dumps(
                     {
                         "baseline_holdout": {"behavioral": {"mean_score": 0.5}},
@@ -46,7 +46,7 @@ class IdeationBenchmarkTests(unittest.TestCase):
                 json.dumps(
                     {
                         "candidate": {"experiment_id": "intent-1"},
-                        "patch_hash": "patch-1",
+                        "candidate_id": "patch-1",
                         "transform_family": "prompt_rewrite",
                         "mechanism_class": "semantic_boundary_rewrite",
                         "accepted": True,

@@ -11,7 +11,7 @@ from ratchet.experiments import CandidateImplementation, ExperimentIntent, Exper
 from ratchet.grading import exact_text_grade, json_field_grade, numeric_tolerance_grade
 from ratchet.ideation_benchmark import IdeationAssessmentSpec, assess_ideation_run
 from ratchet.interactive import InteractionRecorder
-from ratchet.objectives import FinalGateResult, GatePredicate, final_gate_status, select_recommended_patch
+from ratchet.objectives import FinalGateResult, GatePredicate, final_gate_status, select_recommended_candidate
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.pricing import estimate_cost_usd
 from ratchet.proposals import CandidateImplementer
@@ -85,6 +85,6 @@ __all__ = [
     "json_field_grade",
     "load_adapter",
     "numeric_tolerance_grade",
-    "select_recommended_patch",
+    "select_recommended_candidate",
     "taubench_result_to_run_record",
 ]

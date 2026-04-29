@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ratchet.results import CaseEvaluation, PatchSummary
+from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
@@ -10,7 +10,7 @@ from ratchet.transforms import build_search_hypothesis
 from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
-def _summary(labels: list[list[str]]) -> PatchSummary:
+def _summary(labels: list[list[str]]) -> CandidateSummary:
     evaluations: list[CaseEvaluation] = []
     for index, case_labels in enumerate(labels, start=1):
         passed = not case_labels
@@ -31,7 +31,7 @@ def _summary(labels: list[list[str]]) -> PatchSummary:
                 grade=GradeResult(score=1.0 if passed else 0.0, passed=passed, labels=case_labels),
             )
         )
-    return PatchSummary(patch_hash="baseline", patch=None, split="dev", evaluations=evaluations)
+    return CandidateSummary(candidate_id="baseline", candidate=None, split="dev", evaluations=evaluations)
 
 
 class TransformLibraryTests(unittest.TestCase):

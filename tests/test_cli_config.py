@@ -250,7 +250,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 "elapsed_s": 125,
                 "frontier_status": "screened_out",
                 "transform_family": "targeted_few_shot",
-                "patch_hash": "abcdef123456",
+                "candidate_id": "abcdef123456",
                 "score_delta": 0.125,
                 "cost_delta": -0.002,
                 "latency_delta": 0.31,
@@ -261,7 +261,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
         )
         self.assertIsNotNone(candidate_line)
         self.assertIn("Candidate", candidate_line)
-        self.assertIn("patch=abcdef12", candidate_line)
+        self.assertIn("candidate=abcdef12", candidate_line)
         self.assertIn("score +0.125", candidate_line)
         self.assertIn("cost -$0.0020", candidate_line)
         self.assertIn("full_dev=no", candidate_line)
@@ -356,12 +356,12 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.run_cli("optimize", "--config", str(config_path))
             out_dir = root / "results" / "run"
             manifest = json.loads((out_dir / "run_manifest.json").read_text())
-            selected = json.loads((out_dir / "selected_patch.json").read_text())
+            selected = json.loads((out_dir / "selected_candidate.json").read_text())
             summary = (out_dir / "summary.html").read_text()
             report = (out_dir / "report.md").read_text()
-            self.assertIn("selected_patch_hash", manifest)
+            self.assertIn("selected_candidate_id", manifest)
             self.assertFalse(selected["promoted"])
-            exported_surface = json.loads((out_dir / "exported_patch" / "surface_spec.json").read_text())
+            exported_surface = json.loads((out_dir / "exported_candidate" / "surface_spec.json").read_text())
             self.assertEqual(exported_surface["agent_id"], "scaffolded-python-function-agent")
             self.assertIn("<h2>What Changed</h2>", summary)
             self.assertIn('src="plots/scorecard.svg"', summary)
@@ -654,7 +654,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
             config_path.write_text(config_path.read_text().replace("dev_budget = 8", "dev_budget = 0"))
             self.run_cli("optimize", "--config", str(config_path))
             out_dir = root / "results" / "run"
-            selected = json.loads((out_dir / "selected_patch.json").read_text())
+            selected = json.loads((out_dir / "selected_candidate.json").read_text())
             self.assertFalse(selected["promoted"])
 
 

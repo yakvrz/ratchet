@@ -41,16 +41,16 @@ class CaseEvaluation:
 
     def to_record(
         self,
-        patch_hash_value: str,
-        patch: CompiledCandidate | None,
+        candidate_id_value: str,
+        candidate: CompiledCandidate | None,
         *,
         cache_namespace: str,
     ) -> dict[str, Any]:
         return {
             "cache_namespace": cache_namespace,
-            "patch_hash": patch_hash_value,
+            "candidate_id": candidate_id_value,
             "sample_index": self.sample_index,
-            "candidate": patch.to_dict() if patch is not None else None,
+            "candidate": candidate.to_dict() if candidate is not None else None,
             "case_digest": case_digest(self.case),
             "case": self.case.to_dict(),
             "record": self.record.to_dict(),
@@ -69,9 +69,9 @@ class CaseEvaluation:
 
 
 @dataclass
-class PatchSummary:
-    patch_hash: str
-    patch: CompiledCandidate | None
+class CandidateSummary:
+    candidate_id: str
+    candidate: CompiledCandidate | None
     split: str
     evaluations: list[CaseEvaluation]
 
@@ -160,7 +160,7 @@ class PatchSummary:
 
     @property
     def operation_count(self) -> int:
-        return len(self.patch.program.patches) if self.patch is not None else 0
+        return len(self.candidate.program.patches) if self.candidate is not None else 0
 
     @property
     def failure_labels(self) -> dict[str, int]:
@@ -242,8 +242,8 @@ class PatchSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "patch_hash": self.patch_hash,
-            "candidate": self.patch.to_dict() if self.patch is not None else None,
+            "candidate_id": self.candidate_id,
+            "candidate": self.candidate.to_dict() if self.candidate is not None else None,
             "split": self.split,
             "case_count": self.case_count,
             "sample_count": self.sample_count,
@@ -360,16 +360,16 @@ class Comparison:
 
 @dataclass
 class RatchetResult:
-    baseline_patch: CompiledCandidate | None
-    selected_patch: CompiledCandidate | None
-    selected_patch_hash: str
+    baseline_candidate: CompiledCandidate | None
+    selected_candidate: CompiledCandidate | None
+    selected_candidate_id: str
     promoted: bool
-    baseline_dev: PatchSummary
-    baseline_holdout: PatchSummary
-    best_dev_patch: PatchSummary
-    selected_holdout: PatchSummary
-    accepted_dev_patches: list[PatchSummary]
-    holdout_patches: list[PatchSummary]
+    baseline_dev: CandidateSummary
+    baseline_holdout: CandidateSummary
+    best_dev_candidate: CandidateSummary
+    selected_holdout: CandidateSummary
+    accepted_dev_candidates: list[CandidateSummary]
+    holdout_candidates: list[CandidateSummary]
     pareto_frontier: list[dict[str, Any]]
     decision_log: list[dict[str, Any]]
     diagnoses: list[dict[str, Any]]
@@ -418,20 +418,20 @@ class ResultStore:
             stored_digest = payload.get("case_digest")
             if stored_digest != case_digest(evaluation.case):
                 continue
-            self.records[(payload["patch_hash"], stored_digest, evaluation.sample_index)] = evaluation
+            self.records[(payload["candidate_id"], stored_digest, evaluation.sample_index)] = evaluation
 
-    def get(self, patch_hash_value: str, case: EvalCase, sample_index: int = 0) -> CaseEvaluation | None:
-        return self.records.get((patch_hash_value, case_digest(case), sample_index))
+    def get(self, candidate_id_value: str, case: EvalCase, sample_index: int = 0) -> CaseEvaluation | None:
+        return self.records.get((candidate_id_value, case_digest(case), sample_index))
 
-    def put(self, patch_hash_value: str, patch: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
-        key = (patch_hash_value, case_digest(evaluation.case), evaluation.sample_index)
+    def put(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        key = (candidate_id_value, case_digest(evaluation.case), evaluation.sample_index)
         if key in self.records:
             return
         if not evaluation.record.metrics.error:
             self.records[key] = evaluation
         append_jsonl(
             self.case_results_path,
-            evaluation.to_record(patch_hash_value, patch, cache_namespace=self.cache_namespace),
+            evaluation.to_record(candidate_id_value, candidate, cache_namespace=self.cache_namespace),
         )
 
 

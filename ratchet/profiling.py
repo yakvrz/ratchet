@@ -7,7 +7,7 @@ from typing import Any
 
 from ratchet.evidence_ledger import confirmation_stability_result
 from ratchet.objectives import behavior_flip_summary, compare_summaries
-from ratchet.results import PatchSummary, RatchetResult
+from ratchet.results import CandidateSummary, RatchetResult
 from ratchet.transform_program import CompiledCandidate
 from ratchet.types import EvalCase, OptimizationObjective
 
@@ -16,13 +16,13 @@ LOW_OUTPUT_TOKEN_RATIO = 0.25
 
 
 def runtime_reliability_diagnostics(
-    reference: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
 ) -> dict[str, Any]:
     flip_summary = behavior_flip_summary(reference, candidate)
     fixed_ids = set(flip_summary["fixed_case_ids"])
-    runtime_only = _is_runtime_only_patch(candidate.patch)
-    runtime_involved = _touches_runtime(candidate.patch)
+    runtime_only = _is_runtime_only_patch(candidate.candidate)
+    runtime_involved = _touches_runtime(candidate.candidate)
     reference_by_id = _representative_evaluations(reference)
     candidate_by_id = _representative_evaluations(candidate)
     fixed_invalid: list[str] = []
@@ -53,7 +53,7 @@ def runtime_reliability_diagnostics(
                 finish_reasons[case_id].append(finish_reason)
     baseline_runtime_defect_fixed = bool(runtime_involved and ((fixed_invalid and low_token_fixed) or finish_reason_changed))
     return {
-        "patch_hash": candidate.patch_hash,
+        "candidate_id": candidate.candidate_id,
         "runtime_only": runtime_only,
         "runtime_involved": runtime_involved,
         "runtime_finding": baseline_runtime_defect_fixed,
@@ -64,7 +64,7 @@ def runtime_reliability_diagnostics(
         ),
         "baseline_runtime_defect_fixed": baseline_runtime_defect_fixed,
         "reason": (
-            "Baseline runtime defect fixed: runtime patch corrected invalid outputs where baseline runs ended far below the requested output cap."
+            "Baseline runtime defect fixed: runtime candidate corrected invalid outputs where baseline runs ended far below the requested output cap."
             if baseline_runtime_defect_fixed
             else "No runtime reliability suspicion detected."
         ),
@@ -77,8 +77,8 @@ def runtime_reliability_diagnostics(
 
 
 def confirmation_case_subset(
-    reference: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
     dev_cases: tuple[EvalCase, ...],
     *,
     stable_limit: int = 3,
@@ -109,10 +109,10 @@ def confirmation_case_subset(
 
 def confirmation_result(
     *,
-    reference: PatchSummary,
-    candidate: PatchSummary,
-    confirmation_reference: PatchSummary,
-    confirmation_candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
+    confirmation_reference: CandidateSummary,
+    confirmation_candidate: CandidateSummary,
     objective: OptimizationObjective | None = None,
 ) -> dict[str, Any]:
     objective = objective or OptimizationObjective()
@@ -124,7 +124,7 @@ def confirmation_result(
         objective=objective,
     )
     return {
-        "patch_hash": candidate.patch_hash,
+        "candidate_id": candidate.candidate_id,
         "diagnostic_class": stability["status"],
         **stability,
     }
@@ -172,11 +172,11 @@ def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) ->
     for summary in [
         result.baseline_dev,
         result.baseline_holdout,
-        *result.accepted_dev_patches,
-        *result.holdout_patches,
+        *result.accepted_dev_candidates,
+        *result.holdout_candidates,
     ]:
         for evaluation in summary.evaluations:
-            key = (summary.patch_hash, evaluation.case.id, evaluation.sample_index)
+            key = (summary.candidate_id, evaluation.case.id, evaluation.sample_index)
             if key in seen_evaluations:
                 continue
             seen_evaluations.add(key)
@@ -216,7 +216,7 @@ def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, An
             continue
         rows.append(
             {
-                "patch_hash": row.get("patch_hash"),
+                "candidate_id": row.get("candidate_id"),
                 "transform_instance": row.get("transform_instance"),
                 "rejection_reason": reason,
                 "comparison_to_parent": row.get("comparison_to_parent"),
@@ -227,7 +227,7 @@ def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, An
     return rows
 
 
-def _representative_evaluations(summary: PatchSummary) -> dict[str, Any]:
+def _representative_evaluations(summary: CandidateSummary) -> dict[str, Any]:
     rows = {}
     for case_id, evaluations, _, _, _ in summary._case_rows():
         rows[case_id] = next((item for item in evaluations if not item.grade.passed), evaluations[0])
@@ -339,8 +339,8 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
     for split_name, summaries in {
         "baseline_dev": [result.baseline_dev],
         "baseline_holdout": [result.baseline_holdout],
-        "accepted_dev": result.accepted_dev_patches,
-        "holdout": result.holdout_patches,
+        "accepted_dev": result.accepted_dev_candidates,
+        "holdout": result.holdout_candidates,
     }.items():
         for summary in summaries:
             for evaluation in summary.evaluations:
@@ -348,7 +348,7 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
                 rows.append(
                     {
                         "split_group": split_name,
-                        "patch_hash": summary.patch_hash,
+                        "candidate_id": summary.candidate_id,
                         "case_id": evaluation.case.id,
                         "latency_s": metrics.latency_s,
                         "total_tokens": metrics.total_tokens,
@@ -362,17 +362,17 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
 
 
 def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
-    summaries = [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_patches, *result.holdout_patches]
+    summaries = [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_candidates, *result.holdout_candidates]
     seen: set[tuple[str, str]] = set()
     rows = []
     for summary in summaries:
-        key = (summary.split, summary.patch_hash)
+        key = (summary.split, summary.candidate_id)
         if key in seen:
             continue
         seen.add(key)
         rows.append(
             {
-                "patch_hash": summary.patch_hash,
+                "candidate_id": summary.candidate_id,
                 "split": summary.split,
                 "case_count": summary.case_count,
                 "pass_count": summary.pass_count,
@@ -389,8 +389,8 @@ def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
 def _patch_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for split_name, baseline, summaries in [
-        ("dev", result.baseline_dev, result.accepted_dev_patches),
-        ("holdout", result.baseline_holdout, result.holdout_patches),
+        ("dev", result.baseline_dev, result.accepted_dev_candidates),
+        ("holdout", result.baseline_holdout, result.holdout_candidates),
     ]:
         for summary in summaries:
             if set(summary.grouped_evaluations) != set(baseline.grouped_evaluations):
@@ -398,7 +398,7 @@ def _patch_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
             comparison = compare_summaries(baseline, summary)
             rows.append(
                 {
-                    "patch_hash": summary.patch_hash,
+                    "candidate_id": summary.candidate_id,
                     "split": split_name,
                     "score_delta": comparison.score_delta,
                     "score_ci": comparison.score_ci,
@@ -452,7 +452,7 @@ def _optimizer_call_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _compact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return {
-        "patch_hash": metrics.get("patch_hash"),
+        "candidate_id": metrics.get("candidate_id"),
         "case_count": metrics.get("case_count"),
         "pass_count": metrics.get("pass_count"),
         "mean_score": metrics.get("mean_score"),

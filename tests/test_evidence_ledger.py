@@ -3,17 +3,17 @@ from __future__ import annotations
 import unittest
 
 from ratchet.evidence_ledger import build_evidence_summary, confirmation_stability_result
-from ratchet.results import CaseEvaluation, PatchSummary
+from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.types import DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 def summary(
-    patch_hash: str,
+    candidate_id: str,
     scores: list[float],
     *,
     invalid_indices: set[int] | None = None,
     finish_reason: str = "stop",
-) -> PatchSummary:
+) -> CandidateSummary:
     invalid_indices = invalid_indices or set()
     evaluations: list[CaseEvaluation] = []
     for index, score in enumerate(scores, start=1):
@@ -44,9 +44,9 @@ def summary(
                 ),
             )
         )
-    return PatchSummary(
-        patch_hash=patch_hash,
-        patch=None,
+    return CandidateSummary(
+        candidate_id=candidate_id,
+        candidate=None,
         split="dev",
         evaluations=evaluations,
     )

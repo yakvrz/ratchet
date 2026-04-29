@@ -94,7 +94,7 @@ class TransformPatch:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "TransformPatch":
         if not isinstance(payload, dict):
-            raise ValueError("transform patch must be an object")
+            raise ValueError("transform candidate must be an object")
         return cls(
             op=TransformOp.from_dict(payload),
             hook=str(payload["hook"]) if payload.get("hook") is not None else None,

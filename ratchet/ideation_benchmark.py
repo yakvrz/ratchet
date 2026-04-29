@@ -51,7 +51,7 @@ def assess_ideation_run(
     root = Path(run_dir)
     spec = spec or IdeationAssessmentSpec()
     manifest = _read_json(root / "run_manifest.json")
-    patch_metrics = _read_json(root / "patch_metrics.json")
+    candidate_metrics = _read_json(root / "candidate_metrics.json")
     ideation_metrics = _read_json(root / "ideation_metrics.json")
     proposals = _read_jsonl(root / "proposals.jsonl")
     task_theories = _read_jsonl(root / "task_theories.jsonl")
@@ -60,12 +60,12 @@ def assess_ideation_run(
     valid_rows = [row for row in candidate_rows if row.get("valid") is not False]
     evaluated_rows = [row for row in candidate_rows if "accepted" in row]
     full_dev_rows = [row for row in evaluated_rows if row.get("full_dev_evaluated")]
-    finalist_statuses = manifest.get("finalist_statuses") or patch_metrics.get("finalist_statuses") or []
-    holdout_hashes = {str(row.get("patch_hash")) for row in finalist_statuses if row.get("patch_hash")}
+    finalist_statuses = manifest.get("finalist_statuses") or candidate_metrics.get("finalist_statuses") or []
+    holdout_hashes = {str(row.get("candidate_id")) for row in finalist_statuses if row.get("candidate_id")}
     validated_hashes = {
-        str(row.get("patch_hash"))
+        str(row.get("candidate_id"))
         for row in finalist_statuses
-        if str(row.get("status") or "") == "validated" and row.get("patch_hash")
+        if str(row.get("status") or "") == "validated" and row.get("candidate_id")
     }
     candidate_mechanisms = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
     opportunity_mechanisms = _opportunity_mechanisms(task_theories)
@@ -73,19 +73,19 @@ def assess_ideation_run(
     pivotal_mechanisms = set(spec.pivotal_mechanisms)
     mechanisms_discovered = set(candidate_mechanisms)
     pivotal_candidate_hashes = {
-        str(row.get("patch_hash"))
+        str(row.get("candidate_id"))
         for row in valid_rows
-        if str(row.get("mechanism_class") or "") in pivotal_mechanisms and row.get("patch_hash")
+        if str(row.get("mechanism_class") or "") in pivotal_mechanisms and row.get("candidate_id")
     }
     best_dev_delta = max((_score_delta(row) for row in evaluated_rows), default=0.0)
-    holdout_delta = _holdout_delta(patch_metrics)
+    holdout_delta = _holdout_delta(candidate_metrics)
     valid_rate = float((ideation_metrics.get("implementer") or {}).get("valid_implementation_rate") or 0.0)
     checks = {
         "intent_relevance": not expected_mechanisms or bool(expected_mechanisms & set((ideation_metrics.get("planner") or {}).get("intent_mechanisms") or {})),
         "valid_implementation_rate": valid_rate >= spec.min_valid_implementation_rate,
         "pivotal_mechanism_discovered": not pivotal_mechanisms or bool(pivotal_candidate_hashes),
         "pivotal_reached_full_dev": not pivotal_mechanisms
-        or bool(pivotal_candidate_hashes & {str(row.get("patch_hash")) for row in full_dev_rows}),
+        or bool(pivotal_candidate_hashes & {str(row.get("candidate_id")) for row in full_dev_rows}),
         "pivotal_reached_holdout": not pivotal_mechanisms or bool(pivotal_candidate_hashes & holdout_hashes),
         "pivotal_validated": not pivotal_mechanisms or bool(pivotal_candidate_hashes & validated_hashes),
         "holdout_frontier_quality": spec.min_holdout_score_delta is None or holdout_delta >= spec.min_holdout_score_delta,
@@ -93,7 +93,7 @@ def assess_ideation_run(
     return {
         "task_id": spec.task_id,
         "run_dir": str(root),
-        "selected_patch_hash": manifest.get("selected_patch_hash"),
+        "selected_candidate_id": manifest.get("selected_candidate_id"),
         "promoted": bool(manifest.get("promoted")),
         "checks": checks,
         "summary": {
@@ -115,7 +115,7 @@ def assess_ideation_run(
             "missing_expected": sorted(expected_mechanisms - mechanisms_discovered),
             "pivotal": sorted(pivotal_mechanisms),
         },
-        "cost": (manifest.get("run_cost") or patch_metrics.get("run_cost") or {}),
+        "cost": (manifest.get("run_cost") or candidate_metrics.get("run_cost") or {}),
         "ideation_metrics": ideation_metrics,
     }
 
@@ -180,9 +180,9 @@ def _score_delta(row: dict[str, Any]) -> float:
         return 0.0
 
 
-def _holdout_delta(patch_metrics: dict[str, Any]) -> float:
-    baseline = ((patch_metrics.get("baseline_holdout") or {}).get("behavioral") or {}).get("mean_score")
-    selected = ((patch_metrics.get("selected_holdout") or {}).get("behavioral") or {}).get("mean_score")
+def _holdout_delta(candidate_metrics: dict[str, Any]) -> float:
+    baseline = ((candidate_metrics.get("baseline_holdout") or {}).get("behavioral") or {}).get("mean_score")
+    selected = ((candidate_metrics.get("selected_holdout") or {}).get("behavioral") or {}).get("mean_score")
     try:
         return float(selected) - float(baseline)
     except (TypeError, ValueError):

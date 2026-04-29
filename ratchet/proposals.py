@@ -26,7 +26,7 @@ from ratchet.model_client import (
     error_response_diagnostics,
     response_diagnostics,
 )
-from ratchet.results import PatchSummary
+from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformPatch, TransformProgram
@@ -48,14 +48,14 @@ PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
     "affordance_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
     "research questions, mechanisms, target slices, controls, and measurements. Treat research_theory "
-    "as the causal context for implementation; opportunities are not patch recipes. Each candidate must include "
+    "as the causal context for implementation; opportunities are not candidate recipes. Each candidate must include "
     "a typed transform program under candidate.program and applications[] citing relevant optimization_affordances. "
-    "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy patch operations. "
-    "Every add_context_section patch needs section and content; every set_model_config patch needs field and value; every define_state patch needs field, type, and initial. Use selection.source_case_ids "
+    "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy candidate operations. "
+    "Every add_context_section candidate needs section and content; every set_model_config candidate needs field and value; every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
     "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family, mechanism, "
     "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
     "mechanism_class, affordance_ids, patch, or intervention fields. "
-    "Do not copy diagnostic_only_examples into patch values; only proposal-safe train examples may be copied, "
+    "Do not copy diagnostic_only_examples into candidate values; only proposal-safe train examples may be copied, "
     "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
     "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
     "Return empty experiments only when no safe evaluable candidate exists."
@@ -115,7 +115,7 @@ class CandidateImplementer:
 
     def propose(
         self,
-        summary: PatchSummary,
+        summary: CandidateSummary,
         surface: SurfaceSpec,
         *,
         objective: OptimizationObjective,
@@ -262,7 +262,7 @@ class CandidateImplementer:
                         "proposal_group": proposal_group,
                         "variant_rank": variant_rank,
                         "proposal_program_hash": transform_program_hash(candidate.program),
-                        "patch_hash": digest,
+                        "candidate_id": digest,
                         "proposal": candidate.program.to_dict(),
                         "candidate": candidate.to_dict(),
                         "applications": [application.to_dict() for application in candidate.applications],
@@ -308,7 +308,7 @@ class CandidateImplementer:
 
     def _llm_proposals(
         self,
-        summary: PatchSummary,
+        summary: CandidateSummary,
         surface: SurfaceSpec,
         *,
         objective: OptimizationObjective,
@@ -362,7 +362,7 @@ class CandidateImplementer:
                     "and constraint risk."
                 ),
             },
-            "current_candidate": summary.patch.to_dict() if summary.patch is not None else None,
+            "current_candidate": summary.candidate.to_dict() if summary.candidate is not None else None,
             "behavior": {
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,
@@ -1338,13 +1338,13 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
     for row in history[-limit:]:
         comparison = row.get("comparison_to_parent") or {}
         metrics = row.get("metrics") or {}
-        patch = row.get("proposal") or {}
+        candidate = row.get("proposal") or {}
         rows.append(
             {
                 "iteration": row.get("iteration"),
                 "attempt": row.get("attempt"),
-                "parent_patch_hash": row.get("parent_patch_hash"),
-                "patch_hash": row.get("patch_hash"),
+                "parent_candidate_id": row.get("parent_candidate_id"),
+                "candidate_id": row.get("candidate_id"),
             "transform_family": row.get("transform_family"),
             "mechanism_class": row.get("mechanism_class"),
             "experiment_id": row.get("experiment_id"),
