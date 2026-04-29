@@ -2515,6 +2515,19 @@ def _research_state_packet(
             "dev_budget": dev_budget,
             "remaining_dev_budget": max(0, dev_budget - dev_evaluations_used),
         },
+        "measurement_policy": {
+            "small_dev": "Triage only; use it to decide whether more measurement is worth buying, not as final ranking.",
+            "full_dev": "First selection-quality comparison; preserve mechanism-distinct high-signal candidates when budget permits.",
+            "candidate_cost": (
+                "Candidate cost_delta and latency_delta describe the deployed policy tradeoff. "
+                "They are not the same as the cost of one more measurement. Expensive candidates may still be worth "
+                "measuring when they test capability, efficiency, or quality-frontier hypotheses."
+            ),
+            "quality_frontier": (
+                "For correctness objectives, a high-quality candidate that violates cost or latency constraints can still "
+                "be informative as a quality frontier. Do not skip it solely because promotion may later fail."
+            ),
+        },
         "reference": {
             "patch_hash": reference.patch_hash,
             "score": reference.mean_score,
