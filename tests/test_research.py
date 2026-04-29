@@ -117,6 +117,59 @@ class ResearchRoleTests(unittest.TestCase):
                 max_select=1,
             )
 
+    def test_measurement_selector_repairs_invalid_json_syntax(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient()
+
+        decision = selector.select(
+            stage="full_dev",
+            state={
+                "evidence_ledger": {
+                    "candidate_evidence": [
+                        {"candidate_id": "a"},
+                        {"candidate_id": "b"},
+                    ]
+                }
+            },
+            candidate_ids=["a", "b"],
+            max_select=1,
+        )
+
+        self.assertEqual(decision.selected_candidate_ids, ["a"])
+        self.assertEqual(selector._client.calls, 2)
+        self.assertTrue(selector.last_call_diagnostics["repair_attempted"])
+
+    def test_measurement_selector_fills_missing_skip_reasons(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient(
+            [
+                (
+                    '{"selected_candidate_ids":["a"],"rationale":"pick a",'
+                    '"expected_information":"info","risks":"none",'
+                    '"skipped_candidate_reasons":{}}'
+                )
+            ]
+        )
+
+        decision = selector.select(
+            stage="full_dev",
+            state={
+                "evidence_ledger": {
+                    "candidate_evidence": [
+                        {"candidate_id": "a"},
+                        {"candidate_id": "b"},
+                    ]
+                }
+            },
+            candidate_ids=["a", "b"],
+            max_select=1,
+        )
+
+        self.assertEqual(
+            decision.skipped_candidate_reasons["b"],
+            "not selected by measurement selector",
+        )
+
     def test_measurement_selector_requires_evidence_ledger(self) -> None:
         selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
         selector._client = _RepairClient(

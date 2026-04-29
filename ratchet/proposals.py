@@ -168,15 +168,8 @@ class CandidateImplementer:
         valid: list[CandidateProposal] = []
         budget_valid: list[CandidateProposal] = []
         local_seen: set[str] = set()
-        family_quotas = _family_budget_quotas(
-            search_hypothesis.budget_allocation,
-            proposal_budget=proposal_budget,
-        )
-        family_counts: Counter[str] = Counter()
-        family_budget_groups: set[tuple[str, str]] = set()
-        scheduled_group_indices: dict[str, int] = {}
-        scheduled_group_flags: dict[str, bool] = {}
         group_count = 0
+        group_indices: dict[str, int] = {}
         candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows: list[dict[str, Any]] = []
         invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
@@ -237,31 +230,11 @@ class CandidateImplementer:
             group_valid.append((candidate, materialization, digest))
             if not group_valid:
                 continue
-            group_family = group_valid[0][0].transform_family
             budget_group = _candidate_budget_group(group_valid[0][0])
-            family_budget_group = (group_family, budget_group)
-            raw_quota = family_quotas.get(group_family)
-            if raw_quota is None:
-                quota = proposal_budget if not family_quotas else 0
-            else:
-                quota = max(1, raw_quota)
-            if family_budget_group not in family_budget_groups and family_counts[group_family] >= quota:
-                reason = f"transform family budget exceeded for {group_family!r} (quota {quota})"
-                invalid_reasons[reason] += len(group_valid)
-                for candidate, variant_materialization, _digest in group_valid:
-                    invalid_candidate_rows.append(
-                        _invalid_candidate_row(candidate, reason, materialization=variant_materialization)
-                    )
-                continue
-            if family_budget_group not in family_budget_groups:
-                family_counts[group_family] += 1
-                family_budget_groups.add(family_budget_group)
-            if budget_group not in scheduled_group_indices:
+            if budget_group not in group_indices:
                 group_count += 1
-                scheduled_group_indices[budget_group] = group_count
-                scheduled_group_flags[budget_group] = group_count <= proposal_budget
-            proposal_group = scheduled_group_indices[budget_group]
-            group_scheduled = scheduled_group_flags[budget_group]
+                group_indices[budget_group] = group_count
+            proposal_group = group_indices[budget_group]
             for variant_rank, (candidate, variant_materialization, digest) in enumerate(group_valid, start=1):
                 valid.append(candidate)
                 budget_valid.append(candidate)
@@ -286,27 +259,14 @@ class CandidateImplementer:
                         "hypothesis": candidate.hypothesis,
                         "evaluation_plan": candidate.evaluation_plan,
                         "materialization": variant_materialization,
-                        "scheduled": group_scheduled,
-                        "family_quota": quota,
-                        "family_rank": family_counts[candidate.transform_family],
                     }
                 )
-        returned_hashes = {
-            row["patch_hash"]
-            for row in candidate_rows
-            if row.get("scheduled") and isinstance(row.get("patch_hash"), str)
-        }
-        returned = [
-            candidate
-            for candidate in budget_valid
-            if patch_hash(compose_patches(summary.patch, candidate.patch)) in returned_hashes
-        ]
         self.last_candidate_rows = candidate_rows
         self.last_invalid_candidate_rows = invalid_candidate_rows
         self.last_stats = ProposalStats(
             raw_count=self._last_raw_candidate_count,
             valid_count=len(budget_valid),
-            returned_count=len(returned),
+            returned_count=len(budget_valid),
             invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate patch"),
             duplicate_count=invalid_reasons.get("duplicate patch", 0),
             error=None,
@@ -326,7 +286,7 @@ class CandidateImplementer:
             f"returned={self.last_stats.returned_count}, invalid={self.last_stats.invalid_count}, "
             f"duplicate={self.last_stats.duplicate_count}."
         )
-        return returned, " ".join(analysis_parts)
+        return budget_valid, " ".join(analysis_parts)
 
     def _llm_proposals(
         self,
@@ -1248,7 +1208,6 @@ def _invalid_candidate_row(
         "hypothesis": candidate.hypothesis,
         "evaluation_plan": candidate.evaluation_plan,
         "materialization": materialization or {},
-        "scheduled": False,
         "valid": False,
         "invalid_reason": reason,
     }
@@ -1267,40 +1226,9 @@ def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any
         "hypothesis": "",
         "evaluation_plan": "",
         "materialization": {},
-        "scheduled": False,
         "valid": False,
         "invalid_reason": reason,
     }
-
-
-def _family_budget_quotas(
-    budget_allocation: dict[str, float],
-    *,
-    proposal_budget: int,
-) -> dict[str, int]:
-    if proposal_budget <= 0:
-        return {family: 0 for family in budget_allocation}
-    positive = {
-        family: max(0.0, float(share))
-        for family, share in budget_allocation.items()
-        if float(share) > 0.0
-    }
-    if not positive:
-        return {}
-    total = sum(positive.values())
-    scaled = {
-        family: (share / total) * proposal_budget
-        for family, share in positive.items()
-    }
-    quotas = {family: int(value) for family, value in scaled.items()}
-    remaining = proposal_budget - sum(quotas.values())
-    ranked_remainders = sorted(
-        scaled.items(),
-        key=lambda item: (-(item[1] - int(item[1])), item[0]),
-    )
-    for family, _ in ranked_remainders[:remaining]:
-        quotas[family] += 1
-    return quotas
 
 
 def _candidate_budget_group(candidate: CandidateProposal) -> str:

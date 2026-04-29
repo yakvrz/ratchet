@@ -6,7 +6,9 @@ import unittest
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentIntent
+from ratchet.experiments import ExperimentIntent, build_task_theory
+from ratchet.affordances import generate_optimization_affordances
+from ratchet.optimizer import _task_theory_with_affordance_opportunities
 from ratchet.proposals import CandidateImplementer, prompt_size_profile
 from ratchet.results import PatchSummary, CaseEvaluation
 from ratchet.surface import SurfaceGenerator
@@ -430,6 +432,44 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(diagnoses[0].category, "prompt_ambiguity")
         self.assertIn("instructions.system_prompt", diagnoses[0].target_names)
 
+    def test_task_theory_exposes_model_capability_when_model_affordance_can_test_residual_failures(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="small",
+            model_options=["small", "large"],
+            instructions={"system_prompt": "Classify."},
+            output_contract="Return text.",
+        )
+        objective = OptimizationObjective(
+            constraints=OptimizationConstraints(allowed_edits=["instruction", "model"])
+        )
+        surface = SurfaceGenerator().generate(spec, objective)
+        summary = make_labeled_summary("baseline", [["wrong_label"], [], ["wrong_label"], []])
+        task_theory = build_task_theory(
+            summary=summary,
+            diagnoses=[],
+            objective=objective,
+        )
+        affordances = generate_optimization_affordances(
+            surface,
+            objective=objective,
+            active_families=["prompt_rewrite", "model_substitution"],
+            evidence={"bottleneck_class": task_theory.bottleneck_class},
+        )
+
+        enriched = _task_theory_with_affordance_opportunities(
+            task_theory=task_theory,
+            affordances=affordances,
+            current_dev=summary,
+            proposals_log=[],
+        )
+
+        mechanisms = [
+            row.get("mechanism_class")
+            for row in enriched["experiment_opportunities"]
+        ]
+        self.assertIn("model_capability_probe", mechanisms)
+
     def test_diagnoser_json_failure_is_fatal(self) -> None:
         spec = AgentSpec(
             name="sample",
@@ -564,18 +604,14 @@ class GeneratedSurfaceTests(unittest.TestCase):
             proposal_budget=1,
         )
 
-        self.assertEqual(len(proposals), 1)
+        self.assertEqual(len(proposals), 3)
         self.assertEqual(proposals[0].patch.operations[0].op, "change_model")
         self.assertEqual(proposals[0].transform_family, "model_substitution")
         self.assertEqual(engine.last_stats.valid_count, 3)
-        self.assertEqual(engine.last_stats.returned_count, 1)
+        self.assertEqual(engine.last_stats.returned_count, 3)
         self.assertEqual(len(engine.last_candidate_rows), 3)
-        self.assertEqual(
-            [row["scheduled"] for row in engine.last_candidate_rows],
-            [True, False, False],
-        )
 
-    def test_candidate_implementer_allows_same_group_arms_within_family_budget(self) -> None:
+    def test_candidate_implementer_preserves_same_group_arms(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -649,11 +685,9 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(engine.last_stats.valid_count, 3)
         self.assertEqual(engine.last_stats.returned_count, 3)
         self.assertEqual(len(engine.last_candidate_rows), 3)
-        self.assertFalse(
-            any("transform family budget exceeded" in reason for reason in (engine.last_stats.invalid_reasons or {}))
-        )
+        self.assertFalse(engine.last_stats.invalid_reasons)
 
-    def test_candidate_implementer_constrains_distinct_family_budget_groups(self) -> None:
+    def test_candidate_implementer_preserves_distinct_family_budget_groups(self) -> None:
         spec = AgentSpec(
             name="sample",
             model="large",
@@ -711,15 +745,10 @@ class GeneratedSurfaceTests(unittest.TestCase):
             proposal_budget=1,
         )
 
-        self.assertEqual(len(proposals), 1)
-        self.assertEqual(engine.last_stats.valid_count, 1)
-        self.assertTrue(
-            any(
-                row["transform_family"] == "prompt_rewrite"
-                and "transform family budget exceeded" in row["invalid_reason"]
-                for row in engine.last_invalid_candidate_rows
-            )
-        )
+        self.assertEqual(len(proposals), 2)
+        self.assertEqual(engine.last_stats.valid_count, 2)
+        self.assertEqual(engine.last_stats.returned_count, 2)
+        self.assertFalse(engine.last_invalid_candidate_rows)
 
     def test_candidate_implementer_accepts_categorical_runtime_patch(self) -> None:
         spec = AgentSpec(
@@ -985,11 +1014,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         self.assertEqual(proposals[0].candidate_role, "atomic")
         self.assertEqual(engine.last_stats.valid_count, 1)
         self.assertEqual(engine.last_stats.returned_count, 1)
-        self.assertNotIn(
-            "transform family budget exceeded for 'targeted_few_shot' (quota 1)",
-            engine.last_stats.invalid_reasons or {},
-        )
-        self.assertEqual([row["scheduled"] for row in engine.last_candidate_rows], [True])
+        self.assertFalse(engine.last_stats.invalid_reasons)
         self.assertTrue(engine.last_candidate_rows[0]["materialization"]["materialized"])
 
     def test_targeted_few_shot_rejects_inline_examples_and_unknown_ids(self) -> None:

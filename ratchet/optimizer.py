@@ -1586,6 +1586,12 @@ class RatchetOptimizer:
         proposal_retry: bool = False,
     ) -> list[ExperimentIntent]:
         attempt = 2 if proposal_retry else 1
+        task_theory_payload = _task_theory_with_affordance_opportunities(
+            task_theory=task_theory,
+            affordances=affordances,
+            current_dev=current_dev,
+            proposals_log=proposals_log,
+        )
         state = ResearchState(
             objective=self.objective.to_dict(),
             budget={
@@ -1603,7 +1609,7 @@ class RatchetOptimizer:
                 "cost_usd": current_dev.mean_cost_usd,
                 "latency_s": current_dev.median_latency_s,
             },
-            task_theory=task_theory.to_dict(),
+            task_theory=task_theory_payload,
             behavior_profile=search_hypothesis.profile.to_dict(),
             affordances=[affordance.to_dict() for affordance in affordances],
             prior_experiment_outcomes=_compact_prior_stage_results(proposals_log, stage=None, limit=8),
@@ -2788,6 +2794,92 @@ def _baseline_stability_from_evidence(evidence_ledger: dict[str, Any]) -> dict[s
         "instability_counts": dict(instability_counts),
         "requires_runtime_repeat": bool(instability_counts.get("runtime_repeat_required")),
     }
+
+
+def _task_theory_with_affordance_opportunities(
+    *,
+    task_theory: TaskTheory,
+    affordances: list[OptimizationAffordance],
+    current_dev: PatchSummary,
+    proposals_log: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = task_theory.to_dict()
+    opportunities = list(payload.get("experiment_opportunities") or [])
+    existing_mechanisms = {
+        str(item.get("mechanism_class"))
+        for item in opportunities
+        if isinstance(item, dict) and item.get("mechanism_class")
+    }
+    capability_affordances = [
+        affordance
+        for affordance in affordances
+        if affordance.family == "model_substitution"
+        and affordance.mechanism == "model_capability_probe"
+    ]
+    if (
+        capability_affordances
+        and "model_capability_probe" not in existing_mechanisms
+        and current_dev.pass_count < current_dev.case_count
+        and _residual_quality_signal_remains(task_theory, proposals_log, current_dev.patch_hash)
+    ):
+        opportunities.insert(
+            _capability_probe_insert_index(opportunities),
+            {
+                "mechanism_class": "model_capability_probe",
+                "target_slices": ["global", "failed_cases"],
+                "candidate_roles": ["atomic", "control"],
+                "measurements": ["score_delta", "fixed_case_ids", "regressed_case_ids", "cost_delta", "latency_delta"],
+                "affordance_ids": [affordance.affordance_id for affordance in capability_affordances[:3]],
+                "rationale": (
+                    "Residual correctness failures remain and model-choice affordances are available; "
+                    "test whether failures are capability-limited rather than instruction/example-limited."
+                ),
+                "disconfirming_result": "A stronger allowed model does not fix residual failures or causes regressions/cost that dominate the quality gain.",
+            },
+        )
+        payload["evidence"] = [
+            *list(payload.get("evidence") or []),
+            "model capability affordance available for residual correctness failures",
+        ]
+    payload["experiment_opportunities"] = opportunities[:8]
+    return payload
+
+
+def _capability_probe_insert_index(opportunities: list[dict[str, Any]]) -> int:
+    for index, row in enumerate(opportunities):
+        if not isinstance(row, dict):
+            continue
+        if row.get("mechanism_class") in {"representative_examples", "contrastive_examples", "efficiency_probe"}:
+            return index
+    return len(opportunities)
+
+
+def _residual_quality_signal_remains(
+    task_theory: TaskTheory,
+    proposals_log: list[dict[str, Any]],
+    parent_patch_hash: str,
+) -> bool:
+    if task_theory.bottleneck_class in {"runtime_or_output_defect", "output_contract", "no_observed_failures"}:
+        return False
+    branch_rows = [
+        row
+        for row in proposals_log
+        if row.get("parent_patch_hash") == parent_patch_hash and "accepted" in row
+    ]
+    if not branch_rows:
+        return True
+    local_mechanism_rows = [
+        row
+        for row in branch_rows
+        if row.get("mechanism_class") in {
+            "semantic_boundary_rewrite",
+            "representative_examples",
+            "contrastive_examples",
+        }
+    ]
+    if not local_mechanism_rows:
+        return True
+    return any(not row.get("accepted") for row in local_mechanism_rows[-4:])
 
 
 def _has_selectable_frontier_parent(frontier_states: dict[str, FrontierParentState]) -> bool:

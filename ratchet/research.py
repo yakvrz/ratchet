@@ -10,6 +10,7 @@ from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, MeasurementDe
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
+    combine_response_diagnostics,
     error_response_diagnostics,
     response_diagnostics,
 )
@@ -41,7 +42,9 @@ class ResearchPlanner:
             "instruction": (
                 "Return experiment_intents only. Do not write patches, candidate IDs, or measurement selections. "
                 "Each intent must choose mechanism_class from the listed affordances and cite concrete affordance_ids "
-                "that a later implementer may use."
+                "that a later implementer may use. Treat task_theory experiment opportunities and high-suitability "
+                "affordances as the research surface; preserve mechanism-distinct questions when residual failures "
+                "could plausibly be instruction/example-limited or model-capability-limited."
             ),
             "state": state.to_dict(),
         }
@@ -131,8 +134,46 @@ class ResearchPlanner:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            return extract_json_object(response.output_text)
+            try:
+                return extract_json_object(response.output_text)
+            except Exception as parse_exc:
+                primary_diagnostics = self.last_call_diagnostics or {}
+                repair_started_at = time.perf_counter()
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous research-planner response was invalid JSON. "
+                        "Return only a valid JSON object matching the same schema. "
+                        "Preserve the intended experiment_intents; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:9000]}"
+                    ),
+                    max_output_tokens=max_output_tokens,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="research_planner",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                try:
+                    return extract_json_object(repair_response.output_text)
+                except Exception as repair_exc:
+                    self.last_call_diagnostics = {
+                        **self.last_call_diagnostics,
+                        "repair_error": str(repair_exc),
+                    }
+                    raise OptimizerModelError(
+                        f"Research planner returned invalid JSON: {parse_exc}; repair failed: {repair_exc}"
+                    ) from repair_exc
         except Exception as exc:
+            if isinstance(exc, OptimizerModelError):
+                raise
             self.last_call_diagnostics = {
                 "component": "research_planner",
                 "prompt_chars": len(prompt_input),
@@ -241,8 +282,46 @@ class MeasurementSelector:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            payload = extract_json_object(response.output_text)
+            try:
+                payload = extract_json_object(response.output_text)
+            except Exception as parse_exc:
+                primary_diagnostics = self.last_call_diagnostics or {}
+                repair_started_at = time.perf_counter()
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous measurement-selector response was invalid JSON. "
+                        "Return only a valid JSON object matching the same schema. "
+                        "Preserve the selected_candidate_ids and skipped_candidate_reasons where possible; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:9000]}"
+                    ),
+                    max_output_tokens=MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="measurement_selector",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                try:
+                    payload = extract_json_object(repair_response.output_text)
+                except Exception as repair_exc:
+                    self.last_call_diagnostics = {
+                        **self.last_call_diagnostics,
+                        "repair_error": str(repair_exc),
+                    }
+                    raise OptimizerModelError(
+                        f"Measurement selector returned invalid JSON: {parse_exc}; repair failed: {repair_exc}"
+                    ) from repair_exc
         except Exception as exc:
+            if isinstance(exc, OptimizerModelError):
+                raise
             self.last_call_diagnostics = {
                 "component": "measurement_selector",
                 "prompt_chars": len(prompt_input),
@@ -260,6 +339,7 @@ class MeasurementSelector:
             candidate_ids=candidate_ids,
             max_select=max_select,
         )
+        decision = _with_default_skip_reasons(decision, candidate_ids=candidate_ids)
         return decision
 
 
@@ -336,12 +416,26 @@ def _validate_measurement_decision(
         raise OptimizerModelError(
             f"Measurement selector selected {len(selected)} candidates, above max_select={max_select}"
         )
-    missing_reasons = sorted(candidate_id for candidate_id in allowed - set(selected) if not decision.skipped_candidate_reasons.get(candidate_id))
-    if missing_reasons:
-        raise OptimizerModelError(
-            "Measurement selector omitted skipped_candidate_reasons for "
-            f"{missing_reasons}"
-        )
+
+
+def _with_default_skip_reasons(
+    decision: MeasurementDecision,
+    *,
+    candidate_ids: list[str],
+) -> MeasurementDecision:
+    skipped = dict(decision.skipped_candidate_reasons)
+    selected = set(decision.selected_candidate_ids)
+    for candidate_id in candidate_ids:
+        if candidate_id not in selected and not skipped.get(candidate_id):
+            skipped[candidate_id] = "not selected by measurement selector"
+    return MeasurementDecision(
+        stage=decision.stage,
+        selected_candidate_ids=list(decision.selected_candidate_ids),
+        rationale=decision.rationale,
+        expected_information=decision.expected_information,
+        risks=decision.risks,
+        skipped_candidate_reasons=skipped,
+    )
 
 
 @dataclass(frozen=True)
