@@ -10,13 +10,14 @@ from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, MeasurementDe
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
+    combine_response_diagnostics,
     error_response_diagnostics,
     response_diagnostics,
 )
 
 
 RESEARCH_PLANNER_MAX_OUTPUT_TOKENS = 3500
-MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS = 2200
+MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS = 3000
 
 
 class ResearchPlanner:
@@ -41,7 +42,9 @@ class ResearchPlanner:
             "instruction": (
                 "Return experiment_intents only. Do not write patches, candidate IDs, or measurement selections. "
                 "Each intent must choose mechanism_class from the listed affordances and cite concrete affordance_ids "
-                "that a later implementer may use."
+                "that a later implementer may use. Treat task_theory experiment opportunities and high-suitability "
+                "affordances as the research surface; preserve mechanism-distinct questions when residual failures "
+                "could plausibly be instruction/example-limited or model-capability-limited."
             ),
             "state": state.to_dict(),
         }
@@ -77,11 +80,6 @@ class ResearchPlanner:
             for affordance in state.affordances
             if affordance.get("affordance_id")
         }
-        active_families = {
-            str(affordance.get("transform_family"))
-            for affordance in state.affordances
-            if affordance.get("transform_family")
-        }
         intents: list[ExperimentIntent] = []
         for index, raw_intent in enumerate(raw_intents, start=1):
             if not isinstance(raw_intent, dict):
@@ -94,11 +92,6 @@ class ResearchPlanner:
             if unknown_affordances:
                 raise OptimizerModelError(
                     f"Research planner intent {intent.intent_id!r} used unknown affordance_ids: {unknown_affordances}"
-                )
-            unknown_families = sorted(set(intent.allowed_families) - active_families)
-            if unknown_families:
-                raise OptimizerModelError(
-                    f"Research planner intent {intent.intent_id!r} used unknown allowed_families: {unknown_families}"
                 )
             intents.append(intent)
         return intents
@@ -131,8 +124,46 @@ class ResearchPlanner:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            return extract_json_object(response.output_text)
+            try:
+                return extract_json_object(response.output_text)
+            except Exception as parse_exc:
+                primary_diagnostics = self.last_call_diagnostics or {}
+                repair_started_at = time.perf_counter()
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous research-planner response was invalid JSON. "
+                        "Return only a valid JSON object matching the same schema. "
+                        "Preserve the intended experiment_intents; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:9000]}"
+                    ),
+                    max_output_tokens=max_output_tokens,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="research_planner",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                try:
+                    return extract_json_object(repair_response.output_text)
+                except Exception as repair_exc:
+                    self.last_call_diagnostics = {
+                        **self.last_call_diagnostics,
+                        "repair_error": str(repair_exc),
+                    }
+                    raise OptimizerModelError(
+                        f"Research planner returned invalid JSON: {parse_exc}; repair failed: {repair_exc}"
+                    ) from repair_exc
         except Exception as exc:
+            if isinstance(exc, OptimizerModelError):
+                raise
             self.last_call_diagnostics = {
                 "component": "research_planner",
                 "prompt_chars": len(prompt_input),
@@ -176,7 +207,13 @@ class MeasurementSelector:
             "instruction": (
                 "Select which already-valid candidates should be measured next. "
                 "Do not create candidates, alter patches, or revise experiment intents. "
-                "Base the decision on observed stage metrics and expected information value."
+                "Use evidence_ledger.candidate_evidence as the decision surface. "
+                "Small-dev evidence is triage evidence, not a final ranking; preserve mechanism-distinct "
+                "candidates when evidence is close or noisy. Base the decision on evidence confidence, "
+                "mechanism diversity, baseline stability, remaining measurement budget, and expected information "
+                "value per measurement dollar. Distinguish the cost of measuring a candidate from the candidate's "
+                "deployed cost/latency tradeoff; high-cost candidates can still deserve measurement when they test "
+                "a capability, efficiency, or quality-frontier question."
             ),
             "stage": stage,
             "candidate_ids": candidate_ids,
@@ -214,6 +251,7 @@ class MeasurementSelector:
                 },
             }
         }
+        _validate_selector_state_has_evidence(state=state, candidate_ids=candidate_ids)
         prompt_input = (
             "You are Ratchet's measurement selector. Return only JSON matching the schema.\n\n"
             f"{json.dumps(prompt, separators=(',', ':'), default=str)}"
@@ -237,8 +275,46 @@ class MeasurementSelector:
                     elapsed_s=time.perf_counter() - started_at,
                 ),
             }
-            payload = extract_json_object(response.output_text)
+            try:
+                payload = extract_json_object(response.output_text)
+            except Exception as parse_exc:
+                primary_diagnostics = self.last_call_diagnostics or {}
+                repair_started_at = time.perf_counter()
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous measurement-selector response was invalid JSON. "
+                        "Return only a valid JSON object matching the same schema. "
+                        "Preserve the selected_candidate_ids and skipped_candidate_reasons where possible; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:9000]}"
+                    ),
+                    max_output_tokens=MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="measurement_selector",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                try:
+                    payload = extract_json_object(repair_response.output_text)
+                except Exception as repair_exc:
+                    self.last_call_diagnostics = {
+                        **self.last_call_diagnostics,
+                        "repair_error": str(repair_exc),
+                    }
+                    raise OptimizerModelError(
+                        f"Measurement selector returned invalid JSON: {parse_exc}; repair failed: {repair_exc}"
+                    ) from repair_exc
         except Exception as exc:
+            if isinstance(exc, OptimizerModelError):
+                raise
             self.last_call_diagnostics = {
                 "component": "measurement_selector",
                 "prompt_chars": len(prompt_input),
@@ -256,7 +332,24 @@ class MeasurementSelector:
             candidate_ids=candidate_ids,
             max_select=max_select,
         )
+        decision = _with_default_skip_reasons(decision, candidate_ids=candidate_ids)
         return decision
+
+
+def _validate_selector_state_has_evidence(*, state: dict[str, Any], candidate_ids: list[str]) -> None:
+    ledger = state.get("evidence_ledger")
+    if not isinstance(ledger, dict):
+        raise OptimizerModelError("Measurement selector requires evidence_ledger in state.")
+    rows = ledger.get("candidate_evidence")
+    if not isinstance(rows, list):
+        raise OptimizerModelError("Measurement selector requires evidence_ledger.candidate_evidence.")
+    observed_ids = {str(row.get("candidate_id")) for row in rows if isinstance(row, dict)}
+    missing = [candidate_id for candidate_id in candidate_ids if candidate_id not in observed_ids]
+    if missing:
+        raise OptimizerModelError(
+            "Measurement selector requires ledger evidence for every candidate: "
+            + ", ".join(missing[:8])
+        )
 
 
 def _experiment_intent_schema() -> dict[str, Any]:
@@ -272,8 +365,7 @@ def _experiment_intent_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
             },
             "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
-            "allowed_families": {"type": "array", "items": {"type": "string", "maxLength": 80}},
-            "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 80}},
+            "affordance_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 180}},
             "success_criteria": {"type": "string", "maxLength": 300},
             "disconfirming_result": {"type": "string", "maxLength": 300},
             "priority": {"type": "integer"},
@@ -316,12 +408,26 @@ def _validate_measurement_decision(
         raise OptimizerModelError(
             f"Measurement selector selected {len(selected)} candidates, above max_select={max_select}"
         )
-    missing_reasons = sorted(candidate_id for candidate_id in allowed - set(selected) if not decision.skipped_candidate_reasons.get(candidate_id))
-    if missing_reasons:
-        raise OptimizerModelError(
-            "Measurement selector omitted skipped_candidate_reasons for "
-            f"{missing_reasons}"
-        )
+
+
+def _with_default_skip_reasons(
+    decision: MeasurementDecision,
+    *,
+    candidate_ids: list[str],
+) -> MeasurementDecision:
+    skipped = dict(decision.skipped_candidate_reasons)
+    selected = set(decision.selected_candidate_ids)
+    for candidate_id in candidate_ids:
+        if candidate_id not in selected and not skipped.get(candidate_id):
+            skipped[candidate_id] = "not selected by measurement selector"
+    return MeasurementDecision(
+        stage=decision.stage,
+        selected_candidate_ids=list(decision.selected_candidate_ids),
+        rationale=decision.rationale,
+        expected_information=decision.expected_information,
+        risks=decision.risks,
+        skipped_candidate_reasons=skipped,
+    )
 
 
 @dataclass(frozen=True)

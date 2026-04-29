@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import importlib
-import importlib.util
 import sys
 import tempfile
 import textwrap
@@ -9,55 +8,8 @@ import unittest
 from pathlib import Path
 
 from ratchet.adapters import adapter_fingerprint
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, PatchOperation
-
-
-class FakeUsage:
-    def __init__(self, input_tokens: int, output_tokens: int) -> None:
-        self.input_tokens = input_tokens
-        self.output_tokens = output_tokens
-
-
-class FakeOutputItem:
-    def __init__(
-        self,
-        item_type: str,
-        *,
-        name: str = "",
-        arguments: str = "{}",
-        call_id: str = "",
-    ) -> None:
-        self.type = item_type
-        self.name = name
-        self.arguments = arguments
-        self.call_id = call_id
-
-
-class FakeResponse:
-    def __init__(
-        self,
-        response_id: str,
-        output: list[FakeOutputItem],
-        *,
-        output_text: str,
-        input_tokens: int,
-        output_tokens: int,
-    ) -> None:
-        self.id = response_id
-        self.output = output
-        self.output_text = output_text
-        self.usage = FakeUsage(input_tokens, output_tokens)
-
-
-class FakeResponsesClient:
-    def __init__(self, responses: list[FakeResponse]) -> None:
-        self.responses = responses
-        self.calls = 0
-
-    def create_response(self, **_: object) -> FakeResponse:
-        response = self.responses[self.calls]
-        self.calls += 1
-        return response
+from ratchet.rendering import render_few_shot_prompt
+from ratchet.types import AgentPatch, AgentSpec, PatchOperation
 
 
 class AdapterFingerprintTests(unittest.TestCase):
@@ -190,20 +142,9 @@ class AdapterFingerprintTests(unittest.TestCase):
 
         self.assertNotEqual(first["custom_fingerprint_sha256"], second["custom_fingerprint_sha256"])
 
-    def test_kashi_few_shot_patch_reaches_agent_prompt(self) -> None:
-        agent_path = Path(__file__).resolve().parents[1] / "samples" / "kashi_agent" / "agent.py"
-        module_spec = importlib.util.spec_from_file_location("kashi_agent_prompt_test", agent_path)
-        if module_spec is None or module_spec.loader is None:
-            raise AssertionError("Could not load Kashi sample agent.")
-        module = importlib.util.module_from_spec(module_spec)
-        sys.modules[module_spec.name] = module
-        try:
-            module_spec.loader.exec_module(module)
-        finally:
-            sys.modules.pop(module_spec.name, None)
-
+    def test_few_shot_patch_reaches_rendered_prompt(self) -> None:
         spec = AgentSpec(
-            name="kashi-test",
+            name="few-shot-test",
             model="gpt-4o-2024-08-06",
             instructions={"base": "Base instruction."},
             few_shot=[{"messages": [{"role": "user", "content": "Synthetic example."}]}],
@@ -218,138 +159,10 @@ class AdapterFingerprintTests(unittest.TestCase):
             ]
         )
 
-        config = module.KashiAgentConfig.from_spec(spec.apply_patch(patch))
-        rendered = "\n".join(config.instructions)
+        rendered = render_few_shot_prompt(spec.apply_patch(patch).few_shot)
 
         self.assertIn("Synthetic example.", rendered)
         self.assertIn("Patched example.", rendered)
-
-    def test_tool_loop_accounts_final_continuation_usage(self) -> None:
-        from samples.public_docs_agent.agent import PublicDocsAgentRunner
-
-        client = FakeResponsesClient(
-            [
-                FakeResponse(
-                    "resp-1",
-                    [
-                        FakeOutputItem(
-                            "function_call",
-                            name="docs_search",
-                            arguments='{"query": "python list append"}',
-                            call_id="call-1",
-                        )
-                    ],
-                    output_text="",
-                    input_tokens=10,
-                    output_tokens=2,
-                ),
-                FakeResponse(
-                    "resp-2",
-                    [FakeOutputItem("message")],
-                    output_text='{"answer": "list.append()"}',
-                    input_tokens=20,
-                    output_tokens=4,
-                ),
-            ]
-        )
-        runner = PublicDocsAgentRunner(client=client)
-        record = runner.run_case(
-            {
-                "model": "gpt-5.4-mini",
-                "reasoning_effort": "low",
-                "prompt_output_rule": "Return JSON.",
-                "prompt_grounding_rule": "Use docs.",
-                "prompt_tool_rule": "Use docs_search.",
-                "prompt_fallback_rule": "Return unknown.",
-                "prompt_few_shot": "",
-                "docs_search_enabled": "on",
-                "docs_search_description": "Search docs.",
-                "knowledge_mode": "raw",
-                "retrieval_top_k": "1",
-                "output_cap": "64",
-                "max_tool_rounds": "1",
-            },
-            EvalCase(id="dev-1", split="dev", input="Which method appends to a list?"),
-        )
-
-        self.assertEqual(record.metrics.input_tokens, 30)
-        self.assertEqual(record.metrics.output_tokens, 6)
-        self.assertEqual(record.diagnostics.metadata["response_ids"], ["resp-1", "resp-2"])
-        self.assertEqual(record.diagnostics.metadata["output_item_types"], [["function_call"], ["message"]])
-
-    def test_python_api_grounding_rejects_parser_fallback_output(self) -> None:
-        from samples.python_api_grounding_agent.ratchet_adapter import PythonApiGroundingAdapter
-
-        grade = PythonApiGroundingAdapter().grade(
-            EvalCase(
-                id="api-dev-01",
-                split="dev",
-                input="Which option?",
-                expected={"answer": "unknown"},
-            ),
-            {"answer": "unknown", "invalid_output": ""},
-        )
-
-        self.assertFalse(grade.passed)
-        self.assertIn("invalid_output", grade.labels)
-
-    def test_tool_loop_raises_when_final_response_still_requests_tools(self) -> None:
-        from samples.public_docs_agent.agent import PublicDocsAgentRunner
-
-        client = FakeResponsesClient(
-            [
-                FakeResponse(
-                    "resp-1",
-                    [
-                        FakeOutputItem(
-                            "function_call",
-                            name="docs_search",
-                            arguments='{"query": "python list append"}',
-                            call_id="call-1",
-                        )
-                    ],
-                    output_text="",
-                    input_tokens=10,
-                    output_tokens=2,
-                ),
-                FakeResponse(
-                    "resp-2",
-                    [
-                        FakeOutputItem(
-                            "function_call",
-                            name="docs_search",
-                            arguments='{"query": "python list extend"}',
-                            call_id="call-2",
-                        )
-                    ],
-                    output_text="",
-                    input_tokens=20,
-                    output_tokens=4,
-                ),
-            ]
-        )
-        runner = PublicDocsAgentRunner(client=client)
-
-        with self.assertRaisesRegex(RuntimeError, "tool round budget exhausted"):
-            runner.run_case(
-                {
-                    "model": "gpt-5.4-mini",
-                    "reasoning_effort": "low",
-                    "prompt_output_rule": "Return JSON.",
-                    "prompt_grounding_rule": "Use docs.",
-                    "prompt_tool_rule": "Use docs_search.",
-                    "prompt_fallback_rule": "Return unknown.",
-                    "prompt_few_shot": "",
-                    "docs_search_enabled": "on",
-                    "docs_search_description": "Search docs.",
-                    "knowledge_mode": "raw",
-                    "retrieval_top_k": "1",
-                    "output_cap": "64",
-                    "max_tool_rounds": "1",
-                },
-                EvalCase(id="dev-1", split="dev", input="Which method appends to a list?"),
-            )
-
 
 if __name__ == "__main__":
     unittest.main()

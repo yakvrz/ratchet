@@ -17,7 +17,7 @@ SCORE_EQUIVALENCE_FLOOR = 0.05
 COST_EQUIVALENCE_FRACTION = 0.0
 LATENCY_EQUIVALENCE_FRACTION = 0.0
 SIGNIFICANCE_ALPHA = 0.10
-FINALIST_STATUSES = {"validated", "directional", "failed"}
+FINALIST_STATUSES = {"validated", "directional", "failed", "unstable"}
 
 
 @dataclass(frozen=True)
@@ -294,10 +294,6 @@ class GatePredicate:
             return (
                 f"confirmation observed regressions on {len(regressed_case_ids)} case(s)"
             )
-        comparison = comparison or compare_summaries(baseline, candidate)
-        confidence_reason = self.confidence_reason(comparison)
-        if confidence_reason is not None:
-            return confidence_reason
         return None
 
     def final_gate(

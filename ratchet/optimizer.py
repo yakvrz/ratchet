@@ -17,6 +17,7 @@ from ratchet.affordances import OptimizationAffordance, generate_optimization_af
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
+from ratchet.evidence_ledger import EvidenceLedger
 from ratchet.experiments import ExperimentIntent, ResearchState, TaskTheory, build_task_theory
 from ratchet.ideation import build_ideation_metrics
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
@@ -59,6 +60,7 @@ from ratchet.transforms import (
     TransformContextKey,
     build_search_hypothesis,
     observe_transform_result,
+    summarize_affordance_results,
     summarize_transform_context_results,
     summarize_transform_results,
 )
@@ -169,8 +171,8 @@ class RatchetOptimizer:
         case_timeout_s: int = 180,
         fail_fast: bool = False,
         expensive_candidate_cost_ratio: float = 10.0,
-        max_expensive_full_dev_candidates: int | None = None,
-        max_expensive_holdout_candidates: int | None = None,
+        max_dev_measurement_cost_usd: float | None = None,
+        max_holdout_measurement_cost_usd: float | None = None,
         run_metadata: dict[str, Any] | None = None,
         progress_callback: ProgressCallback | None = None,
     ) -> None:
@@ -229,14 +231,14 @@ class RatchetOptimizer:
         if expensive_candidate_cost_ratio <= 0:
             raise ValueError("expensive_candidate_cost_ratio must be positive.")
         self.expensive_candidate_cost_ratio = expensive_candidate_cost_ratio
-        if max_expensive_full_dev_candidates is not None and max_expensive_full_dev_candidates < 0:
-            raise ValueError("max_expensive_full_dev_candidates must be non-negative when set.")
-        if max_expensive_holdout_candidates is not None and max_expensive_holdout_candidates < 0:
-            raise ValueError("max_expensive_holdout_candidates must be non-negative when set.")
-        self.max_expensive_full_dev_candidates = max_expensive_full_dev_candidates
-        self.max_expensive_holdout_candidates = max_expensive_holdout_candidates
-        self._expensive_full_dev_evaluations = 0
-        self._expensive_holdout_validations = 0
+        if max_dev_measurement_cost_usd is not None and max_dev_measurement_cost_usd < 0:
+            raise ValueError("max_dev_measurement_cost_usd must be non-negative when set.")
+        if max_holdout_measurement_cost_usd is not None and max_holdout_measurement_cost_usd < 0:
+            raise ValueError("max_holdout_measurement_cost_usd must be non-negative when set.")
+        self.max_dev_measurement_cost_usd = max_dev_measurement_cost_usd
+        self.max_holdout_measurement_cost_usd = max_holdout_measurement_cost_usd
+        self._dev_measurement_cost_usd = 0.0
+        self._holdout_measurement_cost_usd = 0.0
         self.run_metadata = dict(run_metadata or {})
         self.cache_namespace = build_cache_namespace(
             agent_spec=self.agent_spec,
@@ -261,8 +263,8 @@ class RatchetOptimizer:
         self._progress_path = self.out_dir / "progress.jsonl"
         self._progress_path.write_text("")
         self.optimizer_call_diagnostics = []
-        self._expensive_full_dev_evaluations = 0
-        self._expensive_holdout_validations = 0
+        self._dev_measurement_cost_usd = 0.0
+        self._holdout_measurement_cost_usd = 0.0
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
         self._emit_progress(
@@ -297,6 +299,7 @@ class RatchetOptimizer:
         diagnoses_log: list[dict[str, Any]] = []
         proposals_log: list[dict[str, Any]] = []
         task_theory_log: list[dict[str, Any]] = []
+        evidence_ledger = EvidenceLedger()
         diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
         task_theory_cache: dict[str, TaskTheory] = {}
         evaluated_patch_hashes = {baseline_dev.patch_hash}
@@ -476,7 +479,9 @@ class RatchetOptimizer:
                 )
                 affordances = generate_optimization_affordances(
                     surface,
+                    objective=self.objective,
                     active_families=search_hypothesis.active_families,
+                    evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
                 )
                 decision_log.append(
                     {
@@ -558,6 +563,7 @@ class RatchetOptimizer:
                     dev_evaluations_used=dev_evaluations,
                     experiment_intents=experiment_intents,
                     affordances=affordances,
+                    evidence_ledger=evidence_ledger,
                 )
                 dev_evaluations += evaluations_used
                 parent_evaluations_used = evaluations_used
@@ -631,7 +637,9 @@ class RatchetOptimizer:
                     )
                     retry_affordances = generate_optimization_affordances(
                         surface,
+                        objective=self.objective,
                         active_families=retry_search_hypothesis.active_families,
+                        evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
                     )
                     retry_experiment_intents = self._plan_parent_research_action(
                         current_dev=current_dev,
@@ -671,6 +679,7 @@ class RatchetOptimizer:
                             dev_evaluations_used=dev_evaluations,
                             experiment_intents=retry_experiment_intents,
                             affordances=retry_affordances,
+                            evidence_ledger=evidence_ledger,
                             proposal_retry=True,
                             retry_reason="no_accepted_candidates_from_parent",
                         )
@@ -794,44 +803,47 @@ class RatchetOptimizer:
                 finalist_count=len(accepted_dev_patches),
             )
         for dev_summary in finalist_dev_patches:
-            expensive_for_validation = _is_expensive_summary(
-                baseline=baseline_dev,
-                candidate=dev_summary,
-                cost_ratio=self.expensive_candidate_cost_ratio,
-            )
-            if expensive_for_validation and self.max_expensive_holdout_candidates is not None:
-                if self._expensive_holdout_validations >= self.max_expensive_holdout_candidates:
-                    reason = (
-                        "holdout skipped by expensive evaluation cap "
-                        f"(candidate dev cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
-                        f"cap {self.max_expensive_holdout_candidates})"
-                    )
-                    finalist_statuses.append(
-                        {
-                            "patch_hash": dev_summary.patch_hash,
-                            "status": "deferred",
-                            "stage": "holdout_skipped",
-                            "reason": reason,
-                            "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
-                            "dev_metrics": dev_summary.to_dict(),
-                            "passed_final_gate": False,
-                        }
-                    )
-                    decision_log.append(
-                        {
-                            "type": "holdout_validation_skipped",
-                            "patch_hash": dev_summary.patch_hash,
-                            "reason": reason,
-                            "dev_metrics": dev_summary.to_dict(),
-                        }
-                    )
-                    self._emit_progress(
-                        "holdout_validation_skipped",
-                        patch_hash=dev_summary.patch_hash,
-                        reason=reason,
-                    )
-                    continue
-                self._expensive_holdout_validations += 1
+            holdout_measurement_cost = dev_summary.mean_cost_usd * len(holdout_cases) * self.samples_per_case
+            if _measurement_budget_exhausted(
+                used_usd=self._holdout_measurement_cost_usd,
+                marginal_usd=holdout_measurement_cost,
+                max_usd=self.max_holdout_measurement_cost_usd,
+            ):
+                reason = (
+                    "measurement_budget_exhausted: marginal holdout measurement cost "
+                    f"${holdout_measurement_cost:.6f} exceeds remaining holdout measurement budget"
+                )
+                finalist_statuses.append(
+                    {
+                        "patch_hash": dev_summary.patch_hash,
+                        "status": "deferred",
+                        "stage": "holdout_skipped",
+                        "reason": reason,
+                        "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
+                        "dev_metrics": dev_summary.to_dict(),
+                        "measurement_budget": {
+                            "marginal_measurement_cost_usd": holdout_measurement_cost,
+                            "measurement_cost_used_usd": self._holdout_measurement_cost_usd,
+                            "max_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+                        },
+                        "passed_final_gate": False,
+                    }
+                )
+                decision_log.append(
+                    {
+                        "type": "holdout_validation_skipped",
+                        "patch_hash": dev_summary.patch_hash,
+                        "reason": reason,
+                        "dev_metrics": dev_summary.to_dict(),
+                    }
+                )
+                self._emit_progress(
+                    "holdout_validation_skipped",
+                    patch_hash=dev_summary.patch_hash,
+                    reason=reason,
+                )
+                continue
+            self._holdout_measurement_cost_usd += holdout_measurement_cost
             runtime_diagnostic = runtime_reliability_diagnostics(baseline_dev, dev_summary)
             runtime_diagnostics.append(runtime_diagnostic)
             if _requires_finalist_confirmation(dev_summary.patch, runtime_diagnostic):
@@ -872,19 +884,23 @@ class RatchetOptimizer:
                     "confirmation_completed",
                     patch_hash=dev_summary.patch_hash,
                     passed=confirmation.get("passed"),
+                    stability_status=confirmation.get("status"),
                     reason=confirmation.get("reason"),
                 )
                 if not confirmation.get("passed"):
+                    confirmation_status = str(confirmation.get("status") or "failed")
+                    finalist_status = "unstable" if confirmation_status == "runtime_instability" else "failed"
                     finalist_statuses.append(
                         {
                             "patch_hash": dev_summary.patch_hash,
-                            "status": "failed",
+                            "status": finalist_status,
                             "stage": "confirmation",
                             "reason": confirmation.get("reason"),
                             "dev_transform_families": _transform_lineage_families(dev_summary.patch_hash, proposals_log),
                             "dev_metrics": dev_summary.to_dict(),
                             "runtime_reliability_diagnostics": runtime_diagnostic,
                             "confirmation": confirmation,
+                            "passed_final_gate": False,
                         }
                     )
                     continue
@@ -1005,6 +1021,7 @@ class RatchetOptimizer:
 
         transform_summaries = summarize_transform_results(proposals_log)
         transform_context_summaries = summarize_transform_context_results(proposals_log)
+        affordance_summaries = summarize_affordance_results(proposals_log)
         transform_final_statuses = _transform_final_status_summaries(finalist_statuses)
         cost_tradeoffs = quality_cost_tradeoffs(proposals_log)
         ideation_metrics = build_ideation_metrics(
@@ -1031,6 +1048,7 @@ class RatchetOptimizer:
             task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
+            affordance_summaries=affordance_summaries,
             transform_final_statuses=transform_final_statuses,
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
@@ -1045,6 +1063,7 @@ class RatchetOptimizer:
                 if row.get("type") in {"research_plan", "measurement_decision"}
             ],
             ideation_metrics=ideation_metrics,
+            evidence_ledger=evidence_ledger.to_dict(),
             outcome_analysis=outcome_analysis,
         )
         result = RatchetResult(
@@ -1066,6 +1085,7 @@ class RatchetOptimizer:
             task_theories=task_theory_log,
             transform_summaries=transform_summaries,
             transform_context_summaries=transform_context_summaries,
+            affordance_summaries=affordance_summaries,
             finalist_statuses=finalist_statuses,
             runtime_reliability_diagnostics=runtime_diagnostics,
             confirmation_results=confirmation_results,
@@ -1075,6 +1095,7 @@ class RatchetOptimizer:
             quality_cost_tradeoffs=cost_tradeoffs,
             optimizer_call_diagnostics=self.optimizer_call_diagnostics,
             ideation_metrics=ideation_metrics,
+            evidence_ledger=evidence_ledger.to_dict(),
             selection_reason=selection_reason,
             outcome_analysis=outcome_analysis,
             manifest=manifest,
@@ -1117,13 +1138,8 @@ class RatchetOptimizer:
                 for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]
                 if patch_hash(variant) != parent.patch_hash
             ]
-            selected_variant_hashes, skipped_variant_reasons = self._select_simplification_variants_with_measurement_selector(
-                parent=parent,
-                variants=candidate_variants,
-                baseline=baseline_dev,
-                decision_log=decision_log,
-                parent_rank=parent_index,
-            )
+            selected_variant_hashes = {patch_hash(variant) for variant in candidate_variants}
+            skipped_variant_reasons: dict[str, str] = {}
             for variant in candidate_variants:
                 digest = patch_hash(variant)
                 if digest not in selected_variant_hashes:
@@ -1218,107 +1234,6 @@ class RatchetOptimizer:
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
 
-    def _select_simplification_variants_with_measurement_selector(
-        self,
-        *,
-        parent: PatchSummary,
-        variants: list[AgentPatch],
-        baseline: PatchSummary,
-        decision_log: list[dict[str, Any]],
-        parent_rank: int,
-    ) -> tuple[set[str], dict[str, str]]:
-        if not variants:
-            return set(), {}
-        action = MeasurementAction(
-            action_id=f"simplify_{parent.patch_hash}",
-            action_type="simplify_candidate",
-            stage="simplification",
-            candidate_ids=[patch_hash(variant) for variant in variants],
-            max_select=min(MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST, len(variants)),
-            max_select_per_group=0,
-            rationale="Choose which simplification variants are worth evaluating before holdout.",
-            metadata={
-                "parent_patch_hash": parent.patch_hash,
-                "max_simplification_variants": MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST,
-            },
-        )
-        state_packet = {
-            "objective": self.objective.to_dict(),
-            "decision_point": "simplification",
-            "parent": {
-                "patch_hash": parent.patch_hash,
-                "score": parent.mean_score,
-                "pass_count": parent.pass_count,
-                "case_count": parent.case_count,
-                "operation_count": parent.operation_count,
-                "cost_usd": parent.mean_cost_usd,
-                "latency_s": parent.median_latency_s,
-            },
-            "baseline": {
-                "patch_hash": baseline.patch_hash,
-                "score": baseline.mean_score,
-                "pass_count": baseline.pass_count,
-                "case_count": baseline.case_count,
-                "operation_count": baseline.operation_count,
-                "cost_usd": baseline.mean_cost_usd,
-                "latency_s": baseline.median_latency_s,
-            },
-            "variants": [
-                {
-                    "candidate_id": patch_hash(variant),
-                    "operation_count": len(variant.operations),
-                    "simplification": variant.metadata.get("simplification"),
-                    "operations": [
-                        {"op": operation.op, "target": operation.target}
-                        for operation in variant.operations
-                    ],
-                }
-                for variant in variants
-            ],
-        }
-        self._emit_progress(
-            "measurement_selector_started",
-            stage="simplification",
-            parent_rank=parent_rank,
-            candidate_count=len(variants),
-            max_select=action.max_select,
-        )
-        decision = self.measurement_selector.select(
-            stage="simplification",
-            state=state_packet,
-            candidate_ids=action.candidate_ids,
-            max_select=action.max_select,
-            max_select_per_group=action.max_select_per_group,
-        )
-        if self.measurement_selector.last_call_diagnostics is not None:
-            self.optimizer_call_diagnostics.append(
-                {
-                    "stage": "simplification",
-                    "parent_rank": parent_rank,
-                    "parent_patch_hash": parent.patch_hash,
-                    **self.measurement_selector.last_call_diagnostics,
-                }
-            )
-        decision_log.append(
-            {
-                "type": "measurement_decision",
-                "stage": "simplification",
-                "parent_rank": parent_rank,
-                "parent_patch_hash": parent.patch_hash,
-                "action": action.to_dict(),
-                "decision": decision.to_dict(),
-            }
-        )
-        self._emit_progress(
-            "measurement_selector_completed",
-            stage="simplification",
-            parent_rank=parent_rank,
-            selected_candidate_ids=decision.selected_candidate_ids,
-            rationale=decision.rationale,
-            call_diagnostics=self.measurement_selector.last_call_diagnostics or {},
-        )
-        return set(decision.selected_candidate_ids), dict(decision.skipped_candidate_reasons)
-
     def _evaluate_simplification_variant(
         self,
         *,
@@ -1412,6 +1327,7 @@ class RatchetOptimizer:
         parent_summaries: list[PatchSummary],
         proposal_budget: int,
         dev_evaluations_used: int,
+        evidence_ledger: EvidenceLedger,
         experiment_intents: list[Any] | None = None,
         affordances: list[OptimizationAffordance] | None = None,
         proposal_retry: bool = False,
@@ -1554,6 +1470,7 @@ class RatchetOptimizer:
             proposals_log=proposals_log,
             decision_log=decision_log,
             dev_evaluations_used=dev_evaluations_used,
+            evidence_ledger=evidence_ledger,
             iteration=iteration,
             attempt=attempt,
             parent_index=parent_index,
@@ -1578,6 +1495,8 @@ class RatchetOptimizer:
                 "proposal": candidate.patch.to_dict(),
                 "candidate": candidate.to_dict(),
                 "materialization": materialization_by_proposal_hash.get(state.proposal_patch_hash, {}),
+                "applications": [application.to_dict() for application in candidate.applications],
+                "affordance_ids": list(candidate.affordance_ids),
                 "transform_family": candidate.transform_family,
                 "mechanism_class": candidate.mechanism_class,
                 "experiment_id": candidate.experiment_id,
@@ -1591,6 +1510,14 @@ class RatchetOptimizer:
                 "expected_effects": candidate.expected_effects,
                 "evaluation_plan": candidate.evaluation_plan,
                 "evaluation_stages": state.stage_rows,
+                "evidence_summary": (
+                    evidence_ledger.latest(state.patch_hash).to_dict()
+                    if evidence_ledger.latest(state.patch_hash)
+                    else {}
+                ),
+                "evidence_history": [
+                    record.to_dict() for record in evidence_ledger.by_candidate(state.patch_hash)
+                ],
                 "patch_hash": state.patch_hash,
                 "patch": state.patch.to_dict(),
                 "comparison_to_parent": comparison.to_dict(),
@@ -1662,6 +1589,13 @@ class RatchetOptimizer:
         proposal_retry: bool = False,
     ) -> list[ExperimentIntent]:
         attempt = 2 if proposal_retry else 1
+        task_theory_payload = _task_theory_with_affordance_opportunities(
+            task_theory=task_theory,
+            affordances=affordances,
+            current_dev=current_dev,
+            proposals_log=proposals_log,
+            objective=self.objective,
+        )
         state = ResearchState(
             objective=self.objective.to_dict(),
             budget={
@@ -1679,7 +1613,7 @@ class RatchetOptimizer:
                 "cost_usd": current_dev.mean_cost_usd,
                 "latency_s": current_dev.median_latency_s,
             },
-            task_theory=task_theory.to_dict(),
+            task_theory=task_theory_payload,
             behavior_profile=search_hypothesis.profile.to_dict(),
             affordances=[affordance.to_dict() for affordance in affordances],
             prior_experiment_outcomes=_compact_prior_stage_results(proposals_log, stage=None, limit=8),
@@ -1744,6 +1678,7 @@ class RatchetOptimizer:
         proposals_log: list[dict[str, Any]],
         decision_log: list[dict[str, Any]],
         dev_evaluations_used: int,
+        evidence_ledger: EvidenceLedger,
         iteration: int,
         attempt: int,
         parent_index: int,
@@ -1753,29 +1688,34 @@ class RatchetOptimizer:
             if not active:
                 break
             if stage_name == "full_dev":
-                active = self._select_candidate_stage_with_measurement_selector(
-                    active,
-                    baseline,
-                    reference=reference,
-                    stage_name=stage_name,
-                    proposals_log=proposals_log,
-                    decision_log=decision_log,
-                    dev_evaluations_used=dev_evaluations_used,
-                    iteration=iteration,
-                    attempt=attempt,
-                    parent_index=parent_index,
-                )
-                if not active:
-                    break
+                if _has_evidence_for_selector(evidence_ledger, active):
+                    active = self._select_candidate_stage_with_measurement_selector(
+                        active,
+                        baseline,
+                        reference=reference,
+                        stage_name=stage_name,
+                        stage_cases=stage_cases,
+                        proposals_log=proposals_log,
+                        decision_log=decision_log,
+                        dev_evaluations_used=dev_evaluations_used,
+                        evidence_ledger=evidence_ledger,
+                        iteration=iteration,
+                        attempt=attempt,
+                        parent_index=parent_index,
+                    )
+                    if not active:
+                        break
             elif stage_name == "small_dev":
                 active = self._select_candidate_stage_with_measurement_selector(
                     active,
                     baseline,
                     reference=reference,
                     stage_name=stage_name,
+                    stage_cases=stage_cases,
                     proposals_log=proposals_log,
                     decision_log=decision_log,
                     dev_evaluations_used=dev_evaluations_used,
+                    evidence_ledger=evidence_ledger,
                     iteration=iteration,
                     attempt=attempt,
                     parent_index=parent_index,
@@ -1814,6 +1754,23 @@ class RatchetOptimizer:
                         candidate_summary,
                         self.objective,
                     )
+                evidence_summary = evidence_ledger.add(
+                    candidate_id=state.patch_hash,
+                    stage=stage_name,
+                    reference=reference_summary,
+                    baseline=baseline_summary,
+                    candidate=candidate_summary,
+                    mechanism_class=state.candidate.mechanism_class,
+                    affordance_ids=list(state.candidate.affordance_ids),
+                    comparison_group=state.candidate.comparison_group,
+                    candidate_role=state.candidate.candidate_role,
+                    rejection_reason=rejection_reason,
+                    constraint_warning=constraint_warning,
+                )
+                if stage_name in {"smoke", "small_dev", "full_dev"}:
+                    self._dev_measurement_cost_usd += float(
+                        evidence_summary.measurement_cost.get("estimated_total_cost_usd") or 0.0
+                    )
                 state.stage_rows.append(
                     {
                         "stage": stage_name,
@@ -1826,6 +1783,7 @@ class RatchetOptimizer:
                         "rejection_reason": rejection_reason,
                         "constraint_warning": constraint_warning,
                         "passed": rejection_reason is None,
+                        "evidence_summary": evidence_summary.to_dict(),
                     }
                 )
                 state.summary = candidate_summary
@@ -1858,7 +1816,7 @@ class RatchetOptimizer:
                 continue
             if state.full_dev_evaluated or state.frontier_status != "pending":
                 continue
-            state.rejection_reason = "screened out before full_dev by batch ranking"
+            state.rejection_reason = "budget_not_worth_information"
             state.frontier_status = "screened_out"
             state.accepted = False
 
@@ -1869,9 +1827,11 @@ class RatchetOptimizer:
         *,
         reference: PatchSummary,
         stage_name: str,
+        stage_cases: tuple[EvalCase, ...],
         proposals_log: list[dict[str, Any]],
         decision_log: list[dict[str, Any]],
         dev_evaluations_used: int,
+        evidence_ledger: EvidenceLedger,
         iteration: int,
         attempt: int,
         parent_index: int,
@@ -1891,6 +1851,11 @@ class RatchetOptimizer:
             proposals_log=proposals_log,
             dev_evaluations_used=dev_evaluations_used,
             dev_budget=self.dev_budget,
+            evidence_ledger=evidence_ledger,
+            stage_cases=stage_cases,
+            samples_per_case=self.samples_per_case,
+            measurement_cost_used_usd=self._dev_measurement_cost_usd,
+            max_measurement_cost_usd=self.max_dev_measurement_cost_usd,
         )
         self._emit_progress(
             "measurement_selector_started",
@@ -1950,25 +1915,28 @@ class RatchetOptimizer:
             )
             state.frontier_status = "screened_out"
             state.accepted = False
-        if stage_name != "full_dev" or self.max_expensive_full_dev_candidates is None:
-            return selected
         kept: list[CandidateEvaluationState] = []
+        selected_measurement_cost = 0.0
         for state in selected:
-            if _is_expensive_summary(
-                baseline=baseline,
-                candidate=state.summary,
-                cost_ratio=self.expensive_candidate_cost_ratio,
+            marginal_cost = _estimated_marginal_measurement_cost_usd(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+            )
+            if _measurement_budget_exhausted(
+                used_usd=self._dev_measurement_cost_usd + selected_measurement_cost,
+                marginal_usd=marginal_cost,
+                max_usd=self.max_dev_measurement_cost_usd,
             ):
-                if self._expensive_full_dev_evaluations >= self.max_expensive_full_dev_candidates:
-                    state.rejection_reason = (
-                        "screened out before full_dev by expensive evaluation cap "
-                        f"(candidate cost > {self.expensive_candidate_cost_ratio:.2f}x baseline; "
-                        f"cap {self.max_expensive_full_dev_candidates})"
-                    )
-                    state.frontier_status = "screened_out"
-                    state.accepted = False
-                    continue
-                self._expensive_full_dev_evaluations += 1
+                state.rejection_reason = (
+                    "measurement_budget_exhausted: marginal measurement cost "
+                    f"${marginal_cost:.6f} exceeds remaining dev measurement budget"
+                )
+                state.frontier_status = "screened_out"
+                state.accepted = False
+                continue
+            selected_measurement_cost += marginal_cost
             kept.append(state)
         return kept
 
@@ -2347,6 +2315,7 @@ class RatchetOptimizer:
         task_theories: list[dict[str, Any]],
         transform_summaries: dict[str, dict[str, Any]],
         transform_context_summaries: dict[str, dict[str, Any]],
+        affordance_summaries: dict[str, dict[str, Any]],
         transform_final_statuses: dict[str, dict[str, Any]],
         outcome_analysis: dict[str, Any],
         finalist_statuses: list[dict[str, Any]],
@@ -2358,6 +2327,7 @@ class RatchetOptimizer:
         quality_cost_tradeoffs: list[dict[str, Any]],
         measurement_decisions: list[dict[str, Any]],
         ideation_metrics: dict[str, Any],
+        evidence_ledger: dict[str, Any],
     ) -> dict[str, Any]:
         ended_at = datetime.now(timezone.utc)
         return {
@@ -2381,6 +2351,7 @@ class RatchetOptimizer:
             "task_theories": task_theories,
             "transform_summaries": transform_summaries,
             "transform_context_summaries": transform_context_summaries,
+            "affordance_summaries": affordance_summaries,
             "transform_final_statuses": transform_final_statuses,
             "finalist_statuses": finalist_statuses,
             "runtime_reliability_diagnostics": runtime_reliability_diagnostics,
@@ -2393,14 +2364,16 @@ class RatchetOptimizer:
             "measurement_decisions": measurement_decisions,
             "quality_cost_tradeoffs": quality_cost_tradeoffs,
             "ideation_metrics": ideation_metrics,
+            "evidence_ledger": evidence_ledger,
+            "baseline_stability": _baseline_stability_from_evidence(evidence_ledger),
             "samples_per_case": self.samples_per_case,
             "case_concurrency": self.case_concurrency,
             "stage_case_concurrency": self.stage_case_concurrency,
             "expensive_candidate_cost_ratio": self.expensive_candidate_cost_ratio,
-            "max_expensive_full_dev_candidates": self.max_expensive_full_dev_candidates,
-            "max_expensive_holdout_candidates": self.max_expensive_holdout_candidates,
-            "expensive_full_dev_evaluations": self._expensive_full_dev_evaluations,
-            "expensive_holdout_validations": self._expensive_holdout_validations,
+            "max_dev_measurement_cost_usd": self.max_dev_measurement_cost_usd,
+            "max_holdout_measurement_cost_usd": self.max_holdout_measurement_cost_usd,
+            "dev_measurement_cost_used_usd": self._dev_measurement_cost_usd,
+            "holdout_measurement_cost_used_usd": self._holdout_measurement_cost_usd,
             "selected_patch_hash": selected_patch_hash,
             "promoted": promoted,
             "progress_path": str(self.out_dir / "progress.jsonl"),
@@ -2530,6 +2503,13 @@ def _measurement_action(
     )
 
 
+def _has_evidence_for_selector(
+    evidence_ledger: EvidenceLedger,
+    states: list[CandidateEvaluationState],
+) -> bool:
+    return all(evidence_ledger.latest(state.patch_hash) is not None for state in states)
+
+
 def _research_state_packet(
     *,
     objective: OptimizationObjective,
@@ -2540,7 +2520,28 @@ def _research_state_packet(
     proposals_log: list[dict[str, Any]],
     dev_evaluations_used: int,
     dev_budget: int,
+    evidence_ledger: EvidenceLedger,
+    stage_cases: tuple[EvalCase, ...],
+    samples_per_case: int,
+    measurement_cost_used_usd: float,
+    max_measurement_cost_usd: float | None,
 ) -> dict[str, Any]:
+    candidate_ids = [state.patch_hash for state in states]
+    candidate_evidence = _selector_rows_with_measurement_context(
+        evidence_ledger=evidence_ledger,
+        states=states,
+        stage_cases=stage_cases,
+        reference=reference,
+        baseline=baseline,
+        samples_per_case=samples_per_case,
+        measurement_cost_used_usd=measurement_cost_used_usd,
+        max_measurement_cost_usd=max_measurement_cost_usd,
+    )
+    remaining_measurement_budget = (
+        None
+        if max_measurement_cost_usd is None
+        else max(0.0, max_measurement_cost_usd - measurement_cost_used_usd)
+    )
     return {
         "objective": objective.to_dict(),
         "decision_point": stage_name,
@@ -2548,6 +2549,26 @@ def _research_state_packet(
             "dev_evaluations_used": dev_evaluations_used,
             "dev_budget": dev_budget,
             "remaining_dev_budget": max(0, dev_budget - dev_evaluations_used),
+            "measurement_cost_used_usd": measurement_cost_used_usd,
+            "max_measurement_cost_usd": max_measurement_cost_usd,
+            "remaining_measurement_budget_usd": remaining_measurement_budget,
+        },
+        "measurement_policy": {
+            "small_dev": "Triage only; use it to decide whether more measurement is worth buying, not as final ranking.",
+            "full_dev": "First selection-quality comparison; preserve mechanism-distinct high-signal candidates when budget permits.",
+            "candidate_cost": (
+                "Candidate cost_delta and latency_delta describe the deployed policy tradeoff. "
+                "They are not the same as the cost of one more measurement. Expensive candidates may still be worth "
+                "measuring when they test capability, efficiency, or quality-frontier hypotheses."
+            ),
+            "measurement_budget": (
+                "Use marginal_measurement_cost_usd and remaining_measurement_budget_usd to decide whether the "
+                "expected information is worth buying. Deterministic code enforces hard dollar ceilings after selection."
+            ),
+            "quality_frontier": (
+                "For correctness objectives, a high-quality candidate that violates cost or latency constraints can still "
+                "be informative as a quality frontier. Do not skip it solely because promotion may later fail."
+            ),
         },
         "reference": {
             "patch_hash": reference.patch_hash,
@@ -2565,14 +2586,126 @@ def _research_state_packet(
             "cost_usd": baseline.mean_cost_usd,
             "latency_s": baseline.median_latency_s,
         },
-        "candidates": [_research_candidate_row(state) for state in states],
+        "evidence_ledger": {
+            "candidate_evidence": candidate_evidence,
+            "summary": evidence_ledger.to_dict()["summary"],
+        },
+        "candidate_metadata": [_research_candidate_metadata(state) for state in states],
         "prior_full_dev_results": _compact_prior_stage_results(proposals_log, stage="full_dev", limit=8),
         "recent_candidate_history": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
     }
 
 
-def _research_candidate_row(state: CandidateEvaluationState) -> dict[str, Any]:
-    row = {
+def _selector_rows_with_measurement_context(
+    *,
+    evidence_ledger: EvidenceLedger,
+    states: list[CandidateEvaluationState],
+    stage_cases: tuple[EvalCase, ...],
+    reference: PatchSummary,
+    baseline: PatchSummary,
+    samples_per_case: int,
+    measurement_cost_used_usd: float,
+    max_measurement_cost_usd: float | None,
+) -> list[dict[str, Any]]:
+    state_by_id = {state.patch_hash: state for state in states}
+    rows: list[dict[str, Any]] = []
+    remaining_budget = (
+        None
+        if max_measurement_cost_usd is None
+        else max(0.0, max_measurement_cost_usd - measurement_cost_used_usd)
+    )
+    for raw_row in evidence_ledger.selector_rows(state_by_id):
+        row = _compact_selector_evidence_row(raw_row)
+        candidate_id = str(row.get("candidate_id") or "")
+        state = state_by_id.get(candidate_id)
+        if state is None:
+            continue
+        row["marginal_measurement_cost_usd"] = _estimated_marginal_measurement_cost_usd(
+            state=state,
+            stage_cases=stage_cases,
+            evidence_ledger=evidence_ledger,
+            samples_per_case=samples_per_case,
+        )
+        row["remaining_measurement_budget_usd"] = remaining_budget
+        row["deployed_cost_ratio"] = _safe_ratio(
+            (state.summary.mean_cost_usd if state.summary is not None else 0.0),
+            baseline.mean_cost_usd,
+        )
+        row["deployed_latency_ratio"] = _safe_ratio(
+            (state.summary.median_latency_s if state.summary is not None else 0.0),
+            baseline.median_latency_s,
+        )
+        row["reference_cost_ratio"] = _safe_ratio(
+            (state.summary.mean_cost_usd if state.summary is not None else 0.0),
+            reference.mean_cost_usd,
+        )
+        rows.append(row)
+    return rows
+
+
+def _compact_selector_evidence_row(row: dict[str, Any]) -> dict[str, Any]:
+    comparison = row.get("comparison_to_reference") or {}
+    measurement_cost = row.get("measurement_cost") or {}
+    return {
+        "candidate_id": row.get("candidate_id"),
+        "stage": row.get("stage"),
+        "case_count": row.get("case_count"),
+        "effect_size": row.get("effect_size"),
+        "pass_gain": row.get("pass_gain"),
+        "fixed_count": row.get("fixed_count"),
+        "regressed_count": row.get("regressed_count"),
+        "invalid_output_delta": row.get("invalid_output_delta"),
+        "finish_reason_delta": row.get("finish_reason_delta"),
+        "token_delta": row.get("token_delta"),
+        "cost_delta": row.get("cost_delta"),
+        "latency_delta": row.get("latency_delta"),
+        "sign_consistency": row.get("sign_consistency"),
+        "confidence_tier": row.get("confidence_tier"),
+        "baseline_instability_flags": list(row.get("baseline_instability_flags") or []),
+        "measurement_cost": {
+            "fresh_candidate_samples": measurement_cost.get("fresh_candidate_samples"),
+            "estimated_total_cost_usd": measurement_cost.get("estimated_total_cost_usd"),
+            "estimated_total_tokens": measurement_cost.get("estimated_total_tokens"),
+            "candidate_mean_cost_usd": measurement_cost.get("candidate_mean_cost_usd"),
+        },
+        "mechanism_class": row.get("mechanism_class"),
+        "affordance_ids": list(row.get("affordance_ids") or [])[:6],
+        "comparison_group": row.get("comparison_group"),
+        "candidate_role": row.get("candidate_role"),
+        "rejection_reason": row.get("rejection_reason"),
+        "constraint_warning": row.get("constraint_warning"),
+        "passed_stage": row.get("passed_stage"),
+        "comparison_to_reference": {
+            "score_delta": comparison.get("score_delta"),
+            "pass_rate_delta": comparison.get("pass_rate_delta"),
+            "cost_delta": comparison.get("cost_delta"),
+            "latency_delta": comparison.get("latency_delta"),
+            "token_delta": comparison.get("token_delta"),
+        },
+        "stage_history": [
+            _compact_selector_history_row(history)
+            for history in list(row.get("stage_history") or [])[-3:]
+            if isinstance(history, dict)
+        ],
+    }
+
+
+def _compact_selector_history_row(row: dict[str, Any]) -> dict[str, Any]:
+    comparison = row.get("comparison_to_reference") or {}
+    return {
+        "stage": row.get("stage"),
+        "case_count": row.get("case_count"),
+        "confidence_tier": row.get("confidence_tier"),
+        "pass_gain": row.get("pass_gain"),
+        "effect_size": row.get("effect_size"),
+        "score_delta": comparison.get("score_delta"),
+        "rejection_reason": row.get("rejection_reason"),
+        "constraint_warning": row.get("constraint_warning"),
+    }
+
+
+def _research_candidate_metadata(state: CandidateEvaluationState) -> dict[str, Any]:
+    return {
         "candidate_id": state.patch_hash,
         "transform_family": state.candidate.transform_family,
         "mechanism_class": state.candidate.mechanism_class,
@@ -2587,25 +2720,7 @@ def _research_candidate_row(state: CandidateEvaluationState) -> dict[str, Any]:
             for operation in state.patch.operations
         ],
         "comparison_group_key": _candidate_research_group(state),
-        "stage_results": [],
     }
-    for stage in state.stage_rows[-3:]:
-        comparison = stage.get("comparison_to_parent") or {}
-        flips = stage.get("behavior_flip_summary") or {}
-        row["stage_results"].append(
-            {
-                "stage": stage.get("stage"),
-                "case_count": stage.get("case_count"),
-                "passed": stage.get("passed"),
-                "score_delta": comparison.get("score_delta"),
-                "cost_delta": comparison.get("cost_delta"),
-                "latency_delta": comparison.get("latency_delta"),
-                "fixed_count": flips.get("fixed_count"),
-                "regressed_count": flips.get("regressed_count"),
-                "rejection_reason": stage.get("rejection_reason"),
-            }
-        )
-    return row
 
 
 def _compact_prior_stage_results(
@@ -2687,15 +2802,36 @@ def _efficiency_improved(reference: PatchSummary, candidate: PatchSummary) -> bo
     return score_noninferior and (cheaper or faster)
 
 
-def _is_expensive_summary(
+def _estimated_marginal_measurement_cost_usd(
     *,
-    baseline: PatchSummary,
-    candidate: PatchSummary | None,
-    cost_ratio: float,
+    state: CandidateEvaluationState,
+    stage_cases: tuple[EvalCase, ...],
+    evidence_ledger: EvidenceLedger,
+    samples_per_case: int,
+) -> float:
+    if state.summary is None:
+        return 0.0
+    latest = evidence_ledger.latest(state.patch_hash)
+    previously_measured = set(latest.case_ids) if latest is not None else set()
+    marginal_case_count = sum(1 for case in stage_cases if case.id not in previously_measured)
+    return max(0.0, state.summary.mean_cost_usd * marginal_case_count * max(1, samples_per_case))
+
+
+def _measurement_budget_exhausted(
+    *,
+    used_usd: float,
+    marginal_usd: float,
+    max_usd: float | None,
 ) -> bool:
-    if candidate is None or baseline.mean_cost_usd <= 0:
+    if max_usd is None:
         return False
-    return candidate.mean_cost_usd > baseline.mean_cost_usd * cost_ratio
+    return used_usd + marginal_usd > max_usd + 1e-12
+
+
+def _safe_ratio(numerator: float, denominator: float) -> float | None:
+    if denominator <= 0:
+        return None
+    return numerator / denominator
 
 
 def _is_timeout_error(error: Exception) -> bool:
@@ -2712,6 +2848,8 @@ def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[
     if runtime_diagnostic.get("baseline_runtime_defect_fixed"):
         return True
     if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(patch):
+        return True
+    if runtime_diagnostic.get("finish_reason_changed_case_ids") and _touches_output_or_runtime(patch):
         return True
     return False
 
@@ -2816,16 +2954,176 @@ def _transform_final_status_summaries(finalist_statuses: list[dict[str, Any]]) -
             family_name = str(family)
             summary = summaries.setdefault(
                 family_name,
-                {"validated": 0, "directional": 0, "failed": 0, "finalist_count": 0, "patch_hashes": []},
+                {"validated": 0, "directional": 0, "failed": 0, "unstable": 0, "finalist_count": 0, "patch_hashes": []},
             )
             status = str(row.get("status") or "failed")
-            if status not in {"validated", "directional", "failed"}:
+            if status not in {"validated", "directional", "failed", "unstable"}:
                 status = "failed"
             summary[status] += 1
             summary["finalist_count"] += 1
             if row.get("patch_hash"):
                 summary["patch_hashes"].append(row.get("patch_hash"))
     return summaries
+
+
+def _baseline_stability_from_evidence(evidence_ledger: dict[str, Any]) -> dict[str, Any]:
+    records = [row for row in evidence_ledger.get("records", []) if isinstance(row, dict)]
+    unstable_records = [
+        row
+        for row in records
+        if row.get("confidence_tier") == "unstable" or row.get("baseline_instability_flags")
+    ]
+    instability_counts = (evidence_ledger.get("summary") or {}).get("baseline_instability_counts") or {}
+    return {
+        "unstable_candidate_evidence_count": len(unstable_records),
+        "instability_counts": dict(instability_counts),
+        "requires_runtime_repeat": bool(instability_counts.get("runtime_repeat_required")),
+    }
+
+
+def _task_theory_with_affordance_opportunities(
+    *,
+    task_theory: TaskTheory,
+    affordances: list[OptimizationAffordance],
+    current_dev: PatchSummary,
+    proposals_log: list[dict[str, Any]],
+    objective: OptimizationObjective,
+) -> dict[str, Any]:
+    payload = task_theory.to_dict()
+    opportunities = list(payload.get("experiment_opportunities") or [])
+    existing_mechanisms = {
+        str(item.get("mechanism_class"))
+        for item in opportunities
+        if isinstance(item, dict) and item.get("mechanism_class")
+    }
+    capability_affordances = [
+        affordance
+        for affordance in affordances
+        if affordance.family == "model_substitution"
+        and affordance.mechanism == "model_capability_probe"
+    ]
+    if (
+        capability_affordances
+        and "model_capability_probe" not in existing_mechanisms
+        and current_dev.pass_count < current_dev.case_count
+        and _residual_quality_signal_remains(task_theory, proposals_log, current_dev.patch_hash)
+    ):
+        opportunities.insert(
+            _capability_probe_insert_index(opportunities),
+            {
+                "mechanism_class": "model_capability_probe",
+                "target_slices": ["global", "failed_cases"],
+                "candidate_roles": ["atomic", "control"],
+                "measurements": ["score_delta", "fixed_case_ids", "regressed_case_ids", "cost_delta", "latency_delta"],
+                "affordance_ids": [affordance.affordance_id for affordance in capability_affordances[:3]],
+                "rationale": (
+                    "Residual correctness failures remain and model-choice affordances are available; "
+                    "test whether failures are capability-limited rather than instruction/example-limited."
+                ),
+                "disconfirming_result": "A stronger allowed model does not fix residual failures or causes regressions/cost that dominate the quality gain.",
+            },
+        )
+        payload["evidence"] = [
+            *list(payload.get("evidence") or []),
+            "model capability affordance available for residual correctness failures",
+        ]
+    efficiency_affordances = [
+        affordance
+        for affordance in affordances
+        if affordance.family == "model_substitution"
+        and affordance.mechanism == "efficiency_probe"
+    ]
+    if efficiency_affordances and _model_efficiency_probe_is_relevant(objective):
+        if "efficiency_probe" in existing_mechanisms:
+            for opportunity in opportunities:
+                if isinstance(opportunity, dict) and opportunity.get("mechanism_class") == "efficiency_probe":
+                    existing_ids = [
+                        str(item)
+                        for item in opportunity.get("affordance_ids", [])
+                        if item
+                    ]
+                    opportunity["affordance_ids"] = list(
+                        dict.fromkeys(
+                            [
+                                *existing_ids,
+                                *[affordance.affordance_id for affordance in efficiency_affordances[:3]],
+                            ]
+                        )
+                    )
+                    opportunity["rationale"] = (
+                        str(opportunity.get("rationale") or "")
+                        + " Model-choice affordances can also test cheaper or faster equivalent policies."
+                    ).strip()
+                    break
+        else:
+            opportunities.append(
+                {
+                    "mechanism_class": "efficiency_probe",
+                    "target_slices": ["global"],
+                    "candidate_roles": ["atomic", "control"],
+                    "measurements": ["score_delta", "cost_delta", "latency_delta", "correctness_guard"],
+                    "affordance_ids": [affordance.affordance_id for affordance in efficiency_affordances[:3]],
+                    "rationale": (
+                        "Model-choice affordances are available; test whether a different allowed model "
+                        "can preserve quality while reducing cost or latency."
+                    ),
+                    "disconfirming_result": "The model change reduces cost or latency only by causing correctness regressions.",
+                }
+            )
+        payload["evidence"] = [
+            *list(payload.get("evidence") or []),
+            "model efficiency affordance available for cost/latency tradeoff testing",
+        ]
+    payload["experiment_opportunities"] = opportunities[:8]
+    return payload
+
+
+def _model_efficiency_probe_is_relevant(objective: OptimizationObjective) -> bool:
+    constraints = objective.constraints
+    return (
+        objective.mode in {"cost", "latency"}
+        or constraints.max_cost_ratio is not None
+        or constraints.max_latency_ratio is not None
+        or "lower_cost" in objective.tie_breakers
+        or "lower_latency" in objective.tie_breakers
+    )
+
+
+def _capability_probe_insert_index(opportunities: list[dict[str, Any]]) -> int:
+    for index, row in enumerate(opportunities):
+        if not isinstance(row, dict):
+            continue
+        if row.get("mechanism_class") in {"representative_examples", "contrastive_examples", "efficiency_probe"}:
+            return index
+    return len(opportunities)
+
+
+def _residual_quality_signal_remains(
+    task_theory: TaskTheory,
+    proposals_log: list[dict[str, Any]],
+    parent_patch_hash: str,
+) -> bool:
+    if task_theory.bottleneck_class in {"runtime_or_output_defect", "output_contract", "no_observed_failures"}:
+        return False
+    branch_rows = [
+        row
+        for row in proposals_log
+        if row.get("parent_patch_hash") == parent_patch_hash and "accepted" in row
+    ]
+    if not branch_rows:
+        return True
+    local_mechanism_rows = [
+        row
+        for row in branch_rows
+        if row.get("mechanism_class") in {
+            "semantic_boundary_rewrite",
+            "representative_examples",
+            "contrastive_examples",
+        }
+    ]
+    if not local_mechanism_rows:
+        return True
+    return any(not row.get("accepted") for row in local_mechanism_rows[-4:])
 
 
 def _has_selectable_frontier_parent(frontier_states: dict[str, FrontierParentState]) -> bool:
@@ -2881,4 +3179,17 @@ def _summary_progress_fields(summary: PatchSummary) -> dict[str, Any]:
         "mean_score": round(summary.mean_score, 4),
         "mean_cost_usd": summary.mean_cost_usd,
         "median_latency_s": summary.median_latency_s,
+    }
+
+
+def _affordance_evidence_from_theory(task_theory: TaskTheory, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+    row = task_theory.to_dict()
+    runtime = row.get("runtime_defects") or {}
+    output = row.get("output_defects") or {}
+    return {
+        "bottleneck_class": row.get("bottleneck_class"),
+        "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
+        "invalid_output": bool(output.get("invalid_output_count")),
+        "example_coverage": bool((row.get("example_coverage") or {}).get("example_count")),
+        "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }

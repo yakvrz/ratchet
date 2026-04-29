@@ -341,6 +341,7 @@ class RatchetResult:
     task_theories: list[dict[str, Any]]
     transform_summaries: dict[str, dict[str, Any]]
     transform_context_summaries: dict[str, dict[str, Any]]
+    affordance_summaries: dict[str, dict[str, Any]]
     finalist_statuses: list[dict[str, Any]]
     runtime_reliability_diagnostics: list[dict[str, Any]]
     confirmation_results: list[dict[str, Any]]
@@ -350,6 +351,7 @@ class RatchetResult:
     quality_cost_tradeoffs: list[dict[str, Any]]
     optimizer_call_diagnostics: list[dict[str, Any]]
     ideation_metrics: dict[str, Any]
+    evidence_ledger: dict[str, Any]
     selection_reason: str
     outcome_analysis: dict[str, Any]
     manifest: dict[str, Any]

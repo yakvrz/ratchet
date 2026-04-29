@@ -1,9 +1,11 @@
 {
-  "task_id": "python_api_grounding_quick",
+  "task_id": "bfcl_function_calling_assessment",
   "mechanisms_of_interest": [
+    "runtime_defect_fix",
     "output_contract_fix",
     "semantic_boundary_rewrite",
-    "runtime_defect_fix",
+    "representative_examples",
+    "contrastive_examples",
     "model_capability_probe",
     "efficiency_probe"
   ],
@@ -12,7 +14,7 @@
     "semantic_boundary_rewrite",
     "model_capability_probe"
   ],
-  "min_valid_implementation_rate": 0.5,
+  "min_valid_implementation_rate": 0.6,
   "frontier_quality": {
     "min_holdout_score_delta": 0.0
   }

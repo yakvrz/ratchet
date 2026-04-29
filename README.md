@@ -2,18 +2,52 @@
 
 Ratchet is a Python-first optimizer for agents.
 
-Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, diagnoses failures, generates proposed `AgentPatch` changes, validates them against dev and holdout splits, and either promotes a patch or keeps the original baseline.
+Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, implements legal candidate changes through the configured optimizer model, and validates finalists against protected holdout before promoting a patch.
 
-The adapter is intentionally minimal. It runs the agent, grades outputs, optionally exposes a descriptive `AgentSpec`, and exports the selected patch. Ratchet owns search-surface generation, patch proposal, objective handling, and promotion.
+The adapter is intentionally minimal. It runs the agent, grades outputs, optionally exposes a descriptive `AgentSpec`, and exports the selected patch. Ratchet owns the optimization surface, research loop, objective handling, measurement decisions, evidence ledger, and promotion gates.
 
 ## Scope
 
 - Python agents only
 - evals are required
 - grading is adapter-owned over externally visible outputs
-- optimization is patch-based over a Ratchet-generated surface
+- optimization is patch-based over Ratchet-generated optimization affordances
 - supported objective modes: correctness, cost, and latency
 - arbitrary repo-wide source mutation is out of scope
+
+## Optimization Architecture
+
+Ratchet's core loop is research-oriented rather than recipe-oriented:
+
+```text
+AgentSpec
+  -> EditableTarget[]
+  -> OptimizationAffordance[]
+  -> ResearchState
+  -> ExperimentIntent[]
+  -> CandidateProposal[]
+  -> EvidenceLedger
+  -> MeasurementDecision
+  -> FrontierUpdate
+  -> HoldoutValidation
+```
+
+The important artifacts are:
+
+- `EditableTarget`: low-level adapter-exposed edit handle, such as an instruction, model choice, runtime setting, output contract, retrieval policy, tool policy, or few-shot bank.
+- `OptimizationAffordance`: the primary optimizer surface. It names a meaningful legal move, its mechanism, target, operations, expected measurements, risks, composition guidance, suitability, and evidence.
+- `ExperimentIntent`: planner output describing a research question and the affordances that may be used to test it. It contains no patch content.
+- `CandidateProposal`: implementer output that applies one or more affordances through concrete operations or proposal-safe few-shot selections.
+- `EvidenceLedger`: paired candidate-vs-reference evidence used by the measurement selector, reports, and promotion gates.
+
+Model roles are split deliberately:
+
+- diagnoser: labels failure modes from eval traces
+- research planner: emits experiment intents only
+- candidate implementer: emits candidate affordance applications only
+- measurement selector: chooses which already-valid candidates receive more measurement
+
+Ratchet validates every optimizer output. There are no hand-authored proposal recipes, candidate generators, or task-specific rule profiles in the core loop.
 
 ## Quickstart
 
@@ -79,6 +113,15 @@ Public serializable types:
 - `GradeResult`
 - `FailureDiagnosis`
 
+Internal optimization artifacts also appear in run outputs:
+
+- `OptimizationAffordance`
+- `TaskTheory`
+- `ExperimentIntent`
+- `CandidateProposal`
+- `EvidenceLedger`
+- `MeasurementDecision`
+
 Helper utilities:
 
 - `exact_text_grade(...)`
@@ -90,7 +133,9 @@ Helper utilities:
 
 - The eval set scores the agent's external contract: inputs, externally visible outputs, and success criteria.
 - The adapter describes the current agent and scorer; it does not choose the optimization strategy.
-- Ratchet generates editable targets from `AgentSpec`, traces, failures, objective mode, and constraints.
+- Ratchet generates editable targets from `AgentSpec`, then derives ranked optimization affordances from the surface, traces, failures, objective mode, and constraints.
+- The research planner sees affordances, not raw source files or task-specific recipes.
+- Candidate implementations must cite concrete affordance IDs; family and mechanism metadata are derived from those affordances.
 - The scorer, including any LLM judge used by an eval, is frozen and outside the optimization surface.
 - `patch=None` always means the original user-provided agent.
 
@@ -117,6 +162,11 @@ Helper utilities:
 - `samples_per_case`
 - `max_case_retries`
 - `case_timeout_s`
+- `case_concurrency`
+- `stage_case_concurrency`
+- `expensive_candidate_cost_ratio`
+- `max_dev_measurement_cost_usd`
+- `max_holdout_measurement_cost_usd`
 - `fail_fast`
 
 Optional eval health config:
@@ -153,6 +203,8 @@ min_correctness_delta = 0.0 # optional; defaults to strict improvement for corre
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
 Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and patch case with separate cache entries and aggregates case outcomes by majority vote / mean score.
 
+`max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. They are separate from deployed-policy cost constraints: an expensive model candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed the configured measurement budget.
+
 ## Commands
 
 - `python3 -m ratchet init --template python_function|python_cli --out <dir>`
@@ -168,10 +220,12 @@ Each run writes:
 
 - `case_results.jsonl`: resumable per-case cache keyed by patch, case digest, eval digest, adapter fingerprint, objective, and baseline `AgentSpec`
 - `patch_metrics.json`: true baseline, best dev patch, selected holdout patch, accepted dev patches, holdout validations, typed generated surface, and Pareto frontier
-- `decision_log.json`: diagnosis, planning, implementation, measurement, holdout validation, and final selection
+- `decision_log.json`: research state, task theory, planning, implementation, measurement, holdout validation, and final selection
 - `outcome_analysis.json`: explicit reason for promotion or baseline retention
 - `diagnoses.jsonl`: structured diagnosis buckets per iteration
-- `proposals.jsonl`: proposed patches with acceptance/rejection outcomes
+- `proposals.jsonl`: candidate affordance applications with acceptance/rejection outcomes
+- `evidence_ledger.json`: paired candidate evidence, reliability signals, and measurement history
+- `ideation_metrics.json`: planner/implementer/measurement discovery quality
 - `selected_patch.json`: selected patch and promotion status
 - `run_manifest.json`: config, timestamps, cache stats, retries, and runtime-error counts
 - `summary.html`: user-facing run summary
@@ -181,11 +235,11 @@ Each run writes:
 
 ## Samples
 
-- `samples/python_api_grounding_agent/`
-- `samples/policy_triage_agent/`
-- `samples/runbook_action_agent/`
-- `samples/public_docs_agent/`
-- `samples/kashi_agent/`
+- `samples/bfcl_function_calling_agent/`
+- `samples/banking77_intent_agent/`
+- `samples/clinc150_intent_agent/`
+
+The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary agentic benchmark for function-call and output-contract behavior. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 

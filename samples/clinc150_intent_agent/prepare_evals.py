@@ -20,12 +20,15 @@ DATA_URL = "https://raw.githubusercontent.com/clinc/oos-eval/master/data/data_fu
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a small CLINC150 Ratchet eval split.")
-    parser.add_argument("--out", default="evals.sanity.jsonl")
+    parser = argparse.ArgumentParser(description="Build a CLINC150 Ratchet assessment split.")
+    parser.add_argument("--out", default="evals.assessment.jsonl")
     parser.add_argument("--cache-dir", default=".cache")
-    parser.add_argument("--train-per-label", type=int, default=3)
-    parser.add_argument("--dev-per-label", type=int, default=3)
-    parser.add_argument("--holdout-per-label", type=int, default=2)
+    parser.add_argument("--train-total", type=int, default=96)
+    parser.add_argument("--dev-total", type=int, default=96)
+    parser.add_argument("--holdout-total", type=int, default=96)
+    parser.add_argument("--train-per-label", type=int)
+    parser.add_argument("--dev-per-label", type=int)
+    parser.add_argument("--holdout-per-label", type=int)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -37,15 +40,33 @@ def main() -> None:
     train_by_label = _rows_by_label(data["train"] + data["oos_train"])
     dev_by_label = _rows_by_label(data["val"] + data["oos_val"])
     holdout_by_label = _rows_by_label(data["test"] + data["oos_test"])
+    train_counts = _counts_by_label(
+        CLINC150_LABELS,
+        total=args.train_total,
+        per_label=args.train_per_label,
+    )
+    dev_counts = _counts_by_label(
+        CLINC150_LABELS,
+        total=args.dev_total,
+        per_label=args.dev_per_label,
+    )
+    holdout_counts = _counts_by_label(
+        CLINC150_LABELS,
+        total=args.holdout_total,
+        per_label=args.holdout_per_label,
+    )
     for label in CLINC150_LABELS:
         train_rows = train_by_label.get(label, [])
         dev_rows = dev_by_label.get(label, [])
         holdout_rows = holdout_by_label.get(label, [])
-        if len(train_rows) < args.train_per_label:
+        train_count = train_counts[label]
+        dev_count = dev_counts[label]
+        holdout_count = holdout_counts[label]
+        if len(train_rows) < train_count:
             raise ValueError(f"Not enough train examples for label {label!r}.")
-        if len(dev_rows) < args.dev_per_label:
+        if len(dev_rows) < dev_count:
             raise ValueError(f"Not enough dev examples for label {label!r}.")
-        if len(holdout_rows) < args.holdout_per_label:
+        if len(holdout_rows) < holdout_count:
             raise ValueError(f"Not enough holdout examples for label {label!r}.")
         train_rows = _rank_examples(label, train_rows)
         dev_rows = _rank_examples(label, dev_rows)
@@ -55,7 +76,7 @@ def main() -> None:
                 split_name="train",
                 source_split="train" if label != "oos" else "oos_train",
                 label=label,
-                examples=train_rows[: args.train_per_label],
+                examples=train_rows[:train_count],
             )
         )
         rows.extend(
@@ -63,7 +84,7 @@ def main() -> None:
                 split_name="dev",
                 source_split="val" if label != "oos" else "oos_val",
                 label=label,
-                examples=dev_rows[: args.dev_per_label],
+                examples=dev_rows[:dev_count],
             )
         )
         rows.extend(
@@ -71,7 +92,7 @@ def main() -> None:
                 split_name="holdout",
                 source_split="test" if label != "oos" else "oos_test",
                 label=label,
-                examples=holdout_rows[: args.holdout_per_label],
+                examples=holdout_rows[:holdout_count],
             )
         )
     out_path = Path(args.out)
@@ -102,6 +123,20 @@ def _rows_by_label(rows: list[list[str]]) -> dict[str, list[list[str]]]:
         if label in grouped:
             grouped[label].append(row)
     return grouped
+
+
+def _counts_by_label(labels: list[str], *, total: int, per_label: int | None) -> dict[str, int]:
+    if per_label is not None:
+        if per_label <= 0:
+            raise ValueError("per-label counts must be positive.")
+        return {label: per_label for label in labels}
+    if total < len(labels):
+        raise ValueError(f"Total count {total} is smaller than label count {len(labels)}.")
+    base, remainder = divmod(total, len(labels))
+    return {
+        label: base + (1 if index < remainder else 0)
+        for index, label in enumerate(labels)
+    }
 
 
 def _rank_examples(label: str, examples: list[list[str]]) -> list[list[str]]:

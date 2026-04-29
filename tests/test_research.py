@@ -3,11 +3,13 @@ from __future__ import annotations
 import unittest
 
 from ratchet.errors import OptimizerModelError
+from ratchet.evidence_ledger import EvidenceLedger
 from ratchet.experiments import ExperimentIntent, ResearchState
-from ratchet.optimizer import CandidateEvaluationState, _measurement_action
+from ratchet.optimizer import CandidateEvaluationState, _measurement_action, _measurement_budget_exhausted, _research_state_packet
+from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.research import MeasurementSelector, ResearchPlanner
-from ratchet.transforms import CandidateProposal, TransformContextKey
-from ratchet.types import AgentPatch, PatchOperation
+from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal, TransformContextKey
+from ratchet.types import AgentPatch, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, PatchOperation, RunRecord
 
 
 class _Response:
@@ -35,8 +37,6 @@ class _RepairClient:
 
 def _state(index: int) -> CandidateEvaluationState:
     candidate = CandidateProposal(
-        transform_family="prompt_rewrite",
-        mechanism_class="semantic_boundary_rewrite",
         comparison_group="same-group",
         patch=AgentPatch(
             operations=[
@@ -47,6 +47,16 @@ def _state(index: int) -> CandidateEvaluationState:
                 )
             ]
         ),
+        applications=[
+            CandidateAffordanceApplication(
+                affordance_id="prompt_rewrite.semantic_boundary_rewrite.instruction.instructions_system",
+                operation=PatchOperation(
+                    op="add_instruction",
+                    target="instructions.system",
+                    value=f"rule {index}",
+                ),
+            )
+        ],
     )
     return CandidateEvaluationState(
         candidate=candidate,
@@ -54,6 +64,34 @@ def _state(index: int) -> CandidateEvaluationState:
         patch_hash=f"patch-{index}",
         proposal_patch_hash=f"proposal-{index}",
         transform_context=TransformContextKey.from_candidate(candidate),
+    )
+
+
+def _summary(patch_hash: str, scores: list[float], *, cost_usd: float = 0.001) -> PatchSummary:
+    evaluations: list[CaseEvaluation] = []
+    for index, score in enumerate(scores, start=1):
+        evaluations.append(
+            CaseEvaluation(
+                case=EvalCase(id=f"case-{index}", split="dev", input=f"input {index}", expected="ok"),
+                record=RunRecord(
+                    output={"answer": "ok"},
+                    metrics=OperationalMetrics(
+                        latency_s=1.0,
+                        input_tokens=10,
+                        output_tokens=5,
+                        total_tokens=15,
+                        cost_usd=cost_usd,
+                    ),
+                    diagnostics=DiagnosticTrace(metadata={"finish_reason": "stop"}),
+                ),
+                grade=GradeResult(score=score, passed=score >= 1.0),
+            )
+        )
+    return PatchSummary(
+        patch_hash=patch_hash,
+        patch=AgentPatch.empty(),
+        split="dev",
+        evaluations=evaluations,
     )
 
 
@@ -104,22 +142,145 @@ class ResearchRoleTests(unittest.TestCase):
         with self.assertRaises(OptimizerModelError):
             selector.select(
                 stage="full_dev",
+                state={"evidence_ledger": {"candidate_evidence": [{"candidate_id": "a"}]}},
+                candidate_ids=["a"],
+                max_select=1,
+            )
+
+    def test_measurement_selector_repairs_invalid_json_syntax(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient()
+
+        decision = selector.select(
+            stage="full_dev",
+            state={
+                "evidence_ledger": {
+                    "candidate_evidence": [
+                        {"candidate_id": "a"},
+                        {"candidate_id": "b"},
+                    ]
+                }
+            },
+            candidate_ids=["a", "b"],
+            max_select=1,
+        )
+
+        self.assertEqual(decision.selected_candidate_ids, ["a"])
+        self.assertEqual(selector._client.calls, 2)
+        self.assertTrue(selector.last_call_diagnostics["repair_attempted"])
+
+    def test_measurement_selector_fills_missing_skip_reasons(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient(
+            [
+                (
+                    '{"selected_candidate_ids":["a"],"rationale":"pick a",'
+                    '"expected_information":"info","risks":"none",'
+                    '"skipped_candidate_reasons":{}}'
+                )
+            ]
+        )
+
+        decision = selector.select(
+            stage="full_dev",
+            state={
+                "evidence_ledger": {
+                    "candidate_evidence": [
+                        {"candidate_id": "a"},
+                        {"candidate_id": "b"},
+                    ]
+                }
+            },
+            candidate_ids=["a", "b"],
+            max_select=1,
+        )
+
+        self.assertEqual(
+            decision.skipped_candidate_reasons["b"],
+            "not selected by measurement selector",
+        )
+
+    def test_measurement_selector_requires_evidence_ledger(self) -> None:
+        selector = MeasurementSelector(env_path=".env", model="fake", reasoning_effort="low")
+        selector._client = _RepairClient(
+            [
+                (
+                    '{"selected_candidate_ids":[],"rationale":"bad",'
+                    '"expected_information":"info","risks":"none",'
+                    '"skipped_candidate_reasons":{"a":"skip"}}'
+                )
+            ]
+        )
+
+        with self.assertRaises(OptimizerModelError):
+            selector.select(
+                stage="full_dev",
                 state={"candidates": [{"candidate_id": "a"}]},
                 candidate_ids=["a"],
                 max_select=1,
             )
 
-    def test_experiment_intent_normalizes_all_family_marker_and_rejects_unknown_roles(self) -> None:
+    def test_selector_state_includes_measurement_budget_and_deployed_ratios(self) -> None:
+        baseline = _summary("baseline", [1.0, 0.0], cost_usd=0.001)
+        candidate_summary = _summary("patch-1", [1.0, 1.0], cost_usd=0.010)
+        state = _state(1)
+        state.summary = candidate_summary
+        ledger = EvidenceLedger()
+        ledger.add(
+            candidate_id=state.patch_hash,
+            stage="small_dev",
+            reference=baseline,
+            baseline=baseline,
+            candidate=candidate_summary,
+            mechanism_class=state.candidate.mechanism_class,
+            affordance_ids=state.candidate.affordance_ids,
+            comparison_group=state.candidate.comparison_group,
+            candidate_role=state.candidate.candidate_role,
+            rejection_reason=None,
+            constraint_warning=None,
+        )
+
+        packet = _research_state_packet(
+            objective=OptimizationObjective(),
+            stage_name="full_dev",
+            reference=baseline,
+            baseline=baseline,
+            states=[state],
+            proposals_log=[],
+            dev_evaluations_used=1,
+            dev_budget=4,
+            evidence_ledger=ledger,
+            stage_cases=tuple(
+                EvalCase(id=f"case-{index}", split="dev", input="", expected="")
+                for index in range(1, 5)
+            ),
+            samples_per_case=1,
+            measurement_cost_used_usd=0.02,
+            max_measurement_cost_usd=0.05,
+        )
+
+        row = packet["evidence_ledger"]["candidate_evidence"][0]
+        self.assertAlmostEqual(packet["budget"]["remaining_measurement_budget_usd"], 0.03)
+        self.assertAlmostEqual(row["marginal_measurement_cost_usd"], 0.02)
+        self.assertAlmostEqual(row["remaining_measurement_budget_usd"], 0.03)
+        self.assertAlmostEqual(row["deployed_cost_ratio"], 10.0)
+
+    def test_measurement_budget_guard_blocks_only_hard_budget_overrun(self) -> None:
+        self.assertFalse(_measurement_budget_exhausted(used_usd=0.05, marginal_usd=0.04, max_usd=0.10))
+        self.assertTrue(_measurement_budget_exhausted(used_usd=0.08, marginal_usd=0.04, max_usd=0.10))
+        self.assertFalse(_measurement_budget_exhausted(used_usd=10.0, marginal_usd=10.0, max_usd=None))
+
+    def test_experiment_intent_rejects_unknown_roles(self) -> None:
         intent = ExperimentIntent.from_dict(
             {
                 "intent_id": "intent_1",
                 "mechanism_class": "runtime_defect_fix",
                 "hypothesis": "Test runtime.",
-                "allowed_families": ["all"],
+                "affordance_ids": ["runtime.output_cap"],
             },
         )
 
-        self.assertEqual(intent.allowed_families, [])
+        self.assertEqual(intent.affordance_ids, ["runtime.output_cap"])
         with self.assertRaises(ValueError):
             ExperimentIntent.from_dict(
                 {
