@@ -8,6 +8,8 @@ from typing import Any
 
 from ratchet.model_client import ResponsesModelClient
 from ratchet.rendering import render_few_shot_prompt
+from ratchet.surfaces import SurfaceSpec, surface_from_agent_spec
+from ratchet.transform_program import CompiledCandidate
 from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
 
 try:
@@ -68,10 +70,15 @@ class TauBenchActionAdapter:
     def agent_spec(self) -> AgentSpec:
         return BASE_SPEC
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def surface_spec(self) -> SurfaceSpec:
+        return surface_from_agent_spec(BASE_SPEC)
+
+    def run_case(self, case: EvalCase, patch: AgentPatch | CompiledCandidate | None = None) -> RunRecord:
         if self._runner is None:
             client = ResponsesModelClient(env_path=self.env_path)
             self._runner = TauBenchActionRunner(client=client)
+        if isinstance(patch, CompiledCandidate):
+            return self._runner.run_case(agent_config_from_spec(BASE_SPEC), case, candidate=patch)
         return self._runner.run_case(agent_config_from_spec(BASE_SPEC.apply_patch(patch)), case)
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
@@ -92,8 +99,12 @@ class TauBenchActionAdapter:
         score, labels, notes = _score_action_names(expected_names, actual_names)
         return GradeResult(score=score, passed=score >= 1.0, labels=labels, notes=notes)
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, patch: AgentPatch | CompiledCandidate, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
+        if isinstance(patch, CompiledCandidate):
+            (out_dir / "compiled_candidate.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
+            (out_dir / "surface_spec.json").write_text(json.dumps(self.surface_spec().to_dict(), indent=2, sort_keys=True))
+            return
         spec = BASE_SPEC.apply_patch(patch)
         (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
         (out_dir / "agent_spec.json").write_text(json.dumps(spec.to_dict(), indent=2, sort_keys=True))

@@ -5,9 +5,10 @@ Ratchet is an eval-grounded optimizer for Python agents. It treats the eval as t
 The core loop is:
 
 ```text
-AgentSpec
-  -> EditableTarget[]
-  -> OptimizationAffordance[]
+SurfaceSpec
+  -> TransformProgram
+  -> TransformCompiler
+  -> CompiledCandidate
   -> ResearchState
   -> ExperimentIntent[]
   -> CandidateProposal[]
@@ -19,23 +20,23 @@ AgentSpec
 
 ## Boundaries
 
-Ratchet is deliberately not a repo-wide coding agent. It does not rewrite arbitrary source files. The adapter exposes an `AgentSpec`, Ratchet derives a bounded optimization surface from that spec, and candidates are expressed as `AgentPatch` operations against that surface.
+Ratchet is deliberately not a repo-wide coding agent. It does not rewrite arbitrary source files. The adapter exposes a `SurfaceSpec`, and candidates are expressed as typed `TransformProgram`s compiled against that surface. The compiler, not the optimizer model, decides whether a candidate is legal, executable, and inside immutable boundaries.
 
 The adapter owns:
 
-- running the baseline and patched agent
+- running the baseline and compiled candidate
 - grading externally visible outputs
-- describing the current agent through `AgentSpec`
-- exporting a selected patch into an inspectable artifact
+- describing executable optimization surfaces through `SurfaceSpec`
+- exporting a selected compiled candidate into an inspectable artifact
 
 Ratchet owns:
 
 - eval loading and split protection
 - baseline measurement
-- editable target generation
-- optimization affordance generation
+- surface validation
+- transform compilation
 - research planning
-- candidate implementation validation
+- candidate implementation validation and boundary enforcement
 - staged measurement
 - evidence accounting
 - frontier and holdout promotion gates
@@ -43,9 +44,13 @@ Ratchet owns:
 
 ## Core Artifacts
 
-`EditableTarget` is the low-level edit handle generated from `AgentSpec`: an instruction, model choice, runtime setting, output contract, tool policy, or few-shot bank.
+`SurfaceSpec` is the executable optimization contract. It describes context sections, lifecycle hooks, typed state support, tool interaction capabilities, model-call controls, response interception, immutable boundaries, and safety constraints.
 
-`OptimizationAffordance` is the primary optimizer surface. It names one meaningful legal move, including the family, mechanism, target, allowed operations, expected measurements, risk, composition guidance, suitability, and evidence. Planner and implementer prompts should reason over affordances, not raw source files or arbitrary string targets.
+`TransformProgram` is the candidate artifact. It is a typed, hook-based program over the inferred surface, with operations for context construction, state updates, tool-call validation, model configuration, response handling, control flow, and instrumentation.
+
+`TransformCompiler` is the deterministic safety boundary. It parses transform programs, validates hooks and capabilities, type-checks references, enforces immutable boundaries, lowers operations into executable runtime middleware, and emits an inspectable compile report and candidate diff.
+
+`CompiledCandidate` is what adapters execute. It contains the original program, operations grouped by hook, compiler report, candidate diff, and runtime instrumentation plan.
 
 `EvidencePacket` is deterministic symptom evidence extracted from eval results and diagnostics. It records observed runtime, output, tool, label, example-coverage, and cost/latency signals without deciding the causal theory.
 
@@ -53,9 +58,9 @@ Ratchet owns:
 
 `ResearchState` is the branch-local planning packet. It includes research theory, behavior profile, active affordances, budget state, prior experiment outcomes, and frontier context.
 
-`ExperimentIntent` is planner output. It defines a research question, mechanism, target slices, allowed affordance IDs, measurements, success criteria, and disconfirming result. It must not contain patch content.
+`ExperimentIntent` is planner output. It defines a research question, mechanism, target slices, required surfaces, measurements, success criteria, and disconfirming result. It must not contain transform program content.
 
-`CandidateProposal` is implementer output. It applies one or more cited affordances through concrete operations or proposal-safe few-shot selections.
+`CandidateProposal` is implementer output. It contains a proposed `TransformProgram` plus metadata about hypothesis, expected cost, risk, and targeted failures.
 
 `EvidenceLedger` is the measurement source of truth. It records paired candidate-vs-reference deltas, pass flips, invalid-output changes, cost/latency/token deltas, sample sizes, reliability signals, measurement cost, and baseline-instability flags.
 
@@ -83,8 +88,8 @@ Deterministic code should enforce invariants:
 - budget ceilings
 - adapter and eval fingerprints
 - schema validation
-- patch compatibility
-- affordance ID validity
+- transform compile validity
+- surface capability validity
 - output-contract preservation
 - no holdout-guided search
 - no task-specific proposal recipes
@@ -93,7 +98,7 @@ Model calls should provide judgment:
 
 - failure interpretation
 - research questions worth testing
-- concrete candidate content within legal affordances
+- concrete transform programs within legal surfaces
 - measurement value tradeoffs under evidence uncertainty
 
 ## Tool-Call Tasks
@@ -102,8 +107,8 @@ Tool calls are handled as an extension of Ratchet's evidence loop, not as a tau-
 
 - adapters execute the real environment loop and return structured trajectories
 - behavior diagnostics summarize tool status, tool errors, premature stopping, turn counts, and tool-call counts
-- affordance providers expose meaningful tool/action moves such as tool selection policy, argument grounding, precondition policy, and interaction completion
-- candidates still apply legal affordances through normal `AgentPatch` operations
+- surface specs expose meaningful tool/action capabilities such as tool selection policy, argument grounding, precondition policy, and interaction completion
+- candidates compile into hook-based runtime middleware rather than source rewrites
 - evidence and reports distinguish task score gains from extra model calls, tool calls, turns, latency, and measurement spend
 
 Known public benchmark integrations should use the official simulator when available. The optional tau-bench bridge converts original `tau-bench` retail/airline results into Ratchet `RunRecord`s; static action-list proxies are useful only as development probes, not leaderboard-comparable tau-bench evaluation.
@@ -114,7 +119,7 @@ Hard-coded task recipes, fallback proposal generators, or model-bypass switches 
 
 Ratchet separates deployed-policy tradeoffs from measurement spend.
 
-Deployed-policy metrics describe what a selected patch would cost or how fast it would run per case.
+Deployed-policy metrics describe what a selected candidate would cost or how fast it would run per case.
 
 Measurement budgets control development spend while evaluating candidates. Expensive model probes may still be measured when they provide useful frontier evidence, but deterministic code must not exceed configured measurement budgets.
 

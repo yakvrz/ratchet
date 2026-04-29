@@ -2,9 +2,9 @@
 
 Ratchet is a Python-first optimizer for agents.
 
-Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, implements legal candidate changes through the configured optimizer model, and validates finalists against protected holdout before promoting a patch.
+Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, compiles legal transform programs against the adapter's declared surface, and validates finalists against protected holdout before promoting a candidate.
 
-The adapter is intentionally minimal. It runs the agent, grades outputs, optionally exposes a descriptive `AgentSpec`, and exports the selected patch. Ratchet owns the optimization surface, research loop, objective handling, measurement decisions, evidence ledger, and promotion gates.
+The adapter is intentionally minimal. It declares an executable `SurfaceSpec`, runs the agent with an optional compiled candidate, grades outputs, and exports the selected candidate. Ratchet owns the compiler, research loop, objective handling, measurement decisions, evidence ledger, and promotion gates.
 
 For interactive agent benchmarks, one eval case may contain a full conversation with model turns, tool/environment calls, and terminal state. Adapters should return these trajectories through `DiagnosticTrace`; Ratchet uses them as evidence rather than flattening the case into one final string.
 
@@ -13,7 +13,7 @@ For interactive agent benchmarks, one eval case may contain a full conversation 
 - Python agents only
 - evals are required
 - grading is adapter-owned over externally visible outputs
-- optimization is patch-based over Ratchet-generated optimization affordances
+- optimization is transform-program based over adapter-declared surfaces
 - supported objective modes: correctness, cost, and latency
 - arbitrary repo-wide source mutation is out of scope
 
@@ -22,9 +22,10 @@ For interactive agent benchmarks, one eval case may contain a full conversation 
 Ratchet's core loop is research-oriented rather than recipe-oriented:
 
 ```text
-AgentSpec
-  -> EditableTarget[]
-  -> OptimizationAffordance[]
+SurfaceSpec
+  -> TransformProgram
+  -> TransformCompiler
+  -> CompiledCandidate
   -> ResearchState
   -> ExperimentIntent[]
   -> CandidateProposal[]
@@ -88,18 +89,19 @@ python3 -m ratchet optimize \
 
 An adapter object must implement:
 
-- `agent_spec() -> AgentSpec | None`
-- `run_case(case: EvalCase, patch: AgentPatch | None = None) -> RunRecord`
+- `surface_spec() -> SurfaceSpec`
+- `agent_spec() -> AgentSpec`
+- `run_case(case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord`
 - `grade(case: EvalCase, output: object) -> GradeResult`
-- `export(patch: AgentPatch, out_dir: Path) -> None`
+- `export(candidate: CompiledCandidate, out_dir: Path) -> None`
 
 Public serializable types:
 
 - `AgentSpec`
 - `AgentTool`
-- `EditableTarget`
-- `AgentPatch`
-- `PatchOperation`
+- `SurfaceSpec`
+- `TransformProgram`
+- `CompiledCandidate`
 - `OptimizationObjective`
 - `OptimizationConstraints`
 - `EvalCase`
@@ -133,12 +135,12 @@ Helper utilities:
 
 - The eval set scores the agent's external contract: inputs, externally visible outputs, and success criteria.
 - The adapter describes the current agent and scorer; it does not choose the optimization strategy.
-- Ratchet generates editable targets from `AgentSpec`, then derives ranked optimization affordances from the surface, traces, failures, objective mode, and constraints.
+- Ratchet compiles typed `TransformProgram` candidates against `SurfaceSpec`, then evaluates compiled candidates under the normal evidence and budget loop.
 - Tool/environment traces are evidence. Tool-related affordances are legal moves generated from the agent surface plus observed trajectory failures.
 - The research planner sees affordances, not raw source files or task-specific recipes.
-- Candidate implementations must cite concrete affordance IDs; family and mechanism metadata are derived from those affordances.
+- Candidate implementations must compile against declared surfaces; unsupported hooks, state references, and boundary violations are rejected before eval.
 - The scorer, including any LLM judge used by an eval, is frozen and outside the optimization surface.
-- `patch=None` always means the original user-provided agent.
+- `candidate=None` always means the original user-provided agent.
 
 ## Config
 
@@ -206,12 +208,12 @@ allowed_edits = ["instruction", "tool", "runtime", "model", "output"]
 allowed_models = ["gpt-4o-2024-08-06", "gpt-5.4-mini"]
 max_cost_ratio = 1.0
 max_latency_ratio = 1.1
-max_patch_operations = 3
+max_transform_operations = 8
 min_correctness_delta = 0.0 # optional; defaults to strict improvement for correctness and non-inferiority for cost/latency
 ```
 
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
-Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and patch case with separate cache entries and aggregates case outcomes by majority vote / mean score.
+Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and candidate case with separate cache entries and aggregates case outcomes by majority vote / mean score.
 
 `max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. Interactive runs can also set tool-call and turn ceilings. These are separate from deployed-policy constraints: an expensive or long-horizon candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed configured measurement budgets.
 
@@ -229,20 +231,20 @@ Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repea
 
 Each run writes:
 
-- `case_results.jsonl`: resumable per-case cache keyed by patch, case digest, eval digest, adapter fingerprint, objective, and baseline `AgentSpec`
-- `patch_metrics.json`: true baseline, best dev patch, selected holdout patch, accepted dev patches, holdout validations, typed generated surface, and Pareto frontier
+- `case_results.jsonl`: resumable per-case cache keyed by candidate, case digest, eval digest, adapter fingerprint, objective, and surface spec
+- `candidate_metrics.json`: true baseline, best dev candidate, selected holdout candidate, accepted dev candidates, holdout validations, typed surface, and Pareto frontier
 - `decision_log.json`: research state, task theory, planning, implementation, measurement, holdout validation, and final selection
 - `outcome_analysis.json`: explicit reason for promotion or baseline retention
 - `diagnoses.jsonl`: structured diagnosis buckets per iteration
 - `proposals.jsonl`: candidate affordance applications with acceptance/rejection outcomes
 - `evidence_ledger.json`: paired candidate evidence, reliability signals, and measurement history
 - `ideation_metrics.json`: planner/implementer/measurement discovery quality
-- `selected_patch.json`: selected patch and promotion status
+- `selected_candidate.json`: selected compiled candidate and promotion status
 - `run_manifest.json`: config, timestamps, cache stats, retries, and runtime-error counts
 - `summary.html`: user-facing run summary
 - `plots/`: SVG plots embedded by `summary.html`
 - `report.md`: human-readable report
-- `exported_patch/`: adapter-materialized patch bundle
+- `exported_candidate/`: adapter-materialized candidate bundle
 
 ## Samples
 
@@ -257,4 +259,4 @@ See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, a
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
-Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_theorist_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through generated `change_model` patches.
+Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_theorist_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through compiled model-configuration transforms.

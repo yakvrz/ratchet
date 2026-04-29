@@ -14,6 +14,9 @@ from ratchet.objectives import FinalGateResult, GatePredicate, final_gate_status
 from ratchet.optimizer import RatchetOptimizer
 from ratchet.pricing import estimate_cost_usd
 from ratchet.proposals import CandidateImplementer
+from ratchet.surfaces import SurfaceSpec
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import CompiledCandidate, TransformProgram
 from ratchet.types import (
     AgentPatch,
     AgentSpec,
@@ -62,13 +65,17 @@ __all__ = [
     "RatchetConfigError",
     "ResearchState",
     "RunRecord",
+    "SurfaceSpec",
     "TaskTheory",
     "TargetSemantics",
     "ToolCallTrace",
     "TauBenchRunner",
     "CandidateImplementation",
     "CandidateImplementer",
+    "CompiledCandidate",
     "MeasurementDecision",
+    "TransformCompiler",
+    "TransformProgram",
     "build_behavior_diagnostics",
     "build_proposal_example_bank",
     "build_task_theory",
