@@ -1,6 +1,7 @@
 """Ratchet: attachable agent optimizer."""
 
 from ratchet.adapters import AdapterProtocol, load_adapter
+from ratchet.adapter_generation import AdapterGenerator, GeneratedSingleCallAdapter, ModelRequest
 from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
 from ratchet.benchmarks import TauBenchRunner, taubench_result_to_run_record
 from ratchet.config import RatchetConfigError
@@ -38,6 +39,7 @@ from ratchet.types import (
 
 __all__ = [
     "AdapterProtocol",
+    "AdapterGenerator",
     "AgentPatch",
     "AgentSpec",
     "AgentTool",
@@ -48,6 +50,7 @@ __all__ = [
     "FinalGateResult",
     "GatePredicate",
     "GradeResult",
+    "GeneratedSingleCallAdapter",
     "IdeationAssessmentSpec",
     "InteractionRecorder",
     "ExperimentSpec",
@@ -74,6 +77,7 @@ __all__ = [
     "CandidateImplementer",
     "CompiledCandidate",
     "MeasurementDecision",
+    "ModelRequest",
     "TransformCompiler",
     "TransformProgram",
     "build_behavior_diagnostics",

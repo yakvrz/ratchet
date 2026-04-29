@@ -1,21 +1,22 @@
 from __future__ import annotations
 
 from collections import Counter
-import json
 import os
-from pathlib import Path
 from typing import Any
 
-from ratchet.model_client import ResponsesModelClient
-from ratchet.rendering import render_few_shot_prompt
-from ratchet.surfaces import SurfaceSpec, surface_from_agent_spec
-from ratchet.transform_program import CompiledCandidate
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
+from ratchet.adapter_generation import (
+    GeneratedSingleCallAdapter,
+    ModelRequest,
+    context_graph_from_spec,
+    model_config_from_spec,
+)
+from ratchet.grading import extract_json_payload
+from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 try:
-    from agent import TauBenchActionRunner
+    from agent import TauBenchActionConfig
 except ModuleNotFoundError:
-    from .agent import TauBenchActionRunner
+    from .agent import TauBenchActionConfig
 
 
 BASE_SPEC = AgentSpec(
@@ -44,42 +45,25 @@ BASE_SPEC = AgentSpec(
 )
 
 
-def agent_config_from_spec(spec: AgentSpec) -> dict[str, str]:
-    return {
-        "model": spec.model,
-        "reasoning_effort": str(spec.runtime.get("reasoning_effort", "low")),
-        "output_cap": str(spec.runtime.get("output_cap", 512)),
-        "task_rule": spec.instructions.get("task_rule", ""),
-        "policy_rule": spec.instructions.get("policy_rule", ""),
-        "action_rule": spec.instructions.get("action_rule", ""),
-        "sequencing_rule": spec.instructions.get("sequencing_rule", ""),
-        "output_rule": spec.instructions.get("output_rule", ""),
-        "few_shot": render_few_shot_prompt(spec.few_shot),
-    }
-
-
-class TauBenchActionAdapter:
-    def __init__(
-        self,
-        env_path: str | None = None,
-        runner: TauBenchActionRunner | None = None,
-    ) -> None:
-        self.env_path = env_path or os.environ.get("RATCHET_ENV_FILE", ".env")
-        self._runner = runner
-
+class TauBenchActionHarness:
     def agent_spec(self) -> AgentSpec:
         return BASE_SPEC
 
-    def surface_spec(self) -> SurfaceSpec:
-        return surface_from_agent_spec(BASE_SPEC)
+    def build_model_request(self, spec: AgentSpec, case: EvalCase) -> ModelRequest:
+        config = TauBenchActionConfig.from_agent_config(_agent_config_from_spec(spec))
+        return ModelRequest(
+            context=context_graph_from_spec(
+                spec,
+                section_order=["task_rule", "policy_rule", "action_rule", "sequencing_rule", "output_rule"],
+            ),
+            input=case.input,
+            model_config=model_config_from_spec(spec),
+            text=config.text_config(),
+        )
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | CompiledCandidate | None = None) -> RunRecord:
-        if self._runner is None:
-            client = ResponsesModelClient(env_path=self.env_path)
-            self._runner = TauBenchActionRunner(client=client)
-        if isinstance(patch, CompiledCandidate):
-            return self._runner.run_case(agent_config_from_spec(BASE_SPEC), case, candidate=patch)
-        return self._runner.run_case(agent_config_from_spec(BASE_SPEC.apply_patch(patch)), case)
+    def parse_output(self, raw_output_text: str) -> object:
+        payload = extract_json_payload(raw_output_text)
+        return payload if _is_action_payload(payload) else {"actions": [], "message": "", "invalid_output": raw_output_text}
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         expected = case.expected
@@ -99,16 +83,29 @@ class TauBenchActionAdapter:
         score, labels, notes = _score_action_names(expected_names, actual_names)
         return GradeResult(score=score, passed=score >= 1.0, labels=labels, notes=notes)
 
-    def export(self, patch: AgentPatch | CompiledCandidate, out_dir: Path) -> None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        if isinstance(patch, CompiledCandidate):
-            (out_dir / "compiled_candidate.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
-            (out_dir / "surface_spec.json").write_text(json.dumps(self.surface_spec().to_dict(), indent=2, sort_keys=True))
-            return
-        spec = BASE_SPEC.apply_patch(patch)
-        (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "agent_spec.json").write_text(json.dumps(spec.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "agent_config.json").write_text(json.dumps(agent_config_from_spec(spec), indent=2, sort_keys=True))
+
+class TauBenchActionAdapter(GeneratedSingleCallAdapter):
+    def __init__(self, env_path: str | None = None, client: object | None = None, runner: object | None = None) -> None:
+        if client is None and runner is not None:
+            client = getattr(runner, "client", None)
+        super().__init__(
+            harness=TauBenchActionHarness(),
+            env_path=env_path or os.environ.get("RATCHET_ENV_FILE", ".env"),
+            client=client,
+        )
+
+
+def _agent_config_from_spec(spec: AgentSpec) -> dict[str, str]:
+    return {
+        "model": spec.model,
+        "reasoning_effort": str(spec.runtime.get("reasoning_effort", "low")),
+        "output_cap": str(spec.runtime.get("output_cap", 512)),
+        "task_rule": spec.instructions.get("task_rule", ""),
+        "policy_rule": spec.instructions.get("policy_rule", ""),
+        "action_rule": spec.instructions.get("action_rule", ""),
+        "sequencing_rule": spec.instructions.get("sequencing_rule", ""),
+        "output_rule": spec.instructions.get("output_rule", ""),
+    }
 
 
 def _action_names(actions: Any) -> list[str]:
@@ -143,6 +140,15 @@ def _score_action_names(expected: list[str], actual: list[str]) -> tuple[float, 
         labels.append("wrong_sequence")
     notes = f"expected={expected!r} actual={actual!r}"
     return (1.0 if actual == expected else round(score, 4)), labels, notes
+
+
+def _is_action_payload(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    actions = value.get("actions")
+    if not isinstance(actions, list):
+        return False
+    return all(isinstance(action, dict) and isinstance(action.get("name"), str) for action in actions)
 
 
 adapter = TauBenchActionAdapter()

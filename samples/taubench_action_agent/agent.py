@@ -5,12 +5,9 @@ import json
 import time
 from typing import Any
 
-from ratchet.context_graph import ContextGraph, ContextSection
 from ratchet.grading import extract_json_payload
 from ratchet.model_client import ResponsesModelClient
 from ratchet.pricing import estimate_cost_usd
-from ratchet.runtime import RuntimeContext, TransformRuntime
-from ratchet.transform_program import CompiledCandidate
 from ratchet.types import DiagnosticTrace, EvalCase, OperationalMetrics, RunRecord
 
 
@@ -41,31 +38,18 @@ class TauBenchActionConfig:
         )
 
     def instructions(self) -> str:
-        return self.context_graph().render_text()
-
-    def context_graph(self) -> ContextGraph:
-        rows = [
-            ("task_rule", self.task_rule),
-            ("policy_rule", self.policy_rule),
-            ("action_rule", self.action_rule),
-            ("sequencing_rule", self.sequencing_rule),
-            ("output_rule", self.output_rule),
-            ("few_shot", self.few_shot),
-        ]
-        return ContextGraph(
-            tuple(
-                ContextSection(name=name, role="system", content=text, required=name != "few_shot")
-                for name, text in rows
-                if text
-            )
+        return "\n".join(
+            line
+            for line in [
+                self.task_rule,
+                self.policy_rule,
+                self.action_rule,
+                self.sequencing_rule,
+                self.output_rule,
+                self.few_shot,
+            ]
+            if line
         )
-
-    def model_config(self) -> dict[str, Any]:
-        return {
-            "model": self.model,
-            "reasoning_effort": self.reasoning_effort,
-            "max_tokens": self.output_cap,
-        }
 
     def text_config(self) -> dict[str, Any]:
         return {
@@ -101,42 +85,22 @@ class TauBenchActionRunner:
     def __init__(self, *, client: ResponsesModelClient) -> None:
         self.client = client
 
-    def run_case(
-        self,
-        agent_config: dict[str, str],
-        case: EvalCase,
-        candidate: CompiledCandidate | None = None,
-    ) -> RunRecord:
+    def run_case(self, agent_config: dict[str, str], case: EvalCase) -> RunRecord:
         config = TauBenchActionConfig.from_agent_config(agent_config)
-        runtime = TransformRuntime(candidate)
-        ctx = RuntimeContext(
-            case=case,
-            context=config.context_graph(),
-            model_config=config.model_config(),
-        )
-        runtime.run_hook("on_task_start", ctx)
-        runtime.run_hook("before_model_call", ctx)
         started_at = time.perf_counter()
         response = self.client.create_response(
-            model=str(ctx.model_config.get("model", config.model)),
-            reasoning={"effort": str(ctx.model_config.get("reasoning_effort", config.reasoning_effort))},
-            instructions=ctx.context.render_text(),
+            model=config.model,
+            reasoning={"effort": config.reasoning_effort},
+            instructions=config.instructions(),
             input=case.input,
-            max_output_tokens=int(ctx.model_config.get("max_tokens", config.output_cap)),
+            max_output_tokens=config.output_cap,
             text=config.text_config(),
         )
         latency_s = time.perf_counter() - started_at
         raw_output_text = response.output_text.strip()
-        ctx.raw_response = raw_output_text
-        runtime.run_hook("after_model_call", ctx)
         payload = extract_json_payload(raw_output_text)
         parser_fallback = not _is_action_payload(payload)
         output = payload if _is_action_payload(payload) else {"actions": [], "message": "", "invalid_output": raw_output_text}
-        ctx.draft_response = output
-        ctx.output = output
-        runtime.run_hook("before_user_response", ctx)
-        output = ctx.output
-        runtime.run_hook("on_task_end", ctx)
         return RunRecord(
             output=output,
             metrics=OperationalMetrics(
@@ -157,11 +121,6 @@ class TauBenchActionRunner:
                     "invalid_output": isinstance(output, dict) and "invalid_output" in output,
                     "output_tokens": response.usage.output_tokens,
                     "output_item_types": [item.type for item in response.output],
-                    "transform_candidate_id": candidate.program.candidate_id if candidate is not None else None,
-                    "transform_compile_report": candidate.report.to_dict() if candidate is not None else None,
-                    "transform_diff": candidate.diff.to_dict() if candidate is not None else None,
-                    "transform_trace": list(ctx.trace_annotations),
-                    "rendered_context_sections": ctx.context.section_names(),
                 },
             ),
         )

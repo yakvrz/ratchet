@@ -5,7 +5,9 @@ Ratchet is an eval-grounded optimizer for Python agents. It treats the eval as t
 The core loop is:
 
 ```text
-SurfaceSpec
+AgentHarness
+  -> AdapterGenerator
+  -> SurfaceSpec
   -> TransformProgram
   -> TransformCompiler
   -> CompiledCandidate
@@ -20,17 +22,20 @@ SurfaceSpec
 
 ## Boundaries
 
-Ratchet is deliberately not a repo-wide coding agent. It does not rewrite arbitrary source files. The adapter exposes a `SurfaceSpec`, and candidates are expressed as typed `TransformProgram`s compiled against that surface. The compiler, not the optimizer model, decides whether a candidate is legal, executable, and inside immutable boundaries.
+Ratchet is deliberately not a repo-wide coding agent. It does not rewrite arbitrary source files. A task-specific harness exposes model-request construction, output parsing, and grading. Ratchet's adapter generator turns that harness into an executable `SurfaceSpec` and runtime adapter. Candidates are expressed as typed `TransformProgram`s compiled against that surface. The compiler, not the optimizer model, decides whether a candidate is legal, executable, and inside immutable boundaries.
 
 The adapter owns:
 
-- running the baseline and compiled candidate
+- declaring task-specific model request construction
+- parsing externally visible outputs
 - grading externally visible outputs
-- describing executable optimization surfaces through `SurfaceSpec`
-- exporting a selected compiled candidate into an inspectable artifact
 
 Ratchet owns:
 
+- adapter generation from the harness
+- running the baseline and compiled candidate
+- describing executable optimization surfaces through `SurfaceSpec`
+- exporting a selected compiled candidate into an inspectable artifact
 - eval loading and split protection
 - baseline measurement
 - surface validation
@@ -43,6 +48,10 @@ Ratchet owns:
 - reporting
 
 ## Core Artifacts
+
+`AgentHarness` is the ingestion boundary. For single-call agents it declares how to build a `ModelRequest`, parse raw model output, and grade the resulting external output. It should not contain optimizer logic.
+
+`AdapterGenerator` turns a harness into a runtime adapter. It infers a `SurfaceSpec`, invokes transform hooks, executes model calls, records instrumentation, and exports compiled artifacts.
 
 `SurfaceSpec` is the executable optimization contract. It describes context sections, lifecycle hooks, typed state support, tool interaction capabilities, model-call controls, response interception, immutable boundaries, and safety constraints.
 

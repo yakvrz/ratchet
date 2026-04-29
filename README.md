@@ -4,7 +4,7 @@ Ratchet is a Python-first optimizer for agents.
 
 Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, compiles legal transform programs against the adapter's declared surface, and validates finalists against protected holdout before promoting a candidate.
 
-The adapter is intentionally minimal. It declares an executable `SurfaceSpec`, runs the agent with an optional compiled candidate, grades outputs, and exports the selected candidate. Ratchet owns the compiler, research loop, objective handling, measurement decisions, evidence ledger, and promotion gates.
+The adapter is intentionally generated from a small harness. The harness declares how to build a model request, parse output, and grade externally visible behavior. Ratchet generates the executable `SurfaceSpec`, runtime hook wrapper, compiled-candidate execution, and export path.
 
 For interactive agent benchmarks, one eval case may contain a full conversation with model turns, tool/environment calls, and terminal state. Adapters should return these trajectories through `DiagnosticTrace`; Ratchet uses them as evidence rather than flattening the case into one final string.
 
@@ -22,7 +22,9 @@ For interactive agent benchmarks, one eval case may contain a full conversation 
 Ratchet's core loop is research-oriented rather than recipe-oriented:
 
 ```text
-SurfaceSpec
+AgentHarness
+  -> AdapterGenerator
+  -> SurfaceSpec
   -> TransformProgram
   -> TransformCompiler
   -> CompiledCandidate
@@ -95,6 +97,14 @@ An adapter object must implement:
 - `grade(case: EvalCase, output: object) -> GradeResult`
 - `export(candidate: CompiledCandidate, out_dir: Path) -> None`
 
+For single-call agents, prefer building a small harness and letting Ratchet generate the adapter:
+
+```python
+adapter = AdapterGenerator().build_runtime_adapter(harness)
+```
+
+The harness owns task-specific request construction, output parsing, and grading. Ratchet owns hook execution, transform compilation, instrumentation, surface export, and model-call runtime mechanics.
+
 Public serializable types:
 
 - `AgentSpec`
@@ -102,6 +112,8 @@ Public serializable types:
 - `SurfaceSpec`
 - `TransformProgram`
 - `CompiledCandidate`
+- `AdapterGenerator`
+- `GeneratedSingleCallAdapter`
 - `OptimizationObjective`
 - `OptimizationConstraints`
 - `EvalCase`

@@ -20,32 +20,36 @@ FUNCTION_AGENT_BODY = """from __future__ import annotations
 from typing import Any
 
 
-def run_agent(spec: dict[str, Any], case_payload: dict[str, Any]) -> dict[str, Any]:
-    expected = str(case_payload["expected"])
-    cheaper = spec["model"] == "cheaper"
-    grounded = "grounded" in " ".join(spec.get("instructions", {}).values()).lower()
-    total_tokens = 180
-    cost_usd = 0.009
-    latency_s = 1.3
-    if cheaper:
-        total_tokens -= 60
-        cost_usd -= 0.005
-        latency_s -= 0.2
-    if grounded:
-        total_tokens -= 35
-        cost_usd -= 0.001
-        latency_s -= 0.1
-    output = expected if grounded else "wrong"
-    return {
-        "output": output,
-        "raw_output_text": output,
-        "tool_calls": [],
-        "latency_s": latency_s,
-        "input_tokens": total_tokens // 2,
-        "output_tokens": total_tokens // 2,
-        "total_tokens": total_tokens,
-        "cost_usd": cost_usd,
-    }
+class Usage:
+    input_tokens = 90
+    output_tokens = 14
+
+
+class Response:
+    usage = Usage()
+    output = []
+    finish_reason = "stop"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+
+
+class Client:
+    def create_response(self, **kwargs: Any) -> Response:
+        answers = {"first": "alpha", "second": "beta", "third": "gamma", "fourth": "delta"}
+        return Response(answers[str(kwargs["input"])])
+
+
+def build_model_input(case_payload: dict[str, Any]) -> Any:
+    return case_payload["input"]
+
+
+def parse_model_output(raw_output_text: str) -> object:
+    return raw_output_text.strip()
+
+
+def create_model_client() -> object:
+    return Client()
 """
 
 
@@ -57,39 +61,36 @@ from typing import Any
 
 
 def run_agent(spec: dict[str, Any], case_payload: dict[str, Any]) -> dict[str, Any]:
-    expected = str(case_payload["expected"])
-    cheaper = spec["model"] == "cheaper"
-    grounded = "grounded" in " ".join(spec.get("instructions", {}).values()).lower()
-    total_tokens = 200
-    cost_usd = 0.011
-    latency_s = 1.4
-    if cheaper:
-        total_tokens -= 70
-        cost_usd -= 0.006
-        latency_s -= 0.25
-    if grounded:
-        total_tokens -= 45
-        cost_usd -= 0.001
-        latency_s -= 0.1
-    output = expected if grounded else "wrong"
-    return {
-        "output": output,
-        "raw_output_text": output,
-        "tool_calls": [],
-        "latency_s": latency_s,
-        "input_tokens": total_tokens // 2,
-        "output_tokens": total_tokens // 2,
-        "total_tokens": total_tokens,
-        "cost_usd": cost_usd,
-    }
+    return {"input": case_payload["input"]}
+
+
+class Usage:
+    input_tokens = 100
+    output_tokens = 16
+
+
+class Response:
+    usage = Usage()
+    output = []
+    finish_reason = "stop"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+
+
+class Client:
+    def create_response(self, **kwargs: Any) -> Response:
+        answers = {"first": "alpha", "second": "beta", "third": "gamma", "fourth": "delta"}
+        return Response(answers[str(kwargs["input"])])
+
+
+def create_model_client() -> object:
+    return Client()
 
 
 def main() -> None:
     request = json.loads(sys.stdin.read())
-    response = run_agent(
-        spec=dict(request["spec"]),
-        case_payload=dict(request["case"]),
-    )
+    response = run_agent({}, dict(request["case"]))
     sys.stdout.write(json.dumps(response, sort_keys=True))
 
 

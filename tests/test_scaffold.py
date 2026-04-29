@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 import py_compile
 import tempfile
 import unittest
 
 from ratchet.config import load_run_config
 from ratchet.scaffold import init_scaffold
+from ratchet.adapter_generation import GeneratedSingleCallAdapter
+from ratchet.adapters import load_adapter
 
 
 class ScaffoldTests(unittest.TestCase):
@@ -20,6 +23,7 @@ class ScaffoldTests(unittest.TestCase):
             self.assertTrue((root / "README.md").exists())
             py_compile.compile(str(root / "ratchet_adapter.py"), doraise=True)
             py_compile.compile(str(root / "agent.py"), doraise=True)
+            self.assertIsInstance(_load_scaffold_adapter(root), GeneratedSingleCallAdapter)
 
     def test_init_python_cli_scaffold_creates_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -30,6 +34,7 @@ class ScaffoldTests(unittest.TestCase):
             self.assertTrue((root / "evals.sample.jsonl").exists())
             py_compile.compile(str(root / "ratchet_adapter.py"), doraise=True)
             py_compile.compile(str(root / "agent_cli.py"), doraise=True)
+            self.assertIsInstance(_load_scaffold_adapter(root), GeneratedSingleCallAdapter)
 
     def test_generated_config_loads_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -38,6 +43,20 @@ class ScaffoldTests(unittest.TestCase):
             self.assertEqual(config.adapter, "ratchet_adapter:adapter")
             self.assertEqual(config.evals, (root / "evals.sample.jsonl").resolve())
             self.assertEqual(config.out, (root / "results" / "run").resolve())
+
+
+def _load_scaffold_adapter(root: Path) -> object:
+    sys.path.insert(0, str(root))
+    try:
+        sys.modules.pop("ratchet_adapter", None)
+        sys.modules.pop("agent", None)
+        sys.modules.pop("agent_cli", None)
+        return load_adapter("ratchet_adapter:adapter")
+    finally:
+        sys.path.remove(str(root))
+        sys.modules.pop("ratchet_adapter", None)
+        sys.modules.pop("agent", None)
+        sys.modules.pop("agent_cli", None)
 
 
 if __name__ == "__main__":
