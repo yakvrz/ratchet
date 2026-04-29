@@ -6,7 +6,15 @@ import time
 from typing import Any
 
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, MeasurementDecision, ResearchState
+from ratchet.experiments import (
+    CANDIDATE_ROLES,
+    MECHANISM_CLASSES,
+    EvidencePacket,
+    ExperimentIntent,
+    MeasurementDecision,
+    ResearchState,
+    ResearchTheory,
+)
 from ratchet.io import extract_json_object
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -17,7 +25,153 @@ from ratchet.model_client import (
 
 
 RESEARCH_PLANNER_MAX_OUTPUT_TOKENS = 3500
+RESEARCH_THEORIST_MAX_OUTPUT_TOKENS = 5000
 MEASUREMENT_SELECTOR_MAX_OUTPUT_TOKENS = 3000
+
+
+class ResearchTheorist:
+    def __init__(
+        self,
+        *,
+        env_path: str,
+        model: str,
+        reasoning_effort: str,
+    ) -> None:
+        self.env_path = env_path
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        self._client: ResponsesModelClient | None = None
+        self.last_call_diagnostics: dict[str, Any] | None = None
+
+    def build_theory(
+        self,
+        *,
+        state: dict[str, Any],
+        affordance_ids: set[str],
+    ) -> ResearchTheory:
+        if self._client is None:
+            self._client = ResponsesModelClient(env_path=self.env_path)
+        prompt = {
+            "role": "Ratchet Research Theorist",
+            "instruction": (
+                "Build the causal research theory for this branch. Interpret evidence, preserve competing "
+                "explanations, name what would disconfirm each hypothesis, and propose measurement-worthy "
+                "experiment opportunities. Do not write patches. Do not choose measurements. Every opportunity "
+                "must use known mechanism classes and cite only affordance_ids from the supplied affordances."
+            ),
+            "state": state,
+        }
+        response_format = {
+            "format": {
+                "type": "json_schema",
+                "name": "ratchet_research_theory",
+                "strict": False,
+                "schema": _research_theory_schema(),
+            }
+        }
+        payload = self._call_json(
+            prompt_prefix="You are Ratchet's research theorist. Return only JSON matching the schema.",
+            prompt=prompt,
+            response_format=response_format,
+            max_output_tokens=RESEARCH_THEORIST_MAX_OUTPUT_TOKENS,
+        )
+        try:
+            theory = ResearchTheory.from_dict(payload)
+        except Exception as exc:
+            raise OptimizerModelError(f"Research theorist returned malformed research theory: {exc}") from exc
+        unknown_affordances = sorted(
+            {
+                affordance_id
+                for opportunity in theory.experiment_opportunities
+                for affordance_id in opportunity.affordance_ids
+                if affordance_id not in affordance_ids
+            }
+        )
+        if unknown_affordances:
+            raise OptimizerModelError(
+                f"Research theorist used unknown affordance_ids: {unknown_affordances}"
+            )
+        return theory
+
+    def _call_json(
+        self,
+        *,
+        prompt_prefix: str,
+        prompt: dict[str, Any],
+        response_format: dict[str, Any],
+        max_output_tokens: int,
+    ) -> dict[str, Any]:
+        prompt_input = f"{prompt_prefix}\n\n{json.dumps(prompt, separators=(',', ':'), default=str)}"
+        started_at = time.perf_counter()
+        try:
+            response = self._client.create_response(
+                model=self.model,
+                reasoning={"effort": self.reasoning_effort},
+                text=response_format,
+                input=prompt_input,
+                max_output_tokens=max_output_tokens,
+            )
+            self.last_call_diagnostics = {
+                "component": "research_theorist",
+                "prompt_chars": len(prompt_input),
+                "prompt_approx_tokens": max(1, len(prompt_input) // 4),
+                **response_diagnostics(
+                    response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
+            try:
+                return extract_json_object(response.output_text)
+            except Exception as parse_exc:
+                primary_diagnostics = self.last_call_diagnostics or {}
+                repair_started_at = time.perf_counter()
+                repair_response = self._client.create_response(
+                    model=self.model,
+                    reasoning={"effort": self.reasoning_effort},
+                    text=response_format,
+                    input=(
+                        "The previous research-theorist response was invalid JSON. "
+                        "Return only a valid JSON object matching the same schema. "
+                        "Preserve the intended research theory; do not add prose.\n\n"
+                        f"Invalid response:\n{response.output_text[:12000]}"
+                    ),
+                    max_output_tokens=max_output_tokens,
+                )
+                repair_diagnostics = response_diagnostics(
+                    repair_response,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - repair_started_at,
+                )
+                self.last_call_diagnostics = combine_response_diagnostics(
+                    component="research_theorist",
+                    primary=primary_diagnostics,
+                    repair=repair_diagnostics,
+                )
+                try:
+                    return extract_json_object(repair_response.output_text)
+                except Exception as repair_exc:
+                    self.last_call_diagnostics = {
+                        **self.last_call_diagnostics,
+                        "repair_error": str(repair_exc),
+                    }
+                    raise OptimizerModelError(
+                        f"Research theorist returned invalid JSON: {parse_exc}; repair failed: {repair_exc}"
+                    ) from repair_exc
+        except Exception as exc:
+            if isinstance(exc, OptimizerModelError):
+                raise
+            self.last_call_diagnostics = {
+                "component": "research_theorist",
+                "prompt_chars": len(prompt_input),
+                "prompt_approx_tokens": max(1, len(prompt_input) // 4),
+                **error_response_diagnostics(
+                    exc,
+                    model=self.model,
+                    elapsed_s=time.perf_counter() - started_at,
+                ),
+            }
+            raise OptimizerModelError(f"Research theorist failed: {exc}") from exc
 
 
 class ResearchPlanner:
@@ -42,7 +196,7 @@ class ResearchPlanner:
             "instruction": (
                 "Return experiment_intents only. Do not write patches, candidate IDs, or measurement selections. "
                 "Each intent must choose mechanism_class from the listed affordances and cite concrete affordance_ids "
-                "that a later implementer may use. Treat task_theory experiment opportunities and high-suitability "
+                "that a later implementer may use. Treat research_theory/task_theory experiment opportunities and high-suitability "
                 "affordances as the research surface; preserve mechanism-distinct questions when residual failures "
                 "could plausibly be instruction/example-limited or model-capability-limited."
             ),
@@ -371,6 +525,69 @@ def _experiment_intent_schema() -> dict[str, Any]:
             "priority": {"type": "integer"},
         },
         "required": ["intent_id", "mechanism_class", "hypothesis", "affordance_ids"],
+    }
+
+
+def _research_theory_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "theory_id": {"type": "string", "maxLength": 80},
+            "summary": {"type": "string", "maxLength": 900},
+            "primary_hypothesis_id": {"type": "string", "maxLength": 80},
+            "hypotheses": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "hypothesis_id": {"type": "string", "maxLength": 80},
+                        "statement": {"type": "string", "maxLength": 700},
+                        "mechanism_class": {"type": "string", "enum": sorted(MECHANISM_CLASSES)},
+                        "target_slices": {"type": "array", "items": {"type": "string", "maxLength": 160}},
+                        "supporting_evidence": {"type": "array", "items": {"type": "string", "maxLength": 260}},
+                        "competing_evidence": {"type": "array", "items": {"type": "string", "maxLength": 260}},
+                        "disconfirming_result": {"type": "string", "maxLength": 320},
+                        "confidence": {"type": "string", "maxLength": 40},
+                    },
+                    "required": ["hypothesis_id", "statement", "mechanism_class"],
+                },
+            },
+            "experiment_opportunities": {
+                "type": "array",
+                "maxItems": 6,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "opportunity_id": {"type": "string", "maxLength": 80},
+                        "hypothesis_ids": {"type": "array", "items": {"type": "string", "maxLength": 80}},
+                        "mechanism_class": {"type": "string", "enum": sorted(MECHANISM_CLASSES)},
+                        "target_slices": {"type": "array", "items": {"type": "string", "maxLength": 160}},
+                        "rationale": {"type": "string", "maxLength": 600},
+                        "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
+                        "disconfirming_result": {"type": "string", "maxLength": 320},
+                        "candidate_roles": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
+                        },
+                        "compatible_mechanisms": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": sorted(MECHANISM_CLASSES)},
+                        },
+                        "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 180}},
+                        "priority": {"type": "integer"},
+                    },
+                    "required": ["opportunity_id", "hypothesis_ids", "mechanism_class", "rationale"],
+                },
+            },
+            "disconfirmed_explanations": {"type": "array", "items": {"type": "string", "maxLength": 260}},
+            "surprising_observations": {"type": "array", "items": {"type": "string", "maxLength": 260}},
+            "prior_lessons": {"type": "array", "items": {"type": "string", "maxLength": 260}},
+            "uncertainty": {"type": "string", "maxLength": 500},
+            "confidence": {"type": "string", "maxLength": 40},
+        },
+        "required": ["theory_id", "summary", "primary_hypothesis_id", "hypotheses", "experiment_opportunities"],
     }
 
 

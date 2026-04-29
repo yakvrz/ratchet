@@ -47,6 +47,220 @@ CANDIDATE_ROLES = {"atomic", "composed", "control", "ablation", "compression"}
 
 
 @dataclass(frozen=True)
+class EvidencePacket:
+    residual_failure_modes: list[str]
+    label_confusions: list[dict[str, Any]]
+    weak_slices: list[str]
+    runtime_defects: dict[str, Any]
+    output_defects: dict[str, Any]
+    tool_defects: dict[str, Any]
+    example_coverage: dict[str, Any]
+    cost_latency_profile: dict[str, Any]
+    behavior_diagnostics: dict[str, Any]
+    diagnosis_categories: list[str]
+    confidence: str
+    evidence: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class CausalHypothesis:
+    hypothesis_id: str
+    statement: str
+    mechanism_class: str
+    target_slices: list[str] = field(default_factory=list)
+    supporting_evidence: list[str] = field(default_factory=list)
+    competing_evidence: list[str] = field(default_factory=list)
+    disconfirming_result: str = ""
+    confidence: str = "low"
+
+    def __post_init__(self) -> None:
+        if not self.hypothesis_id:
+            raise ValueError("hypothesis_id must be non-empty")
+        if not self.statement:
+            raise ValueError("hypothesis statement must be non-empty")
+        if self.mechanism_class not in MECHANISM_CLASSES:
+            raise ValueError(f"unknown hypothesis mechanism_class {self.mechanism_class!r}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "CausalHypothesis":
+        return cls(
+            hypothesis_id=str(payload.get("hypothesis_id") or payload.get("id") or ""),
+            statement=str(payload.get("statement") or ""),
+            mechanism_class=str(payload.get("mechanism_class") or ""),
+            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
+            supporting_evidence=[str(item) for item in payload.get("supporting_evidence", []) if item],
+            competing_evidence=[str(item) for item in payload.get("competing_evidence", []) if item],
+            disconfirming_result=str(payload.get("disconfirming_result") or ""),
+            confidence=str(payload.get("confidence") or "low"),
+        )
+
+
+@dataclass(frozen=True)
+class ResearchOpportunity:
+    opportunity_id: str
+    hypothesis_ids: list[str]
+    mechanism_class: str
+    target_slices: list[str]
+    rationale: str
+    measurements: list[str] = field(default_factory=list)
+    disconfirming_result: str = ""
+    candidate_roles: list[str] = field(default_factory=list)
+    compatible_mechanisms: list[str] = field(default_factory=list)
+    affordance_ids: list[str] = field(default_factory=list)
+    priority: int = 1
+
+    def __post_init__(self) -> None:
+        if not self.opportunity_id:
+            raise ValueError("opportunity_id must be non-empty")
+        if self.mechanism_class not in MECHANISM_CLASSES:
+            raise ValueError(f"unknown opportunity mechanism_class {self.mechanism_class!r}")
+        if not self.hypothesis_ids:
+            raise ValueError("opportunity hypothesis_ids must be non-empty")
+        if not self.rationale:
+            raise ValueError("opportunity rationale must be non-empty")
+        unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
+        if unknown_roles:
+            raise ValueError(f"unknown opportunity candidate_roles: {unknown_roles}")
+        if self.priority < 1:
+            raise ValueError("opportunity priority must be positive")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchOpportunity":
+        return cls(
+            opportunity_id=str(payload.get("opportunity_id") or payload.get("id") or ""),
+            hypothesis_ids=[str(item) for item in payload.get("hypothesis_ids", []) if item],
+            mechanism_class=str(payload.get("mechanism_class") or ""),
+            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
+            rationale=str(payload.get("rationale") or ""),
+            measurements=[str(item) for item in payload.get("measurements", []) if item],
+            disconfirming_result=str(payload.get("disconfirming_result") or ""),
+            candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
+            compatible_mechanisms=[str(item) for item in payload.get("compatible_mechanisms", []) if item],
+            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
+            priority=int(payload.get("priority") or 1),
+        )
+
+
+@dataclass(frozen=True)
+class TheoryUpdate:
+    update_id: str
+    hypothesis_id: str
+    status: str
+    evidence: list[str] = field(default_factory=list)
+    implication: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "TheoryUpdate":
+        return cls(
+            update_id=str(payload.get("update_id") or payload.get("id") or ""),
+            hypothesis_id=str(payload.get("hypothesis_id") or ""),
+            status=str(payload.get("status") or ""),
+            evidence=[str(item) for item in payload.get("evidence", []) if item],
+            implication=str(payload.get("implication") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class ResearchTheory:
+    theory_id: str
+    summary: str
+    primary_hypothesis_id: str
+    hypotheses: list[CausalHypothesis]
+    experiment_opportunities: list[ResearchOpportunity]
+    disconfirmed_explanations: list[str] = field(default_factory=list)
+    surprising_observations: list[str] = field(default_factory=list)
+    prior_lessons: list[str] = field(default_factory=list)
+    uncertainty: str = ""
+    confidence: str = "low"
+
+    def __post_init__(self) -> None:
+        if not self.theory_id:
+            raise ValueError("theory_id must be non-empty")
+        if not self.summary:
+            raise ValueError("research theory summary must be non-empty")
+        if not self.hypotheses:
+            raise ValueError("research theory hypotheses must be non-empty")
+        hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in self.hypotheses]
+        if len(hypothesis_ids) != len(set(hypothesis_ids)):
+            raise ValueError("research theory hypothesis_ids must be unique")
+        if self.primary_hypothesis_id not in set(hypothesis_ids):
+            raise ValueError("primary_hypothesis_id must reference a hypothesis")
+        opportunity_ids = [opportunity.opportunity_id for opportunity in self.experiment_opportunities]
+        if len(opportunity_ids) != len(set(opportunity_ids)):
+            raise ValueError("research theory opportunity_ids must be unique")
+        known_hypotheses = set(hypothesis_ids)
+        for opportunity in self.experiment_opportunities:
+            unknown = sorted(set(opportunity.hypothesis_ids) - known_hypotheses)
+            if unknown:
+                raise ValueError(f"opportunity {opportunity.opportunity_id!r} cites unknown hypothesis_ids: {unknown}")
+
+    @property
+    def bottleneck_class(self) -> str:
+        primary = next(
+            (hypothesis for hypothesis in self.hypotheses if hypothesis.hypothesis_id == self.primary_hypothesis_id),
+            self.hypotheses[0],
+        )
+        return primary.mechanism_class
+
+    @property
+    def residual_failure_modes(self) -> list[str]:
+        return sorted({hypothesis.mechanism_class for hypothesis in self.hypotheses})
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "theory_id": self.theory_id,
+            "summary": self.summary,
+            "primary_hypothesis_id": self.primary_hypothesis_id,
+            "hypotheses": [hypothesis.to_dict() for hypothesis in self.hypotheses],
+            "experiment_opportunities": [opportunity.to_dict() for opportunity in self.experiment_opportunities],
+            "disconfirmed_explanations": list(self.disconfirmed_explanations),
+            "surprising_observations": list(self.surprising_observations),
+            "prior_lessons": list(self.prior_lessons),
+            "uncertainty": self.uncertainty,
+            "confidence": self.confidence,
+            "bottleneck_class": self.bottleneck_class,
+            "residual_failure_modes": self.residual_failure_modes,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "ResearchTheory":
+        hypotheses = [
+            CausalHypothesis.from_dict(item)
+            for item in payload.get("hypotheses", [])
+            if isinstance(item, dict)
+        ]
+        opportunities = [
+            ResearchOpportunity.from_dict(item)
+            for item in payload.get("experiment_opportunities", [])
+            if isinstance(item, dict)
+        ]
+        return cls(
+            theory_id=str(payload.get("theory_id") or payload.get("id") or ""),
+            summary=str(payload.get("summary") or ""),
+            primary_hypothesis_id=str(payload.get("primary_hypothesis_id") or ""),
+            hypotheses=hypotheses,
+            experiment_opportunities=opportunities,
+            disconfirmed_explanations=[str(item) for item in payload.get("disconfirmed_explanations", []) if item],
+            surprising_observations=[str(item) for item in payload.get("surprising_observations", []) if item],
+            prior_lessons=[str(item) for item in payload.get("prior_lessons", []) if item],
+            uncertainty=str(payload.get("uncertainty") or ""),
+            confidence=str(payload.get("confidence") or "low"),
+        )
+
+
+@dataclass(frozen=True)
 class TaskTheory:
     bottleneck_class: str
     residual_failure_modes: list[str]
@@ -194,6 +408,65 @@ def build_task_theory(
     objective: OptimizationObjective,
     proposal_example_bank: ProposalExampleBank | None = None,
 ) -> TaskTheory:
+    packet = build_evidence_packet(
+        summary=summary,
+        diagnoses=diagnoses,
+        objective=objective,
+        proposal_example_bank=proposal_example_bank,
+    )
+    diagnostics = packet.behavior_diagnostics
+    runtime = dict(packet.runtime_defects)
+    tool_interaction = dict(packet.tool_defects)
+    invalid_case_ids = list(packet.output_defects.get("invalid_output_case_ids", []))
+    confusions = list(packet.label_confusions)
+    weak_labels = list(packet.weak_slices)
+    evidence = list(packet.evidence)
+    if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
+        bottleneck = "runtime_or_output_defect"
+    elif _has_tool_trajectory_defect(tool_interaction):
+        bottleneck = "tool_trajectory"
+    elif invalid_case_ids:
+        bottleneck = "output_contract"
+    elif confusions or weak_labels:
+        bottleneck = "semantic_boundary_confusion"
+    elif objective.mode in {"cost", "latency"}:
+        bottleneck = "efficiency_tradeoff"
+    elif summary.pass_count < summary.case_count:
+        bottleneck = "general_correctness_gap"
+    else:
+        bottleneck = "no_observed_failures"
+    return TaskTheory(
+        bottleneck_class=bottleneck,
+        residual_failure_modes=list(packet.residual_failure_modes),
+        label_confusions=list(packet.label_confusions),
+        weak_slices=list(packet.weak_slices),
+        runtime_defects=dict(packet.runtime_defects),
+        output_defects=dict(packet.output_defects),
+        tool_defects=dict(packet.tool_defects),
+        example_coverage=dict(packet.example_coverage),
+        cost_latency_profile=dict(packet.cost_latency_profile),
+        confidence=packet.confidence,
+        evidence=evidence,
+        experiment_opportunities=_experiment_opportunities(
+            bottleneck=bottleneck,
+            runtime=runtime,
+            invalid_case_ids=invalid_case_ids,
+            tool_interaction=tool_interaction,
+            confusions=confusions,
+            weak_labels=weak_labels,
+            example_source_ids=_example_source_ids_by_label(proposal_example_bank),
+            objective=objective,
+        ),
+    )
+
+
+def build_evidence_packet(
+    *,
+    summary: PatchSummary,
+    diagnoses: list[FailureDiagnosis],
+    objective: OptimizationObjective,
+    proposal_example_bank: ProposalExampleBank | None = None,
+) -> EvidencePacket:
     diagnostics = build_behavior_diagnostics(summary)
     runtime = dict(diagnostics.get("runtime_reliability") or {})
     tool_interaction = dict(diagnostics.get("tool_interaction") or {})
@@ -203,32 +476,24 @@ def build_task_theory(
     diagnosis_categories = sorted({diagnosis.category for diagnosis in diagnoses if diagnosis.category})
     evidence: list[str] = []
     if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
-        bottleneck = "runtime_or_output_defect"
         evidence.append("runtime/output trace defects observed")
-    elif _has_tool_trajectory_defect(tool_interaction):
-        bottleneck = "tool_trajectory"
+    if _has_tool_trajectory_defect(tool_interaction):
         evidence.append("tool/environment trajectory defects observed")
-    elif invalid_case_ids:
-        bottleneck = "output_contract"
+    if invalid_case_ids:
         evidence.append("invalid output failures observed")
-    elif confusions or weak_labels:
-        bottleneck = "semantic_boundary_confusion"
+    if confusions or weak_labels:
         evidence.append("label or slice confusions observed")
-    elif objective.mode in {"cost", "latency"}:
-        bottleneck = "efficiency_tradeoff"
+    if objective.mode in {"cost", "latency"}:
         evidence.append(f"{objective.mode} objective active")
-    elif summary.pass_count < summary.case_count:
-        bottleneck = "general_correctness_gap"
+    if summary.pass_count < summary.case_count:
         evidence.append("failing cases observed")
-    else:
-        bottleneck = "no_observed_failures"
+    if not evidence:
         evidence.append("current branch has no observed failures")
     label_counts = proposal_example_bank.label_counts if proposal_example_bank is not None else {}
     missing_weak_examples = [label for label in weak_labels if label not in label_counts]
     example_source_ids = _example_source_ids_by_label(proposal_example_bank)
     target_example_labels = _target_example_labels(confusions=confusions, weak_labels=weak_labels)
-    return TaskTheory(
-        bottleneck_class=bottleneck,
+    return EvidencePacket(
         residual_failure_modes=_residual_failure_modes(
             invalid_case_ids=invalid_case_ids,
             tool_interaction=tool_interaction,
@@ -277,16 +542,8 @@ def build_task_theory(
         },
         confidence="medium" if summary.case_count >= 20 else "low",
         evidence=evidence,
-        experiment_opportunities=_experiment_opportunities(
-            bottleneck=bottleneck,
-            runtime=runtime,
-            invalid_case_ids=invalid_case_ids,
-            tool_interaction=tool_interaction,
-            confusions=confusions,
-            weak_labels=weak_labels,
-            example_source_ids=example_source_ids,
-            objective=objective,
-        ),
+        behavior_diagnostics=diagnostics,
+        diagnosis_categories=diagnosis_categories,
     )
 
 

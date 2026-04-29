@@ -42,6 +42,8 @@ def run_optimizer(
     optimizer_reasoning: str | None = "medium",
     diagnoser_model: str | None = None,
     diagnoser_reasoning: str | None = None,
+    research_theorist_model: str | None = None,
+    research_theorist_reasoning: str | None = None,
     research_planner_model: str | None = None,
     research_planner_reasoning: str | None = None,
     candidate_implementer_model: str | None = None,
@@ -79,6 +81,8 @@ def run_optimizer(
         optimizer_reasoning=optimizer_reasoning,
         diagnoser_model=diagnoser_model,
         diagnoser_reasoning=diagnoser_reasoning,
+        research_theorist_model=research_theorist_model,
+        research_theorist_reasoning=research_theorist_reasoning,
         research_planner_model=research_planner_model,
         research_planner_reasoning=research_planner_reasoning,
         candidate_implementer_model=candidate_implementer_model,
@@ -112,6 +116,8 @@ def run_optimizer(
         optimizer_reasoning=config.optimizer_reasoning,
         diagnoser_model=config.diagnoser_model,
         diagnoser_reasoning=config.diagnoser_reasoning,
+        research_theorist_model=config.research_theorist_model,
+        research_theorist_reasoning=config.research_theorist_reasoning,
         research_planner_model=config.research_planner_model,
         research_planner_reasoning=config.research_planner_reasoning,
         candidate_implementer_model=config.candidate_implementer_model,
@@ -665,6 +671,8 @@ def _apply_run_overrides(
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
         diagnoser_model=getattr(args, "diagnoser_model", None),
         diagnoser_reasoning=getattr(args, "diagnoser_reasoning", None),
+        research_theorist_model=getattr(args, "research_theorist_model", None),
+        research_theorist_reasoning=getattr(args, "research_theorist_reasoning", None),
         research_planner_model=getattr(args, "research_planner_model", None),
         research_planner_reasoning=getattr(args, "research_planner_reasoning", None),
         candidate_implementer_model=getattr(args, "candidate_implementer_model", None),
@@ -708,6 +716,8 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's research loop")
     parser.add_argument("--diagnoser-model", help="Override model for Ratchet's failure diagnoser")
     parser.add_argument("--diagnoser-reasoning", help="Override reasoning effort for Ratchet's failure diagnoser")
+    parser.add_argument("--research-theorist-model", help="Override model for Ratchet's research theorist")
+    parser.add_argument("--research-theorist-reasoning", help="Override reasoning effort for Ratchet's research theorist")
     parser.add_argument("--research-planner-model", help="Override model for Ratchet's research planner")
     parser.add_argument("--research-planner-reasoning", help="Override reasoning effort for Ratchet's research planner")
     parser.add_argument("--candidate-implementer-model", help="Override model for Ratchet's candidate implementer")

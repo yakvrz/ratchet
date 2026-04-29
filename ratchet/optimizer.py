@@ -18,7 +18,13 @@ from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
 from ratchet.evidence_ledger import EvidenceLedger
-from ratchet.experiments import ExperimentIntent, ResearchState, TaskTheory, build_task_theory
+from ratchet.experiments import (
+    EvidencePacket,
+    ExperimentIntent,
+    ResearchState,
+    ResearchTheory,
+    build_evidence_packet,
+)
 from ratchet.ideation import build_ideation_metrics
 from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
 from ratchet.model_client import model_request_limits
@@ -42,7 +48,7 @@ from ratchet.profiling import (
     runtime_reliability_diagnostics,
 )
 from ratchet.proposals import CandidateImplementer
-from ratchet.research import MeasurementSelector, MeasurementAction, ResearchPlanner
+from ratchet.research import MeasurementSelector, MeasurementAction, ResearchPlanner, ResearchTheorist
 from ratchet.reporting import RatchetReporter, build_outcome_analysis
 from ratchet.results import (
     PatchSummary,
@@ -158,6 +164,8 @@ class RatchetOptimizer:
         optimizer_reasoning: str = "medium",
         diagnoser_model: str | None = None,
         diagnoser_reasoning: str | None = None,
+        research_theorist_model: str | None = None,
+        research_theorist_reasoning: str | None = None,
         research_planner_model: str | None = None,
         research_planner_reasoning: str | None = None,
         candidate_implementer_model: str | None = None,
@@ -190,12 +198,14 @@ class RatchetOptimizer:
         self.surface_generator = SurfaceGenerator()
         self.optimizer_role_models = {
             "diagnoser": diagnoser_model or optimizer_model,
+            "research_theorist": research_theorist_model or optimizer_model,
             "research_planner": research_planner_model or optimizer_model,
             "candidate_implementer": candidate_implementer_model or optimizer_model,
             "measurement_selector": measurement_selector_model or optimizer_model,
         }
         self.optimizer_role_reasoning = {
             "diagnoser": diagnoser_reasoning or optimizer_reasoning,
+            "research_theorist": research_theorist_reasoning or optimizer_reasoning,
             "research_planner": research_planner_reasoning or optimizer_reasoning,
             "candidate_implementer": candidate_implementer_reasoning or optimizer_reasoning,
             "measurement_selector": measurement_selector_reasoning or optimizer_reasoning,
@@ -204,6 +214,11 @@ class RatchetOptimizer:
             env_path=env_path,
             model=self.optimizer_role_models["diagnoser"],
             reasoning_effort=self.optimizer_role_reasoning["diagnoser"],
+        )
+        self.research_theorist = ResearchTheorist(
+            env_path=env_path,
+            model=self.optimizer_role_models["research_theorist"],
+            reasoning_effort=self.optimizer_role_reasoning["research_theorist"],
         )
         self.candidate_implementer = CandidateImplementer(
             env_path=env_path,
@@ -325,7 +340,7 @@ class RatchetOptimizer:
         task_theory_log: list[dict[str, Any]] = []
         evidence_ledger = EvidenceLedger()
         diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
-        task_theory_cache: dict[str, TaskTheory] = {}
+        evidence_packet_cache: dict[str, EvidencePacket] = {}
         evaluated_patch_hashes = {baseline_dev.patch_hash}
         generated_surface = self.surface_generator.generate(self.agent_spec, self.objective)
         generated_surface_rows: list[dict[str, Any]] = [target.to_dict() for target in generated_surface]
@@ -435,13 +450,13 @@ class RatchetOptimizer:
                     cached=diagnosis_cached,
                     call_diagnostics=diagnosis_call_diagnostics,
                 )
-                task_theory_cached = current_dev.patch_hash in task_theory_cache
-                if task_theory_cached:
-                    task_theory = task_theory_cache[current_dev.patch_hash]
+                evidence_packet_cached = current_dev.patch_hash in evidence_packet_cache
+                if evidence_packet_cached:
+                    evidence_packet = evidence_packet_cache[current_dev.patch_hash]
                     decision_log.append(
                         {
                             "type": "optimizer_cache_hit",
-                            "cache": "task_theory",
+                            "cache": "evidence_packet",
                             "iteration": iteration,
                             "parent_rank": parent_index + 1,
                             "parent_patch_hash": current_dev.patch_hash,
@@ -449,32 +464,30 @@ class RatchetOptimizer:
                         }
                     )
                 else:
-                    task_theory = build_task_theory(
+                    evidence_packet = build_evidence_packet(
                         summary=current_dev,
                         diagnoses=diagnoses,
                         objective=self.objective,
                         proposal_example_bank=proposal_example_bank,
                     )
-                    task_theory_cache[current_dev.patch_hash] = task_theory
-                task_theory_row = {
-                    "type": "task_theory",
+                    evidence_packet_cache[current_dev.patch_hash] = evidence_packet
+                evidence_packet_row = {
+                    "type": "evidence_packet",
                     "iteration": iteration,
                     "parent_rank": parent_index + 1,
                     "parent_patch_hash": current_dev.patch_hash,
                     "patch_hash": current_dev.patch_hash,
-                    "cached": task_theory_cached,
-                    "task_theory": task_theory.to_dict(),
+                    "cached": evidence_packet_cached,
+                    "evidence_packet": evidence_packet.to_dict(),
                 }
-                decision_log.append(task_theory_row)
-                task_theory_log.append(task_theory_row)
+                decision_log.append(evidence_packet_row)
                 self._emit_progress(
-                    "task_theory_ready",
+                    "evidence_packet_ready",
                     iteration=iteration,
                     parent_rank=parent_index + 1,
-                    bottleneck_class=task_theory.bottleneck_class,
-                    residual_failure_modes=task_theory.residual_failure_modes,
-                    confidence=task_theory.confidence,
-                    cached=task_theory_cached,
+                    residual_failure_modes=evidence_packet.residual_failure_modes,
+                    confidence=evidence_packet.confidence,
+                    cached=evidence_packet_cached,
                 )
                 search_hypothesis = build_search_hypothesis(
                     summary=current_dev,
@@ -505,7 +518,7 @@ class RatchetOptimizer:
                     surface,
                     objective=self.objective,
                     active_families=search_hypothesis.active_families,
-                    evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
+                    evidence=_affordance_evidence_from_packet(evidence_packet, diagnoses),
                 )
                 decision_log.append(
                     {
@@ -515,6 +528,42 @@ class RatchetOptimizer:
                         "parent_patch_hash": current_dev.patch_hash,
                         "affordances": [affordance.to_dict() for affordance in affordances],
                     }
+                )
+                research_theory = self._build_research_theory(
+                    current_dev=current_dev,
+                    evidence_packet=evidence_packet,
+                    diagnoses=diagnoses,
+                    surface=surface,
+                    search_hypothesis=search_hypothesis,
+                    affordances=affordances,
+                    proposals_log=proposals_log,
+                    evidence_ledger=evidence_ledger,
+                    decision_log=decision_log,
+                    iteration=iteration,
+                    parent_index=parent_index,
+                    dev_evaluations_used=dev_evaluations,
+                    proposal_budget=proposal_budget,
+                )
+                task_theory_row = {
+                    "type": "research_theory",
+                    "iteration": iteration,
+                    "parent_rank": parent_index + 1,
+                    "parent_patch_hash": current_dev.patch_hash,
+                    "patch_hash": current_dev.patch_hash,
+                    "research_theory": research_theory.to_dict(),
+                    "task_theory": research_theory.to_dict(),
+                    "evidence_packet": evidence_packet.to_dict(),
+                }
+                decision_log.append(task_theory_row)
+                task_theory_log.append(task_theory_row)
+                self._emit_progress(
+                    "research_theory_ready",
+                    iteration=iteration,
+                    parent_rank=parent_index + 1,
+                    primary_hypothesis_id=research_theory.primary_hypothesis_id,
+                    bottleneck_class=research_theory.bottleneck_class,
+                    opportunity_count=len(research_theory.experiment_opportunities),
+                    confidence=research_theory.confidence,
                 )
                 for diagnosis in diagnoses:
                     diagnoses_log.append(
@@ -551,7 +600,7 @@ class RatchetOptimizer:
                     break
                 experiment_intents = self._plan_parent_research_action(
                     current_dev=current_dev,
-                    task_theory=task_theory,
+                    research_theory=research_theory,
                     search_hypothesis=search_hypothesis,
                     affordances=affordances,
                     proposals_log=proposals_log,
@@ -571,7 +620,8 @@ class RatchetOptimizer:
                     dev_cases=dev_cases,
                     surface=surface,
                     diagnoses=diagnoses,
-                    task_theory=task_theory,
+                    research_theory=research_theory,
+                    evidence_packet=evidence_packet,
                     diagnosis_analysis=diagnosis_analysis,
                     search_hypothesis=search_hypothesis,
                     current_spec=current_spec,
@@ -663,11 +713,27 @@ class RatchetOptimizer:
                         surface,
                         objective=self.objective,
                         active_families=retry_search_hypothesis.active_families,
-                        evidence=_affordance_evidence_from_theory(task_theory, diagnoses),
+                        evidence=_affordance_evidence_from_packet(evidence_packet, diagnoses),
+                    )
+                    retry_research_theory = self._build_research_theory(
+                        current_dev=current_dev,
+                        evidence_packet=evidence_packet,
+                        diagnoses=diagnoses,
+                        surface=surface,
+                        search_hypothesis=retry_search_hypothesis,
+                        affordances=retry_affordances,
+                        proposals_log=proposals_log,
+                        evidence_ledger=evidence_ledger,
+                        decision_log=decision_log,
+                        iteration=iteration,
+                        parent_index=parent_index,
+                        dev_evaluations_used=dev_evaluations,
+                        proposal_budget=min(PROPOSAL_RETRY_BUDGET, self.dev_budget - dev_evaluations),
+                        proposal_retry=True,
                     )
                     retry_experiment_intents = self._plan_parent_research_action(
                         current_dev=current_dev,
-                        task_theory=task_theory,
+                        research_theory=retry_research_theory,
                         search_hypothesis=retry_search_hypothesis,
                         affordances=retry_affordances,
                         proposals_log=proposals_log,
@@ -687,7 +753,8 @@ class RatchetOptimizer:
                             dev_cases=dev_cases,
                             surface=surface,
                             diagnoses=diagnoses,
-                            task_theory=task_theory,
+                            research_theory=retry_research_theory,
+                            evidence_packet=evidence_packet,
                             diagnosis_analysis=diagnosis_analysis,
                             search_hypothesis=retry_search_hypothesis,
                             current_spec=current_spec,
@@ -1347,6 +1414,97 @@ class RatchetOptimizer:
             latest_summary = self.evaluate_patch(patch, dev_cases)
         return latest_summary, latest_rejection, stage_rows
 
+    def _build_research_theory(
+        self,
+        *,
+        current_dev: PatchSummary,
+        evidence_packet: EvidencePacket,
+        diagnoses: list[FailureDiagnosis],
+        surface: list[EditableTarget],
+        search_hypothesis: Any,
+        affordances: list[OptimizationAffordance],
+        proposals_log: list[dict[str, Any]],
+        evidence_ledger: EvidenceLedger,
+        decision_log: list[dict[str, Any]],
+        iteration: int,
+        parent_index: int,
+        dev_evaluations_used: int,
+        proposal_budget: int,
+        proposal_retry: bool = False,
+    ) -> ResearchTheory:
+        attempt = 2 if proposal_retry else 1
+        state = {
+            "objective": self.objective.to_dict(),
+            "budget": {
+                "proposal_budget": proposal_budget,
+                "dev_evaluations_used": dev_evaluations_used,
+                "dev_budget": self.dev_budget,
+                "remaining_dev_budget": max(0, self.dev_budget - dev_evaluations_used),
+            },
+            "parent": {
+                "patch_hash": current_dev.patch_hash,
+                "score": current_dev.mean_score,
+                "pass_count": current_dev.pass_count,
+                "case_count": current_dev.case_count,
+                "failure_labels": _top_counter_dict(current_dev.failure_labels, limit=12),
+                "cost_usd": current_dev.mean_cost_usd,
+                "latency_s": current_dev.median_latency_s,
+            },
+            "evidence_packet": _theorist_evidence_packet(evidence_packet),
+            "diagnoses": [_theorist_diagnosis(diagnosis) for diagnosis in diagnoses[:8]],
+            "search_hypothesis": _theorist_search_hypothesis(search_hypothesis),
+            "editable_surface": [_theorist_surface_target(target) for target in surface],
+            "optimization_affordances": _theorist_affordances(affordances),
+            "prior_experiment_outcomes": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
+            "evidence_ledger_summary": evidence_ledger.to_dict()["summary"],
+            "recent_candidate_history": _compact_recent_history_for_theory(proposals_log, limit=10),
+        }
+        self._emit_progress(
+            "research_theorist_started",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            affordance_count=len(affordances),
+            diagnosis_count=len(diagnoses),
+        )
+        theory = self.research_theorist.build_theory(
+            state=state,
+            affordance_ids={affordance.affordance_id for affordance in affordances},
+        )
+        if self.research_theorist.last_call_diagnostics is not None:
+            self.optimizer_call_diagnostics.append(
+                {
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "parent_rank": parent_index + 1,
+                    "stage": "build_research_theory",
+                    **self.research_theorist.last_call_diagnostics,
+                }
+            )
+        decision_log.append(
+            {
+                "type": "research_theory_call",
+                "iteration": iteration,
+                "attempt": attempt,
+                "proposal_retry": proposal_retry,
+                "parent_rank": parent_index + 1,
+                "parent_patch_hash": current_dev.patch_hash,
+                "research_theory": theory.to_dict(),
+                "research_state": state,
+            }
+        )
+        self._emit_progress(
+            "research_theorist_completed",
+            iteration=iteration,
+            attempt=attempt,
+            parent_rank=parent_index + 1,
+            primary_hypothesis_id=theory.primary_hypothesis_id,
+            hypothesis_count=len(theory.hypotheses),
+            opportunity_count=len(theory.experiment_opportunities),
+            call_diagnostics=self.research_theorist.last_call_diagnostics or {},
+        )
+        return theory
+
     def _propose_and_evaluate_parent(
         self,
         *,
@@ -1355,7 +1513,8 @@ class RatchetOptimizer:
         dev_cases: tuple[EvalCase, ...],
         surface: list[EditableTarget],
         diagnoses: list[FailureDiagnosis],
-        task_theory: TaskTheory,
+        research_theory: ResearchTheory,
+        evidence_packet: EvidencePacket,
         diagnosis_analysis: str,
         search_hypothesis: Any,
         current_spec: AgentSpec | None,
@@ -1394,7 +1553,8 @@ class RatchetOptimizer:
             objective=self.objective,
             diagnosis=target_diagnosis,
             diagnoses=diagnoses,
-            task_theory=task_theory,
+            research_theory=research_theory,
+            evidence_packet=evidence_packet,
             seen_hashes=evaluated_patch_hashes,
             current_spec=current_spec,
             history=proposals_log,
@@ -1445,6 +1605,8 @@ class RatchetOptimizer:
                 "proposal_analysis": proposal_analysis,
                 "proposal_stats": self.candidate_implementer.last_stats.to_dict(),
                 "search_hypothesis": search_hypothesis.to_dict(),
+                "research_theory": research_theory.to_dict(),
+                "evidence_packet": evidence_packet.to_dict(),
                 "diagnoses": [diagnosis.to_dict() for diagnosis in diagnoses],
                 "diagnosis": target_diagnosis.to_dict() if target_diagnosis else None,
                 "proposal_hashes": [patch_hash(proposal.patch) for proposal in proposals],
@@ -1508,6 +1670,7 @@ class RatchetOptimizer:
             states=evaluation_states,
             reference=current_dev,
             baseline=baseline_dev,
+            research_theory=research_theory,
             dev_cases=dev_cases,
             proposals_log=proposals_log,
             decision_log=decision_log,
@@ -1619,7 +1782,7 @@ class RatchetOptimizer:
         self,
         *,
         current_dev: PatchSummary,
-        task_theory: TaskTheory,
+        research_theory: ResearchTheory,
         search_hypothesis: Any,
         affordances: list[OptimizationAffordance],
         proposals_log: list[dict[str, Any]],
@@ -1631,13 +1794,7 @@ class RatchetOptimizer:
         proposal_retry: bool = False,
     ) -> list[ExperimentIntent]:
         attempt = 2 if proposal_retry else 1
-        task_theory_payload = _task_theory_with_affordance_opportunities(
-            task_theory=task_theory,
-            affordances=affordances,
-            current_dev=current_dev,
-            proposals_log=proposals_log,
-            objective=self.objective,
-        )
+        research_theory_payload = research_theory.to_dict()
         state = ResearchState(
             objective=self.objective.to_dict(),
             budget={
@@ -1655,7 +1812,7 @@ class RatchetOptimizer:
                 "cost_usd": current_dev.mean_cost_usd,
                 "latency_s": current_dev.median_latency_s,
             },
-            task_theory=task_theory_payload,
+            task_theory=research_theory_payload,
             behavior_profile=search_hypothesis.profile.to_dict(),
             affordances=[affordance.to_dict() for affordance in affordances],
             prior_experiment_outcomes=_compact_prior_stage_results(proposals_log, stage=None, limit=8),
@@ -1671,7 +1828,7 @@ class RatchetOptimizer:
             attempt=attempt,
             parent_rank=parent_index + 1,
             stage="plan_experiments",
-            opportunity_count=len(task_theory.experiment_opportunities),
+            opportunity_count=len(research_theory.experiment_opportunities),
             affordance_count=len(affordances),
         )
         intents = self.research_planner.plan(state)
@@ -1716,6 +1873,7 @@ class RatchetOptimizer:
         states: list[CandidateEvaluationState],
         reference: PatchSummary,
         baseline: PatchSummary,
+        research_theory: ResearchTheory,
         dev_cases: tuple[EvalCase, ...],
         proposals_log: list[dict[str, Any]],
         decision_log: list[dict[str, Any]],
@@ -1734,6 +1892,7 @@ class RatchetOptimizer:
                     active = self._select_candidate_stage_with_measurement_selector(
                         active,
                         baseline,
+                        research_theory=research_theory,
                         reference=reference,
                         stage_name=stage_name,
                         stage_cases=stage_cases,
@@ -1751,6 +1910,7 @@ class RatchetOptimizer:
                 active = self._select_candidate_stage_with_measurement_selector(
                     active,
                     baseline,
+                    research_theory=research_theory,
                     reference=reference,
                     stage_name=stage_name,
                     stage_cases=stage_cases,
@@ -1873,6 +2033,7 @@ class RatchetOptimizer:
         states: list[CandidateEvaluationState],
         baseline: PatchSummary,
         *,
+        research_theory: ResearchTheory,
         reference: PatchSummary,
         stage_name: str,
         stage_cases: tuple[EvalCase, ...],
@@ -1895,6 +2056,7 @@ class RatchetOptimizer:
             stage_name=stage_name,
             reference=reference,
             baseline=baseline,
+            research_theory=research_theory,
             states=states,
             proposals_log=proposals_log,
             dev_evaluations_used=dev_evaluations_used,
@@ -2532,6 +2694,223 @@ def _top_counter_dict(values: dict[str, int], *, limit: int) -> dict[str, int]:
     return dict(sorted(values.items(), key=lambda item: (-item[1], item[0]))[:limit])
 
 
+def _truncate_text(value: Any, *, limit: int) -> str:
+    text = str(value or "")
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _theorist_evidence_packet(packet: EvidencePacket) -> dict[str, Any]:
+    raw = packet.to_dict()
+    diagnostics = raw.get("behavior_diagnostics") or {}
+    runtime = raw.get("runtime_defects") or {}
+    output = raw.get("output_defects") or {}
+    tool = raw.get("tool_defects") or {}
+    category_metrics = diagnostics.get("category_metrics") or {}
+    per_label = diagnostics.get("per_label") or []
+    return {
+        "residual_failure_modes": list(raw.get("residual_failure_modes") or [])[:8],
+        "diagnosis_categories": list(raw.get("diagnosis_categories") or [])[:8],
+        "evidence": list(raw.get("evidence") or [])[:8],
+        "confidence": raw.get("confidence"),
+        "weak_slices": list(raw.get("weak_slices") or [])[:8],
+        "label_confusions": [
+            {
+                "expected": row.get("expected"),
+                "actual": row.get("actual"),
+                "count": row.get("count"),
+                "case_ids": list(row.get("case_ids") or [])[:3],
+            }
+            for row in list(raw.get("label_confusions") or [])[:8]
+            if isinstance(row, dict)
+        ],
+        "runtime_defects": {
+            "finish_reason_counts": runtime.get("finish_reason_counts", {}),
+            "length_finish_case_ids": list(runtime.get("length_finish_case_ids") or [])[:8],
+            "parser_fallback_case_ids": list(runtime.get("parser_fallback_case_ids") or [])[:8],
+            "low_output_token_length_case_ids": list(runtime.get("low_output_token_length_case_ids") or [])[:8],
+        },
+        "output_defects": {
+            "invalid_output_count": output.get("invalid_output_count", 0),
+            "invalid_output_case_ids": list(output.get("invalid_output_case_ids") or [])[:10],
+        },
+        "tool_defects": {
+            "tool_call_counts": tool.get("tool_call_counts", {}),
+            "tool_status_counts": tool.get("tool_status_counts", {}),
+            "turn_outcome_counts": tool.get("turn_outcome_counts", {}),
+            "terminal_reason_counts": tool.get("terminal_reason_counts", {}),
+            "tool_error_case_ids": list(tool.get("tool_error_case_ids") or [])[:8],
+            "invalid_tool_call_case_ids": list(tool.get("invalid_tool_call_case_ids") or [])[:8],
+            "premature_stop_case_ids": list(tool.get("premature_stop_case_ids") or [])[:8],
+        },
+        "example_coverage": raw.get("example_coverage") or {},
+        "cost_latency_profile": raw.get("cost_latency_profile") or {},
+        "behavior_summary": {
+            "category_metrics": category_metrics,
+            "weakest_labels": [
+                {
+                    "label": row.get("label"),
+                    "support": row.get("support"),
+                    "pass_rate": row.get("pass_rate"),
+                    "case_ids": list(row.get("case_ids") or [])[:4],
+                }
+                for row in list(per_label)[:8]
+                if isinstance(row, dict)
+            ],
+        },
+    }
+
+
+def _theorist_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
+    return {
+        "case_ids": list(diagnosis.case_ids)[:8],
+        "category": diagnosis.category,
+        "root_cause": _truncate_text(diagnosis.root_cause, limit=500),
+        "target_names": list(diagnosis.target_names)[:8],
+        "evidence": [
+            {
+                str(key): (
+                    _truncate_text(value, limit=240)
+                    if isinstance(value, str)
+                    else value
+                )
+                for key, value in row.items()
+                if key in {"case_id", "expected", "actual", "score", "passed", "notes", "labels"}
+            }
+            for row in diagnosis.evidence[:6]
+            if isinstance(row, dict)
+        ],
+    }
+
+
+def _theorist_search_hypothesis(search_hypothesis: Any) -> dict[str, Any]:
+    prompt = search_hypothesis.to_prompt_dict(
+        max_contexts_per_family=1,
+        max_constrained_contexts=3,
+    )
+    family_states = {}
+    for name, row in (prompt.get("family_states") or {}).items():
+        if not isinstance(row, dict):
+            continue
+        family_states[name] = {
+            "state": row.get("state"),
+            "suitability": row.get("suitability"),
+            "budget_share": row.get("budget_share"),
+            "constraints": list(row.get("constraints") or [])[:3],
+        }
+    return {
+        "active_families": list(prompt.get("active_families") or [])[:8],
+        "target_slices": list(prompt.get("target_slices") or [])[:8],
+        "family_states": family_states,
+        "active_contexts": [
+            _theorist_context_row(row)
+            for row in list(prompt.get("active_contexts") or [])[:8]
+            if isinstance(row, dict)
+        ],
+        "constrained_or_paused_contexts": [
+            _theorist_context_row(row)
+            for row in list(prompt.get("constrained_or_paused_contexts") or [])[:3]
+            if isinstance(row, dict)
+        ],
+        "profile": prompt.get("profile") or {},
+        "budget_allocation": prompt.get("budget_allocation") or {},
+        "rationale": _truncate_text(prompt.get("rationale"), limit=500),
+    }
+
+
+def _theorist_context_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row.get("id"),
+        "family": row.get("family"),
+        "state": row.get("state"),
+        "target_names": list(row.get("target_names") or [])[:4],
+        "target_slice": row.get("target_slice"),
+        "ops": list(row.get("ops") or [])[:4],
+        "suitability": row.get("suitability"),
+        "accepted_count": row.get("accepted_count"),
+        "rejected_count": row.get("rejected_count"),
+        "constraints": list(row.get("constraints") or [])[:3],
+    }
+
+
+def _theorist_affordances(
+    affordances: list[OptimizationAffordance],
+    *,
+    limit: int = 36,
+) -> list[dict[str, Any]]:
+    ranked = sorted(affordances, key=lambda item: (-item.suitability, item.affordance_id))
+    selected: list[OptimizationAffordance] = []
+    seen: set[str] = set()
+    for key_fn, per_group in (
+        (lambda item: item.mechanism, 2),
+        (lambda item: item.family, 1),
+    ):
+        counts: dict[str, int] = {}
+        for affordance in ranked:
+            group = str(key_fn(affordance))
+            if counts.get(group, 0) >= per_group or affordance.affordance_id in seen:
+                continue
+            selected.append(affordance)
+            seen.add(affordance.affordance_id)
+            counts[group] = counts.get(group, 0) + 1
+            if len(selected) >= limit:
+                break
+        if len(selected) >= limit:
+            break
+    for affordance in ranked:
+        if len(selected) >= limit:
+            break
+        if affordance.affordance_id in seen:
+            continue
+        selected.append(affordance)
+        seen.add(affordance.affordance_id)
+    return [
+        {
+            "affordance_id": affordance.affordance_id,
+            "family": affordance.family,
+            "mechanism": affordance.mechanism,
+            "target": affordance.target_name,
+            "target_kind": affordance.target_kind,
+            "ops": list(affordance.ops),
+            "semantic_role": affordance.semantic_role,
+            "behavioral_axes": list(affordance.behavioral_axes)[:4],
+            "expected_scope": affordance.expected_scope,
+            "risk": affordance.risk,
+            "measurements": list(affordance.measurements)[:5],
+            "suitability": affordance.suitability,
+            "evidence": list(affordance.evidence)[:3],
+            "expected_cost_impact": affordance.expected_cost_impact,
+            "expected_latency_impact": affordance.expected_latency_impact,
+        }
+        for affordance in selected
+    ]
+
+
+def _theorist_surface_target(target: EditableTarget) -> dict[str, Any]:
+    return {
+        "name": target.name,
+        "kind": target.kind,
+        "path": target.path,
+        "allowed_ops": list(target.allowed_ops),
+        "description": target.description[:240],
+        "choices": list(target.choices)[:12],
+        "max_chars": target.max_chars,
+        "semantics": target.semantics.to_dict(),
+        "value_shape": _value_shape(target.current_value),
+    }
+
+
+def _value_shape(value: Any) -> Any:
+    if isinstance(value, str):
+        return {"type": "string", "chars": len(value), "prefix": value[:240]}
+    if isinstance(value, list):
+        return {"type": "list", "count": len(value), "sample": value[:3]}
+    if isinstance(value, dict):
+        return {"type": "object", "keys": sorted(str(key) for key in value.keys())[:16]}
+    return value
+
+
 def _smoke_rejection_reason(reference: PatchSummary, candidate: PatchSummary) -> str | None:
     if candidate.runtime_error_count > reference.runtime_error_count:
         return "smoke rejected candidate because runtime errors increased"
@@ -2609,6 +2988,7 @@ def _research_state_packet(
     reference: PatchSummary,
     baseline: PatchSummary,
     states: list[CandidateEvaluationState],
+    research_theory: ResearchTheory | None = None,
     proposals_log: list[dict[str, Any]],
     dev_evaluations_used: int,
     dev_budget: int,
@@ -2701,6 +3081,7 @@ def _research_state_packet(
             "cost_usd": baseline.mean_cost_usd,
             "latency_s": baseline.median_latency_s,
         },
+        "research_theory": research_theory.to_dict() if research_theory is not None else {},
         "evidence_ledger": {
             "candidate_evidence": candidate_evidence,
             "summary": evidence_ledger.to_dict()["summary"],
@@ -2920,6 +3301,62 @@ def _compact_prior_stage_results(
                 "cost_delta": comparison.get("cost_delta"),
                 "latency_delta": comparison.get("latency_delta"),
                 "rejection_reason": item.get("rejection_reason"),
+            }
+        )
+        if len(rows) >= limit:
+            break
+    return rows
+
+
+def _compact_recent_history_for_theory(
+    proposals_log: list[dict[str, Any]],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for item in reversed(proposals_log):
+        if not item.get("candidate"):
+            continue
+        stages = item.get("evaluation_stages") or []
+        latest_stage = stages[-1] if stages else {}
+        if not isinstance(latest_stage, dict):
+            latest_stage = {}
+        comparison = latest_stage.get("comparison_to_parent") or {}
+        if not isinstance(comparison, dict):
+            comparison = {}
+        flip_summary = item.get("behavior_flip_summary") or {}
+        if not isinstance(flip_summary, dict):
+            flip_summary = {}
+        rows.append(
+            {
+                "candidate_id": item.get("patch_hash"),
+                "parent_patch_hash": item.get("parent_patch_hash"),
+                "hypothesis": _truncate_text(item.get("hypothesis"), limit=320),
+                "expected_effects": _truncate_text(item.get("expected_effects"), limit=240),
+                "mechanism_class": item.get("mechanism_class"),
+                "transform_family": item.get("transform_family"),
+                "candidate_role": item.get("candidate_role"),
+                "target_slice": item.get("target_slice"),
+                "accepted": item.get("accepted"),
+                "frontier_status": item.get("frontier_status"),
+                "rejection_reason": item.get("rejection_reason"),
+                "latest_stage": {
+                    "stage": latest_stage.get("stage"),
+                    "case_count": latest_stage.get("case_count"),
+                    "passed": latest_stage.get("passed"),
+                    "score_delta": comparison.get("score_delta"),
+                    "pass_rate_delta": comparison.get("pass_rate_delta"),
+                    "cost_delta": comparison.get("cost_delta"),
+                    "latency_delta": comparison.get("latency_delta"),
+                    "token_delta": comparison.get("token_delta"),
+                    "rejection_reason": latest_stage.get("rejection_reason"),
+                },
+                "behavior_flips": {
+                    "fixed_count": flip_summary.get("fixed_count"),
+                    "regressed_count": flip_summary.get("regressed_count"),
+                    "invalid_output_delta": flip_summary.get("invalid_output_delta"),
+                    "finish_reason_delta": flip_summary.get("finish_reason_delta"),
+                },
             }
         )
         if len(rows) >= limit:
@@ -3403,13 +3840,13 @@ def _summary_progress_fields(summary: PatchSummary) -> dict[str, Any]:
     }
 
 
-def _affordance_evidence_from_theory(task_theory: TaskTheory, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
-    row = task_theory.to_dict()
+def _affordance_evidence_from_packet(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+    row = evidence_packet.to_dict()
     runtime = row.get("runtime_defects") or {}
     output = row.get("output_defects") or {}
     tool = row.get("tool_defects") or {}
     return {
-        "bottleneck_class": row.get("bottleneck_class"),
+        "bottleneck_class": ",".join(row.get("residual_failure_modes") or []),
         "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
         "invalid_output": bool(output.get("invalid_output_count")),
         "tool_trajectory_defect": bool(

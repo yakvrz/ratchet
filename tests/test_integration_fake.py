@@ -261,11 +261,68 @@ class FakeResearchClient:
     def create_response(self, **kwargs: object) -> object:
         prompt = str(kwargs.get("input", ""))
         payload = json.loads(prompt.split("\n\n", 1)[1])
+        if payload.get("role") == "Ratchet Research Theorist":
+            return _fake_research_theory_response(payload)
         if payload.get("role") == "Ratchet Research Planner":
             return _fake_research_plan_response(payload)
         if payload.get("role") == "Ratchet Measurement Selector":
             return _fake_measurement_response(payload)
         raise AssertionError(f"unexpected fake research prompt role: {payload.get('role')!r}")
+
+
+def _fake_research_theory_response(payload: dict[str, object]) -> object:
+    state = payload.get("state")
+    state = state if isinstance(state, dict) else {}
+    affordances = state.get("optimization_affordances")
+    affordances = affordances if isinstance(affordances, list) else []
+    first_affordance = next((item for item in affordances if isinstance(item, dict)), {})
+    mechanism = str(first_affordance.get("mechanism") or "semantic_boundary_rewrite")
+    affordance_ids = [
+        str(item.get("affordance_id"))
+        for item in affordances
+        if isinstance(item, dict) and item.get("affordance_id")
+    ]
+    return type(
+        "Response",
+        (),
+        {
+            "output_text": json.dumps(
+                {
+                    "theory_id": "theory_1",
+                    "summary": "Fake theorist preserves a causal hypothesis for the fake optimization run.",
+                    "primary_hypothesis_id": "h1",
+                    "hypotheses": [
+                        {
+                            "hypothesis_id": "h1",
+                            "statement": "The fake agent needs the current affordance family to satisfy the eval.",
+                            "mechanism_class": mechanism,
+                            "target_slices": ["failed_cases"],
+                            "supporting_evidence": ["fake failed examples remain"],
+                            "competing_evidence": [],
+                            "disconfirming_result": "No staged improvement.",
+                            "confidence": "medium",
+                        }
+                    ],
+                    "experiment_opportunities": [
+                        {
+                            "opportunity_id": "opp_1",
+                            "hypothesis_ids": ["h1"],
+                            "mechanism_class": mechanism,
+                            "target_slices": ["failed_cases"],
+                            "rationale": "Test the current causal hypothesis through legal affordances.",
+                            "measurements": ["score_delta"],
+                            "disconfirming_result": "No improvement on staged eval.",
+                            "candidate_roles": ["atomic", "control"],
+                            "affordance_ids": affordance_ids,
+                            "priority": 1,
+                        }
+                    ],
+                    "uncertainty": "fake client has no deeper uncertainty",
+                    "confidence": "medium",
+                }
+            )
+        },
+    )()
 
 
 def _fake_research_plan_response(payload: dict[str, object]) -> object:

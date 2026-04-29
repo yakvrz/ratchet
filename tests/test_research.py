@@ -5,7 +5,13 @@ import unittest
 from ratchet.errors import OptimizerModelError
 from ratchet.evidence_ledger import EvidenceLedger
 from ratchet.experiments import ExperimentIntent, ResearchState
-from ratchet.optimizer import CandidateEvaluationState, _measurement_action, _measurement_budget_exhausted, _research_state_packet
+from ratchet.optimizer import (
+    CandidateEvaluationState,
+    _compact_recent_history_for_theory,
+    _measurement_action,
+    _measurement_budget_exhausted,
+    _research_state_packet,
+)
 from ratchet.results import CaseEvaluation, PatchSummary
 from ratchet.research import MeasurementSelector, ResearchPlanner
 from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal, TransformContextKey
@@ -308,6 +314,56 @@ class ResearchRoleTests(unittest.TestCase):
         self.assertEqual(action.max_select, 1)
         self.assertTrue(action.metadata["late_budget"])
         self.assertGreater(action.metadata["raw_max_select"], action.max_select)
+
+    def test_research_theorist_history_compaction_drops_raw_stage_payloads(self) -> None:
+        large_payload = {"case_rows": ["x" * 1000 for _ in range(20)]}
+        rows = _compact_recent_history_for_theory(
+            [
+                {
+                    "candidate": True,
+                    "patch_hash": "patch-1",
+                    "parent_patch_hash": "parent",
+                    "hypothesis": "h" * 1000,
+                    "expected_effects": "e" * 1000,
+                    "mechanism_class": "semantic_boundary_rewrite",
+                    "transform_family": "prompt_rewrite",
+                    "candidate_role": "atomic",
+                    "target_slice": "slice",
+                    "accepted": False,
+                    "frontier_status": "failed",
+                    "rejection_reason": "regressed",
+                    "behavior_flip_summary": {
+                        "fixed_count": 1,
+                        "regressed_count": 2,
+                        "invalid_output_delta": -1,
+                        "raw": large_payload,
+                    },
+                    "evaluation_stages": [
+                        {
+                            "stage": "full_dev",
+                            "case_count": 96,
+                            "passed": False,
+                            "comparison_to_parent": {
+                                "score_delta": -0.1,
+                                "pass_rate_delta": -0.1,
+                                "cost_delta": 0.01,
+                                "latency_delta": 0.2,
+                                "token_delta": 20,
+                            },
+                            "behavior_flip_summary": large_payload,
+                        }
+                    ],
+                }
+            ],
+            limit=4,
+        )
+
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertNotIn("evaluation_stages", row)
+        self.assertNotIn("raw", row["behavior_flips"])
+        self.assertLessEqual(len(row["hypothesis"]), 320)
+        self.assertEqual(row["latest_stage"]["stage"], "full_dev")
 
 
 if __name__ == "__main__":

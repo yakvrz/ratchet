@@ -31,6 +31,8 @@ RUN_CONFIG_KEYS = {
     "optimizer_reasoning",
     "diagnoser_model",
     "diagnoser_reasoning",
+    "research_theorist_model",
+    "research_theorist_reasoning",
     "research_planner_model",
     "research_planner_reasoning",
     "candidate_implementer_model",
@@ -168,6 +170,8 @@ class RatchetRunConfig:
     optimizer_reasoning: str = "medium"
     diagnoser_model: str | None = None
     diagnoser_reasoning: str | None = None
+    research_theorist_model: str | None = None
+    research_theorist_reasoning: str | None = None
     research_planner_model: str | None = None
     research_planner_reasoning: str | None = None
     candidate_implementer_model: str | None = None
@@ -250,6 +254,7 @@ class RatchetRunConfig:
     def optimizer_role_models(self) -> dict[str, str]:
         return {
             "diagnoser": self.diagnoser_model or self.optimizer_model,
+            "research_theorist": self.research_theorist_model or self.optimizer_model,
             "research_planner": self.research_planner_model or self.optimizer_model,
             "candidate_implementer": self.candidate_implementer_model or self.optimizer_model,
             "measurement_selector": self.measurement_selector_model or self.optimizer_model,
@@ -258,6 +263,7 @@ class RatchetRunConfig:
     def optimizer_role_reasoning(self) -> dict[str, str]:
         return {
             "diagnoser": self.diagnoser_reasoning or self.optimizer_reasoning,
+            "research_theorist": self.research_theorist_reasoning or self.optimizer_reasoning,
             "research_planner": self.research_planner_reasoning or self.optimizer_reasoning,
             "candidate_implementer": self.candidate_implementer_reasoning or self.optimizer_reasoning,
             "measurement_selector": self.measurement_selector_reasoning or self.optimizer_reasoning,
@@ -332,6 +338,8 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         optimizer_reasoning=str(payload.get("optimizer_reasoning", "medium")),
         diagnoser_model=_optional_str(payload.get("diagnoser_model")),
         diagnoser_reasoning=_optional_str(payload.get("diagnoser_reasoning")),
+        research_theorist_model=_optional_str(payload.get("research_theorist_model")),
+        research_theorist_reasoning=_optional_str(payload.get("research_theorist_reasoning")),
         research_planner_model=_optional_str(payload.get("research_planner_model")),
         research_planner_reasoning=_optional_str(payload.get("research_planner_reasoning")),
         candidate_implementer_model=_optional_str(payload.get("candidate_implementer_model")),
@@ -410,6 +418,8 @@ def resolve_run_config(
     max_holdout_measurement_turns: int | None = None,
     diagnoser_model: str | None = None,
     diagnoser_reasoning: str | None = None,
+    research_theorist_model: str | None = None,
+    research_theorist_reasoning: str | None = None,
     research_planner_model: str | None = None,
     research_planner_reasoning: str | None = None,
     candidate_implementer_model: str | None = None,
@@ -452,6 +462,8 @@ def resolve_run_config(
         optimizer_reasoning=optimizer_reasoning or base.optimizer_reasoning,
         diagnoser_model=diagnoser_model or base.diagnoser_model,
         diagnoser_reasoning=diagnoser_reasoning or base.diagnoser_reasoning,
+        research_theorist_model=research_theorist_model or base.research_theorist_model,
+        research_theorist_reasoning=research_theorist_reasoning or base.research_theorist_reasoning,
         research_planner_model=research_planner_model or base.research_planner_model,
         research_planner_reasoning=research_planner_reasoning or base.research_planner_reasoning,
         candidate_implementer_model=candidate_implementer_model or base.candidate_implementer_model,

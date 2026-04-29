@@ -47,7 +47,11 @@ Ratchet owns:
 
 `OptimizationAffordance` is the primary optimizer surface. It names one meaningful legal move, including the family, mechanism, target, allowed operations, expected measurements, risk, composition guidance, suitability, and evidence. Planner and implementer prompts should reason over affordances, not raw source files or arbitrary string targets.
 
-`ResearchState` is the branch-local evidence packet. It includes task theory, behavior profile, active affordances, budget state, prior experiment outcomes, and frontier context.
+`EvidencePacket` is deterministic symptom evidence extracted from eval results and diagnostics. It records observed runtime, output, tool, label, example-coverage, and cost/latency signals without deciding the causal theory.
+
+`ResearchTheory` is model-authored causal state for the branch. It preserves the primary hypothesis, competing hypotheses, disconfirmed explanations, surprising observations, experiment opportunities, and falsification criteria.
+
+`ResearchState` is the branch-local planning packet. It includes research theory, behavior profile, active affordances, budget state, prior experiment outcomes, and frontier context.
 
 `ExperimentIntent` is planner output. It defines a research question, mechanism, target slices, allowed affordance IDs, measurements, success criteria, and disconfirming result. It must not contain patch content.
 
@@ -64,6 +68,7 @@ Ratchet owns:
 The optimizer uses separate model roles even when they share the same configured model:
 
 - diagnoser: labels failure modes from eval traces
+- research theorist: turns deterministic evidence into causal hypotheses and experiment opportunities
 - research planner: emits experiment intents only
 - candidate implementer: emits candidate affordance applications only
 - measurement selector: chooses measurements from evidence summaries
