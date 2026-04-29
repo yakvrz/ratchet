@@ -14,6 +14,7 @@ from ratchet.model_client import (
     response_diagnostics,
 )
 from ratchet.results import PatchSummary
+from ratchet.surfaces import SurfaceSpec
 from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
 
 
@@ -39,7 +40,7 @@ class FailureDiagnoser:
     def diagnose(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget],
+        surface: list[EditableTarget] | SurfaceSpec,
         objective: OptimizationObjective | None = None,
     ) -> tuple[list[FailureDiagnosis], str]:
         failed_examples = summary.failed_examples(
@@ -58,7 +59,7 @@ class FailureDiagnoser:
     def _llm_diagnoses(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget],
+        surface: list[EditableTarget] | SurfaceSpec,
         failed_examples: list[dict[str, Any]],
         objective: OptimizationObjective,
     ) -> list[FailureDiagnosis]:
@@ -66,7 +67,7 @@ class FailureDiagnoser:
             self._client = ResponsesModelClient(env_path=self.env_path)
         prompt = {
             "objective": objective.to_dict(),
-            "current_patch": _compact_patch(summary.patch.to_dict()),
+            "current_candidate": summary.patch.to_dict() if summary.patch is not None else None,
             "behavior": {
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,
@@ -79,7 +80,7 @@ class FailureDiagnoser:
                 "mean_total_tokens": summary.mean_total_tokens,
                 "median_latency_s": summary.median_latency_s,
             },
-            "editable_targets": [_compact_editable_target(target) for target in surface],
+            "optimization_surface": _compact_surface(surface),
             "failed_examples": failed_examples,
         }
         response_format = {
@@ -128,7 +129,7 @@ class FailureDiagnoser:
                 "You are Ratchet's failure diagnoser inside a task-agnostic agent optimizer. "
                 "Return strict JSON with exactly one top-level key, diagnoses, whose value is an array. "
                 "Each diagnosis object must include case_ids, category, root_cause, target_names, and evidence. "
-                "case_ids must come from failed_examples. target_names must come from editable_targets. "
+                "case_ids must come from failed_examples. target_names must come from optimization_surface. "
                 "evidence must be an array of compact objects that cite case_id plus the observed output, expected signal, "
                 "behavior_diagnostics may include label confusion, weak-label, and slice summaries; use those summaries "
                 "to group related failures when they are clearer than individual rows. If labels, notes, output fields, or raw_output_text indicate "
@@ -210,7 +211,7 @@ class FailureDiagnoser:
                     f"Optimizer diagnoser returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
         case_ids = {str(item["case_id"]) for item in failed_examples}
-        target_names = {target.name for target in surface}
+        target_names = _surface_target_names(surface)
         diagnoses: list[FailureDiagnosis] = []
         for raw in payload.get("diagnoses", []):
             if not isinstance(raw, dict):
@@ -280,6 +281,44 @@ def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
         "choices": list(target.choices)[:12],
         "value_schema": dict(target.value_schema),
     }
+
+
+def _compact_surface(surface: list[EditableTarget] | SurfaceSpec) -> Any:
+    if isinstance(surface, SurfaceSpec):
+        return {
+            "agent_id": surface.agent_id,
+            "context_sections": surface.context.graph.section_names(),
+            "editable_sections": list(surface.context.editable_sections),
+            "hooks": {
+                name: {
+                    "supported": hook.supported,
+                    "allowed_ops": list(hook.allowed_ops),
+                    "available_inputs": list(hook.available_inputs),
+                }
+                for name, hook in sorted(surface.hooks.items())
+            },
+            "state": surface.state.to_dict(),
+            "model": surface.model.to_dict(),
+            "response": surface.response.to_dict(),
+            "immutable_boundaries": list(surface.immutable_boundaries),
+        }
+    return [_compact_editable_target(target) for target in surface]
+
+
+def _surface_target_names(surface: list[EditableTarget] | SurfaceSpec) -> set[str]:
+    if isinstance(surface, SurfaceSpec):
+        names = set(surface.context.editable_sections)
+        names.update(f"context.{name}" for name in surface.context.editable_sections)
+        names.add("generated_context")
+        if surface.response.draft_response_interception_allowed:
+            names.add("draft_response")
+        if surface.state.supports_persistent_state:
+            names.add("state")
+        if surface.model.model_name_configurable or surface.model.max_tokens_configurable:
+            names.add("model_config")
+        names.update(tool.name for tool in surface.tools.tools)
+        return names
+    return {target.name for target in surface}
 
 
 def _compact_patch(patch: dict[str, Any]) -> dict[str, Any]:

@@ -12,7 +12,7 @@ import threading
 import time
 from typing import Any, Callable, Iterable
 
-from ratchet.adapters import AdapterProtocol, checked_agent_spec
+from ratchet.adapters import AdapterProtocol, checked_agent_spec, checked_surface_spec
 from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
 from ratchet.diagnosis import FailureDiagnoser
 from ratchet.evidence import ProposalExampleBank, build_proposal_example_bank
@@ -26,7 +26,7 @@ from ratchet.experiments import (
     build_evidence_packet,
 )
 from ratchet.ideation import build_ideation_metrics
-from ratchet.io import agent_spec_hash, append_jsonl, patch_hash
+from ratchet.io import agent_spec_hash, append_jsonl, candidate_hash, transform_program_hash
 from ratchet.model_client import model_request_limits
 from ratchet.objectives import (
     behavior_flip_summary,
@@ -39,7 +39,6 @@ from ratchet.objectives import (
     pareto_frontier,
     select_recommended_patch,
 )
-from ratchet.patches import compose_patches
 from ratchet.profiling import (
     build_run_profile,
     confirmation_case_subset,
@@ -60,7 +59,9 @@ from ratchet.results import (
     build_cache_namespace,
     split_train_dev_holdout,
 )
-from ratchet.surface import SurfaceGenerator
+from ratchet.surfaces import SurfaceSpec
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import CompiledCandidate, TransformPatch, TransformProgram
 from ratchet.transforms import (
     CandidateProposal,
     TransformContextKey,
@@ -71,15 +72,12 @@ from ratchet.transforms import (
     summarize_transform_results,
 )
 from ratchet.types import (
-    AgentPatch,
     AgentSpec,
     DiagnosticTrace,
-    EditableTarget,
     EvalCase,
     FailureDiagnosis,
     GradeResult,
     OperationalMetrics,
-    PatchOperation,
     OptimizationObjective,
     RunRecord,
 )
@@ -101,6 +99,28 @@ MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION = 1
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
+def compose_transform_candidate(
+    parent: CompiledCandidate | None,
+    child: TransformProgram,
+    *,
+    compiler: TransformCompiler,
+    surface: SurfaceSpec,
+) -> CompiledCandidate:
+    patches = (*((parent.program.patches if parent is not None else ())), *child.patches)
+    metadata = {
+        **(dict(parent.program.metadata) if parent is not None else {}),
+        **dict(child.metadata),
+        "parent_candidate_id": parent.program.candidate_id if parent is not None else None,
+    }
+    program = TransformProgram(
+        candidate_id=child.candidate_id,
+        hypothesis_id=child.hypothesis_id,
+        patches=patches,
+        metadata=metadata,
+    )
+    return compiler.compile_or_raise(program, surface)
+
+
 @dataclass
 class FrontierParentState:
     visits: int = 0
@@ -113,7 +133,7 @@ class FrontierParentState:
 @dataclass
 class CandidateEvaluationState:
     candidate: CandidateProposal
-    patch: AgentPatch
+    patch: CompiledCandidate
     patch_hash: str
     proposal_patch_hash: str
     transform_context: TransformContextKey
@@ -195,7 +215,8 @@ class RatchetOptimizer:
         self.holdout_budget = holdout_budget
         self.objective = objective or OptimizationObjective()
         self.agent_spec = checked_agent_spec(adapter)
-        self.surface_generator = SurfaceGenerator()
+        self.surface_spec = checked_surface_spec(adapter)
+        self.transform_compiler = TransformCompiler()
         self.optimizer_role_models = {
             "diagnoser": diagnoser_model or optimizer_model,
             "research_theorist": research_theorist_model or optimizer_model,
@@ -320,7 +341,7 @@ class RatchetOptimizer:
             objective=self.objective.mode,
         )
 
-        baseline_patch = AgentPatch.empty()
+        baseline_patch = None
         self._emit_progress("baseline_dev_started", case_count=len(dev_cases))
         baseline_dev = self.evaluate_patch(baseline_patch, dev_cases)
         self._emit_progress("baseline_dev_completed", **_summary_progress_fields(baseline_dev))
@@ -342,8 +363,7 @@ class RatchetOptimizer:
         diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
         evidence_packet_cache: dict[str, EvidencePacket] = {}
         evaluated_patch_hashes = {baseline_dev.patch_hash}
-        generated_surface = self.surface_generator.generate(self.agent_spec, self.objective)
-        generated_surface_rows: list[dict[str, Any]] = [target.to_dict() for target in generated_surface]
+        generated_surface_rows: list[dict[str, Any]] = [self.surface_spec.to_dict()]
         dev_evaluations = 0
         iteration = 0
         consecutive_zero_eval_parent_attempts = 0
@@ -398,9 +418,9 @@ class RatchetOptimizer:
                 parent_state = frontier_states.setdefault(current_dev.patch_hash, FrontierParentState())
                 parent_state.visits += 1
                 parent_state.last_selected_iteration = iteration
-                current_spec = self.agent_spec.apply_patch(current_dev.patch) if self.agent_spec else None
-                surface = self.surface_generator.generate(current_spec, self.objective)
-                generated_surface_rows = [target.to_dict() for target in surface]
+                current_spec = self.agent_spec
+                surface = self.surface_spec
+                generated_surface_rows = [surface.to_dict()]
                 self._emit_progress(
                     "parent_started",
                     iteration=iteration,
@@ -801,7 +821,7 @@ class RatchetOptimizer:
                             "iteration": iteration,
                             "parent_rank": parent_index + 1,
                             "parent_patch_hash": current_dev.patch_hash,
-                            "proposal_patch_hash": patch_hash(chosen_proposal.patch),
+                            "proposal_patch_hash": transform_program_hash(chosen_proposal.program),
                             "transform_family": chosen_proposal.transform_family,
                             "transform_context": TransformContextKey.from_candidate(chosen_proposal).to_dict(),
                             "patch_hash": chosen_dev.patch_hash,
@@ -971,7 +991,7 @@ class RatchetOptimizer:
                     confirmation_cases,
                     sample_indices=sample_indices,
                 )
-                confirmation_baseline = confirmation_summaries[patch_hash(baseline_patch)]
+                confirmation_baseline = confirmation_summaries[candidate_hash(baseline_patch)]
                 confirmation_candidate = confirmation_summaries[dev_summary.patch_hash]
                 confirmation = confirmation_result(
                     reference=baseline_dev,
@@ -1242,15 +1262,11 @@ class RatchetOptimizer:
         simplification_full_dev_count = 0
         for parent_index, parent in enumerate(simplification_parents, start=1):
             parent_full_dev_count = 0
-            candidate_variants = [
-                variant
-                for variant in _simplification_variants(parent.patch)[:MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST]
-                if patch_hash(variant) != parent.patch_hash
-            ]
-            selected_variant_hashes = {patch_hash(variant) for variant in candidate_variants}
+            candidate_variants: list[CompiledCandidate] = []
+            selected_variant_hashes = {candidate_hash(variant) for variant in candidate_variants}
             skipped_variant_reasons: dict[str, str] = {}
             for variant in candidate_variants:
-                digest = patch_hash(variant)
+                digest = candidate_hash(variant)
                 if digest not in selected_variant_hashes:
                     row = {
                         "type": "simplification_skipped",
@@ -1346,7 +1362,7 @@ class RatchetOptimizer:
     def _evaluate_simplification_variant(
         self,
         *,
-        patch: AgentPatch,
+        patch: CompiledCandidate,
         parent: PatchSummary,
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
@@ -1420,7 +1436,7 @@ class RatchetOptimizer:
         current_dev: PatchSummary,
         evidence_packet: EvidencePacket,
         diagnoses: list[FailureDiagnosis],
-        surface: list[EditableTarget],
+        surface: SurfaceSpec,
         search_hypothesis: Any,
         affordances: list[OptimizationAffordance],
         proposals_log: list[dict[str, Any]],
@@ -1453,7 +1469,7 @@ class RatchetOptimizer:
             "evidence_packet": _theorist_evidence_packet(evidence_packet),
             "diagnoses": [_theorist_diagnosis(diagnosis) for diagnosis in diagnoses[:8]],
             "search_hypothesis": _theorist_search_hypothesis(search_hypothesis),
-            "editable_surface": [_theorist_surface_target(target) for target in surface],
+            "surface_spec": _theorist_surface_spec(surface),
             "optimization_affordances": _theorist_affordances(affordances),
             "prior_experiment_outcomes": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
             "evidence_ledger_summary": evidence_ledger.to_dict()["summary"],
@@ -1511,7 +1527,7 @@ class RatchetOptimizer:
         current_dev: PatchSummary,
         baseline_dev: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
-        surface: list[EditableTarget],
+        surface: SurfaceSpec,
         diagnoses: list[FailureDiagnosis],
         research_theory: ResearchTheory,
         evidence_packet: EvidencePacket,
@@ -1609,7 +1625,7 @@ class RatchetOptimizer:
                 "evidence_packet": evidence_packet.to_dict(),
                 "diagnoses": [diagnosis.to_dict() for diagnosis in diagnoses],
                 "diagnosis": target_diagnosis.to_dict() if target_diagnosis else None,
-                "proposal_hashes": [patch_hash(proposal.patch) for proposal in proposals],
+                "proposal_hashes": [transform_program_hash(proposal.program) for proposal in proposals],
                 "candidate_proposals": self.candidate_implementer.last_candidate_rows,
                 "invalid_candidate_proposals": self.candidate_implementer.last_invalid_candidate_rows,
             }
@@ -1632,18 +1648,24 @@ class RatchetOptimizer:
             return [], 0
 
         materialization_by_proposal_hash = {
-            str(row.get("proposal_patch_hash")): dict(row.get("materialization") or {})
+            str(row.get("proposal_program_hash")): dict(row.get("materialization") or {})
             for row in self.candidate_implementer.last_candidate_rows
-            if row.get("proposal_patch_hash")
+            if row.get("proposal_program_hash")
         }
         accepted_rows: list[tuple[CandidateProposal, PatchSummary, Comparison]] = []
         evaluation_states: list[CandidateEvaluationState] = []
         for candidate in proposals[:proposal_budget]:
-            patch = compose_patches(current_dev.patch, candidate.patch)
-            digest = patch_hash(patch)
+            patch = compose_transform_candidate(
+                current_dev.patch,
+                candidate.program,
+                compiler=self.transform_compiler,
+                surface=self.surface_spec,
+            )
+            digest = candidate_hash(patch)
             if digest in evaluated_patch_hashes:
                 continue
             transform_context = TransformContextKey.from_candidate(candidate)
+            proposal_digest = transform_program_hash(candidate.program)
             self._emit_progress(
                 "candidate_evaluation_started",
                 iteration=iteration,
@@ -1652,14 +1674,14 @@ class RatchetOptimizer:
                 transform_family=candidate.transform_family,
                 transform_context=transform_context.to_dict(),
                 patch_hash=digest,
-                proposal_patch_hash=patch_hash(candidate.patch),
+                proposal_patch_hash=proposal_digest,
             )
             evaluation_states.append(
                 CandidateEvaluationState(
                     candidate=candidate,
                     patch=patch,
                     patch_hash=digest,
-                    proposal_patch_hash=patch_hash(candidate.patch),
+                    proposal_patch_hash=proposal_digest,
                     transform_context=transform_context,
                 )
             )
@@ -1697,7 +1719,7 @@ class RatchetOptimizer:
                 "parent_rank": parent_index + 1,
                 "parent_patch_hash": current_dev.patch_hash,
                 "proposal_patch_hash": state.proposal_patch_hash,
-                "proposal": candidate.patch.to_dict(),
+                "proposal": candidate.program.to_dict(),
                 "candidate": candidate.to_dict(),
                 "materialization": materialization_by_proposal_hash.get(state.proposal_patch_hash, {}),
                 "applications": [application.to_dict() for application in candidate.applications],
@@ -1733,7 +1755,7 @@ class RatchetOptimizer:
                 "rejection_reason": state.rejection_reason,
                 "constraint_warning": state.constraint_warning,
                 "full_dev_evaluated": state.full_dev_evaluated,
-                "diagnosis_category": candidate.patch.metadata.get("diagnosis_category"),
+                "diagnosis_category": candidate.program.metadata.get("diagnosis_category"),
             }
             proposals_log.append(proposal_row)
             decision_log.append({"type": "proposal_evaluation", **proposal_row})
@@ -2209,7 +2231,7 @@ class RatchetOptimizer:
     def _evaluate_candidate_progressively(
         self,
         *,
-        patch: AgentPatch,
+        patch: CompiledCandidate,
         reference: PatchSummary,
         baseline: PatchSummary,
         dev_cases: tuple[EvalCase, ...],
@@ -2307,23 +2329,23 @@ class RatchetOptimizer:
 
     def evaluate_patch(
         self,
-        patch: AgentPatch,
+        patch: CompiledCandidate | None,
         cases: tuple[EvalCase, ...],
         *,
         sample_indices: Iterable[int] | None = None,
     ) -> PatchSummary:
-        return self.evaluate_patches([patch], cases, sample_indices=sample_indices)[patch_hash(patch)]
+        return self.evaluate_patches([patch], cases, sample_indices=sample_indices)[candidate_hash(patch)]
 
     def evaluate_patches(
         self,
-        patches: Iterable[AgentPatch],
+        patches: Iterable[CompiledCandidate | None],
         cases: tuple[EvalCase, ...],
         *,
         sample_indices: Iterable[int] | None = None,
     ) -> dict[str, PatchSummary]:
-        patch_by_digest: dict[str, AgentPatch] = {}
+        patch_by_digest: dict[str, CompiledCandidate | None] = {}
         for patch in patches:
-            patch_by_digest.setdefault(patch_hash(patch), patch)
+            patch_by_digest.setdefault(candidate_hash(patch), patch)
         if not patch_by_digest:
             return {}
         indices = tuple(sample_indices) if sample_indices is not None else tuple(range(self.samples_per_case))
@@ -2333,7 +2355,7 @@ class RatchetOptimizer:
             digest: [None] * (len(cases) * len(indices))
             for digest in patch_by_digest
         }
-        uncached: list[tuple[str, AgentPatch, int, EvalCase, int]] = []
+        uncached: list[tuple[str, CompiledCandidate | None, int, EvalCase, int]] = []
         fresh_by_digest: Counter[str] = Counter()
         for digest, patch in patch_by_digest.items():
             order = 0
@@ -2380,7 +2402,7 @@ class RatchetOptimizer:
                         sample_index=sample_index,
                     )
             else:
-                futures: dict[Future[CaseEvaluation], tuple[str, AgentPatch, int, EvalCase, int]] = {}
+                futures: dict[Future[CaseEvaluation], tuple[str, CompiledCandidate | None, int, EvalCase, int]] = {}
                 with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
                     for digest, patch, item_order, case, sample_index in uncached:
                         self._emit_progress(
@@ -2425,7 +2447,7 @@ class RatchetOptimizer:
     def _run_uncached_case(
         self,
         digest: str,
-        patch: AgentPatch,
+        patch: CompiledCandidate | None,
         case: EvalCase,
         *,
         sample_index: int,
@@ -2464,12 +2486,11 @@ class RatchetOptimizer:
             turns=evaluation.record.metrics.turns,
         )
 
-    def _execute_case(self, patch: AgentPatch, case: EvalCase, *, sample_index: int = 0) -> CaseEvaluation:
+    def _execute_case(self, patch: CompiledCandidate | None, case: EvalCase, *, sample_index: int = 0) -> CaseEvaluation:
         total_attempts = self.max_case_retries + 1
         started_at = time.perf_counter()
         last_error: Exception | None = None
         last_phase = "run_case"
-        effective_patch = None if patch.is_empty else patch
         for attempt in range(1, total_attempts + 1):
             try:
                 last_phase = "run_case"
@@ -2477,7 +2498,7 @@ class RatchetOptimizer:
                     timeout_s=self.case_timeout_s,
                     max_attempts=1,
                 ):
-                    record = self.adapter.run_case(case, effective_patch)
+                    record = self.adapter.run_case(case, patch)
                 if not isinstance(record, RunRecord):
                     raise TypeError(f"run_case returned {type(record).__name__}, expected RunRecord.")
                 try:
@@ -2887,17 +2908,39 @@ def _theorist_affordances(
     ]
 
 
-def _theorist_surface_target(target: EditableTarget) -> dict[str, Any]:
+def _theorist_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
     return {
-        "name": target.name,
-        "kind": target.kind,
-        "path": target.path,
-        "allowed_ops": list(target.allowed_ops),
-        "description": target.description[:240],
-        "choices": list(target.choices)[:12],
-        "max_chars": target.max_chars,
-        "semantics": target.semantics.to_dict(),
-        "value_shape": _value_shape(target.current_value),
+        "agent_id": surface.agent_id,
+        "context_sections": [
+            {
+                "name": section.name,
+                "role": section.role,
+                "required": section.required,
+                "editable": section.name in surface.context.editable_sections,
+                "value_shape": _value_shape(section.content),
+            }
+            for section in surface.context.graph.sections
+        ],
+        "context_capabilities": {
+            "generated_sections_allowed": surface.context.generated_sections_allowed,
+            "removable_sections_allowed": surface.context.removable_sections_allowed,
+            "reorderable_sections_allowed": surface.context.reorderable_sections_allowed,
+        },
+        "hooks": {
+            name: {
+                "available_inputs": list(hook.available_inputs),
+                "allowed_ops": list(hook.allowed_ops),
+                "method": hook.method,
+            }
+            for name, hook in sorted(surface.hooks.items())
+            if hook.supported
+        },
+        "state": surface.state.to_dict(),
+        "tools": surface.tools.to_dict(),
+        "model": surface.model.to_dict(),
+        "response": surface.response.to_dict(),
+        "immutable_boundaries": list(surface.immutable_boundaries),
+        "safety_constraints": list(surface.safety_constraints),
     }
 
 
@@ -3259,10 +3302,10 @@ def _research_candidate_metadata(state: CandidateEvaluationState) -> dict[str, A
         "target_slice": state.candidate.target_slice,
         "transform_instance": state.candidate.transform_instance,
         "hypothesis": state.candidate.hypothesis,
-        "operation_count": len(state.patch.operations),
+        "operation_count": len(state.patch.program.patches),
         "operations": [
-            {"op": operation.op, "target": operation.target}
-            for operation in state.patch.operations
+            {"op": operation.op.op, "target": operation.hook or "on_task_start"}
+            for operation in state.patch.program.patches
         ],
         "comparison_group_key": _candidate_research_group(state),
     }
@@ -3499,7 +3542,7 @@ def _is_timeout_error(error: Exception) -> bool:
     return "timed out" in message or "timeout" in message
 
 
-def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[str, Any]) -> bool:
+def _requires_finalist_confirmation(patch: CompiledCandidate | None, runtime_diagnostic: dict[str, Any]) -> bool:
     if runtime_diagnostic.get("baseline_runtime_defect_fixed"):
         return True
     if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(patch):
@@ -3509,74 +3552,22 @@ def _requires_finalist_confirmation(patch: AgentPatch, runtime_diagnostic: dict[
     return False
 
 
-def _touches_output_or_runtime(patch: AgentPatch) -> bool:
-    for operation in patch.operations:
-        target = operation.target
-        if operation.op == "set_runtime_param" and target.startswith("runtime."):
+def _touches_output_or_runtime(patch: CompiledCandidate | None) -> bool:
+    if patch is None:
+        return False
+    for operation in patch.program.patches:
+        target = str(operation.op.params.get("section") or operation.op.params.get("field") or "")
+        if operation.op.op == "set_model_config" and target in {"max_tokens", "temperature", "reasoning_effort"}:
             return True
-        if operation.op == "add_output_constraint" or target == "output_contract":
+        if operation.op.op in {"rewrite_response", "block_response", "validate_claims"}:
             return True
-        if target.startswith("instructions.output"):
+        if target == "output_contract" or target.startswith("output"):
             return True
     return False
 
 
-def _simplification_variants(patch: AgentPatch) -> list[AgentPatch]:
-    variants: list[AgentPatch] = []
-    operations = list(patch.operations)
-    if len(operations) > 1:
-        for index, operation in enumerate(operations):
-            simplified = [item for item_index, item in enumerate(operations) if item_index != index]
-            variants.append(
-                AgentPatch(
-                    operations=simplified,
-                    rationale=f"Simplification removing operation {index + 1} ({operation.op} on {operation.target}).",
-                    expected_effect="Preserve measured gain with less policy complexity.",
-                    metadata={
-                        **patch.metadata,
-                        "simplification": {
-                            "type": "remove_operation",
-                            "removed_index": index,
-                            "removed_op": operation.op,
-                            "removed_target": operation.target,
-                        },
-                    },
-                )
-            )
-    for op_index, operation in enumerate(operations):
-        if operation.op != "add_few_shot" or not isinstance(operation.value, list) or len(operation.value) <= 1:
-            continue
-        for keep_count in sorted({1, max(1, len(operation.value) // 2)}):
-            if keep_count >= len(operation.value):
-                continue
-            reduced_operations = list(operations)
-            reduced_operations[op_index] = PatchOperation(
-                op=operation.op,
-                target=operation.target,
-                value=operation.value[:keep_count],
-                rationale=operation.rationale,
-            )
-            variants.append(
-                AgentPatch(
-                    operations=reduced_operations,
-                    rationale=f"Simplification reducing few-shot examples from {len(operation.value)} to {keep_count}.",
-                    expected_effect="Preserve measured gain with fewer prompt tokens.",
-                    metadata={
-                        **patch.metadata,
-                        "simplification": {
-                            "type": "reduce_few_shot",
-                            "operation_index": op_index,
-                            "original_count": len(operation.value),
-                            "kept_count": keep_count,
-                        },
-                    },
-                )
-            )
-    unique: dict[str, AgentPatch] = {}
-    for variant in variants:
-        if variant.operations:
-            unique.setdefault(patch_hash(variant), variant)
-    return list(unique.values())
+def _simplification_variants(patch: CompiledCandidate | None) -> list[CompiledCandidate]:
+    return []
 
 
 def _transform_lineage_families(patch_hash_value: str, proposals: list[dict[str, Any]]) -> list[str]:

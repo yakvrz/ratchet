@@ -19,18 +19,15 @@ from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import CompiledCandidate, TransformProgram
 from ratchet.types import (
-    AgentPatch,
     AgentSpec,
     AgentTool,
     DiagnosticTrace,
-    EditableTarget,
     EvalCase,
     FailureDiagnosis,
     GradeResult,
     OptimizationConstraints,
     OptimizationObjective,
     OperationalMetrics,
-    PatchOperation,
     InteractionTurn,
     RunRecord,
     TargetSemantics,
@@ -40,11 +37,9 @@ from ratchet.types import (
 __all__ = [
     "AdapterProtocol",
     "AdapterGenerator",
-    "AgentPatch",
     "AgentSpec",
     "AgentTool",
     "DiagnosticTrace",
-    "EditableTarget",
     "EvalCase",
     "FailureDiagnosis",
     "FinalGateResult",
@@ -60,7 +55,6 @@ __all__ = [
     "OptimizationObjective",
     "OptimizerModelError",
     "OperationalMetrics",
-    "PatchOperation",
     "InteractionTurn",
     "ProposalExample",
     "ProposalExampleBank",

@@ -8,8 +8,8 @@ import statistics
 from typing import Any, Iterable
 
 from ratchet.io import append_jsonl, case_digest, stable_digest
+from ratchet.transform_program import CompiledCandidate
 from ratchet.types import (
-    AgentPatch,
     AgentSpec,
     EvalCase,
     GradeResult,
@@ -39,12 +39,18 @@ class CaseEvaluation:
     cached: bool = False
     sample_index: int = 0
 
-    def to_record(self, patch_hash_value: str, patch: AgentPatch, *, cache_namespace: str) -> dict[str, Any]:
+    def to_record(
+        self,
+        patch_hash_value: str,
+        patch: CompiledCandidate | None,
+        *,
+        cache_namespace: str,
+    ) -> dict[str, Any]:
         return {
             "cache_namespace": cache_namespace,
             "patch_hash": patch_hash_value,
             "sample_index": self.sample_index,
-            "patch": patch.to_dict(),
+            "candidate": patch.to_dict() if patch is not None else None,
             "case_digest": case_digest(self.case),
             "case": self.case.to_dict(),
             "record": self.record.to_dict(),
@@ -65,7 +71,7 @@ class CaseEvaluation:
 @dataclass
 class PatchSummary:
     patch_hash: str
-    patch: AgentPatch
+    patch: CompiledCandidate | None
     split: str
     evaluations: list[CaseEvaluation]
 
@@ -154,7 +160,7 @@ class PatchSummary:
 
     @property
     def operation_count(self) -> int:
-        return len(self.patch.operations)
+        return len(self.patch.program.patches) if self.patch is not None else 0
 
     @property
     def failure_labels(self) -> dict[str, int]:
@@ -237,7 +243,7 @@ class PatchSummary:
     def to_dict(self) -> dict[str, Any]:
         return {
             "patch_hash": self.patch_hash,
-            "patch": self.patch.to_dict(),
+            "candidate": self.patch.to_dict() if self.patch is not None else None,
             "split": self.split,
             "case_count": self.case_count,
             "sample_count": self.sample_count,
@@ -354,8 +360,8 @@ class Comparison:
 
 @dataclass
 class RatchetResult:
-    baseline_patch: AgentPatch
-    selected_patch: AgentPatch
+    baseline_patch: CompiledCandidate | None
+    selected_patch: CompiledCandidate | None
     selected_patch_hash: str
     promoted: bool
     baseline_dev: PatchSummary
@@ -417,7 +423,7 @@ class ResultStore:
     def get(self, patch_hash_value: str, case: EvalCase, sample_index: int = 0) -> CaseEvaluation | None:
         return self.records.get((patch_hash_value, case_digest(case), sample_index))
 
-    def put(self, patch_hash_value: str, patch: AgentPatch, evaluation: CaseEvaluation) -> None:
+    def put(self, patch_hash_value: str, patch: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
         key = (patch_hash_value, case_digest(evaluation.case), evaluation.sample_index)
         if key in self.records:
             return

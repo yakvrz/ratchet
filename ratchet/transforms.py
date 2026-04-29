@@ -6,7 +6,9 @@ from typing import Any
 
 from ratchet.experiments import CANDIDATE_ROLES, mechanism_error_for_family
 from ratchet.results import Comparison, PatchSummary
-from ratchet.types import AgentPatch, EditableTarget, FailureDiagnosis, OptimizationObjective, PatchOperation
+from ratchet.surfaces import SurfaceSpec
+from ratchet.transform_program import TransformPatch, TransformProgram
+from ratchet.types import EditableTarget, FailureDiagnosis, OptimizationObjective
 
 
 TRANSFORM_LIFECYCLE_STATES = {
@@ -132,8 +134,8 @@ class TransformContextKey:
 
     @classmethod
     def from_candidate(cls, candidate: "CandidateProposal") -> "TransformContextKey":
-        operations = tuple(candidate.patch.operations)
-        if candidate.transform_family == "targeted_few_shot" and not operations:
+        patches = tuple(candidate.program.patches)
+        if candidate.transform_family == "targeted_few_shot" and not patches:
             selection_payload = candidate.intervention.payload if candidate.intervention.kind == "example_selection" else {}
             source_ids = selection_payload.get("source_case_ids")
             mechanism = _parameter_mechanism_signature(selection_payload)
@@ -141,42 +143,25 @@ class TransformContextKey:
                 mechanism = (f"few_shot:count={len(source_ids)}", *mechanism)
             return cls(
                 family=candidate.transform_family,
-                target_names=("few_shot",),
-                ops=("add_few_shot",),
+                target_names=("proposal_selected_examples",),
+                ops=("add_context_section",),
                 target_slice=candidate.target_slice,
                 mechanism=mechanism,
                 transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
             )
         return cls(
             family=candidate.transform_family,
-            target_names=tuple(operation.target for operation in operations),
-            ops=tuple(operation.op for operation in operations),
+            target_names=tuple(_transform_patch_target(patch) for patch in patches),
+            ops=tuple(patch.op.op for patch in patches),
             target_slice=candidate.target_slice,
             mechanism=(
-                *tuple(_operation_mechanism_signature(operation) for operation in operations),
+                *tuple(_transform_patch_mechanism_signature(patch) for patch in patches),
                 *_parameter_mechanism_signature(candidate.transform_parameters),
             ),
             transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
         )
 
     @classmethod
-    def from_operation(
-        cls,
-        *,
-        family: str,
-        operation: PatchOperation,
-        target_slice: str = "global",
-        transform_instance: str = "candidate",
-    ) -> "TransformContextKey":
-        return cls(
-            family=family,
-            target_names=(operation.target,),
-            ops=(operation.op,),
-            target_slice=target_slice,
-            mechanism=(_operation_mechanism_signature(operation),),
-            transform_instance=transform_instance,
-        )
-
     @classmethod
     def from_row(cls, row: dict[str, Any]) -> "TransformContextKey":
         existing = row.get("transform_context")
@@ -189,19 +174,16 @@ class TransformContextKey:
                 mechanism=tuple(str(item) for item in existing.get("mechanism", [])),
                 transform_instance=str(existing.get("transform_instance") or row.get("transform_instance") or "candidate"),
             )
-        patch_payload = row.get("proposal") or (row.get("candidate") or {}).get("patch") or row.get("patch") or {}
-        operations = patch_payload.get("operations", []) if isinstance(patch_payload, dict) else []
-        operation_objects = [
-            PatchOperation.from_dict(operation)
-            for operation in operations
-            if isinstance(operation, dict)
-        ]
+        candidate_payload = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        program_payload = row.get("proposal") or candidate_payload.get("program") or {}
+        raw_patches = program_payload.get("patches", []) if isinstance(program_payload, dict) else []
+        patches = [TransformPatch.from_dict(item) for item in raw_patches if isinstance(item, dict)]
         return cls(
             family=str(row.get("transform_family") or "unknown"),
-            target_names=tuple(operation.target for operation in operation_objects),
-            ops=tuple(operation.op for operation in operation_objects),
+            target_names=tuple(_transform_patch_target(patch) for patch in patches),
+            ops=tuple(patch.op.op for patch in patches),
             target_slice=str(row.get("target_slice") or "global"),
-            mechanism=tuple(_operation_mechanism_signature(operation) for operation in operation_objects),
+            mechanism=tuple(_transform_patch_mechanism_signature(patch) for patch in patches),
             transform_instance=str(row.get("transform_instance") or row.get("hypothesis") or "candidate"),
         )
 
@@ -357,7 +339,6 @@ class Intervention:
 @dataclass(frozen=True)
 class CandidateAffordanceApplication:
     affordance_id: str
-    operation: PatchOperation | None = None
     selection: dict[str, Any] = field(default_factory=dict)
     rationale: str = ""
 
@@ -374,7 +355,6 @@ class CandidateAffordanceApplication:
     def to_dict(self) -> dict[str, Any]:
         return {
             "affordance_id": self.affordance_id,
-            "operation": self.operation.to_dict() if self.operation is not None else None,
             "selection": dict(self.selection),
             "rationale": self.rationale,
         }
@@ -386,15 +366,11 @@ class CandidateAffordanceApplication:
             raise ValueError("application requires affordance_id")
         raw_operation = payload.get("operation")
         raw_selection = payload.get("selection")
-        if isinstance(raw_operation, dict) and isinstance(raw_selection, dict) and raw_selection:
-            raise ValueError("application must use operation or selection, not both")
-        operation = PatchOperation.from_dict(raw_operation) if isinstance(raw_operation, dict) else None
+        if isinstance(raw_operation, dict):
+            raise ValueError("applications cite surface affordances; transform edits belong in program.patches")
         selection = dict(raw_selection) if isinstance(raw_selection, dict) else {}
-        if operation is None and not selection:
-            raise ValueError("application requires operation or selection")
         return cls(
             affordance_id=affordance_id,
-            operation=operation,
             selection=selection,
             rationale=str(payload.get("rationale") or ""),
         )
@@ -402,7 +378,7 @@ class CandidateAffordanceApplication:
 
 @dataclass(frozen=True)
 class CandidateProposal:
-    patch: AgentPatch
+    program: TransformProgram
     applications: list[CandidateAffordanceApplication]
     experiment_id: str = ""
     candidate_role: str = "atomic"
@@ -443,17 +419,17 @@ class CandidateProposal:
             row["source_case_ids"] = source_ids
         if strategies:
             row["selection_strategies"] = sorted(set(strategies))
-        if "few_shot_example_count" in self.patch.metadata:
-            row["few_shot_example_count"] = self.patch.metadata["few_shot_example_count"]
+        if "few_shot_example_count" in self.program.metadata:
+            row["few_shot_example_count"] = self.program.metadata["few_shot_example_count"]
         return row
 
     @property
     def intervention(self) -> Intervention:
-        if self.patch.operations:
-            return Intervention(kind="patch", payload={"patch": self.patch.to_dict()})
+        if self.program.patches:
+            return Intervention(kind="transform_program", payload={"program": self.program.to_dict()})
         if self.applications and self.applications[0].selection:
             return Intervention(kind="example_selection", payload=dict(self.applications[0].selection))
-        return Intervention(kind="patch", payload={"patch": self.patch.to_dict()})
+        return Intervention(kind="transform_program", payload={"program": self.program.to_dict()})
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -472,17 +448,39 @@ class CandidateProposal:
             "expected_effects": dict(self.expected_effects),
             "evaluation_plan": self.evaluation_plan,
             "applications": [application.to_dict() for application in self.applications],
-            "patch": self.patch.to_dict(),
+            "program": self.program.to_dict(),
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
         if "patch" in payload:
-            raise ValueError("candidate patch is derived from applications[]; do not emit a candidate-level patch")
+            raise ValueError("candidate must emit a typed transform program, not a legacy patch")
         if payload.get("transform_parameters"):
             raise ValueError("candidate transform_parameters are derived; put candidate-specific data in applications[]")
         if payload.get("transform_family") or payload.get("mechanism_class") or payload.get("affordance_ids"):
             raise ValueError("candidate must cite applications[]; family, mechanism, and affordance_ids are derived")
+        raw_program = payload.get("program") or payload.get("transform_program")
+        if not isinstance(raw_program, dict):
+            raw_patches = payload.get("patches")
+            if isinstance(raw_patches, list):
+                raw_program = {
+                    "id": str(payload.get("candidate_id") or payload.get("experiment_id") or ""),
+                    "hypothesis_id": str(payload.get("hypothesis_id") or ""),
+                    "patches": raw_patches,
+                    "metadata": dict(payload.get("metadata") or {}),
+                }
+        if not isinstance(raw_program, dict):
+            raise ValueError("candidate requires program or patches[]")
+        program_payload = dict(raw_program)
+        if not program_payload.get("id") and not program_payload.get("candidate_id"):
+            program_payload["id"] = str(payload.get("experiment_id") or payload.get("candidate_id") or "")
+        metadata = {
+            **dict(program_payload.get("metadata") or {}),
+            "hypothesis": str(payload.get("hypothesis", "")),
+            "expected_effects": dict(payload.get("expected_effects", {})),
+        }
+        program_payload["metadata"] = metadata
+        program = TransformProgram.from_dict(program_payload)
         raw_applications = payload.get("applications")
         if not isinstance(raw_applications, list) or not raw_applications:
             raise ValueError("candidate requires non-empty applications[]")
@@ -493,14 +491,8 @@ class CandidateProposal:
         ]
         if len(applications) != len(raw_applications):
             raise ValueError("candidate applications must be objects")
-        operations = [application.operation for application in applications if application.operation is not None]
-        patch_payload = {
-            "operations": [operation.to_dict() for operation in operations],
-            "rationale": str(payload.get("hypothesis") or "Apply selected optimization affordances."),
-            "expected_effect": str((payload.get("expected_effects") or {}).get("summary") or payload.get("hypothesis") or ""),
-        }
         return cls(
-            patch=AgentPatch.from_dict(dict(patch_payload)),
+            program=program,
             applications=applications,
             experiment_id=str(payload.get("experiment_id", "")),
             candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
@@ -533,9 +525,9 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
     "prompt_rewrite": TransformFamily(
         name="prompt_rewrite",
         category="instructions",
-        purpose="Revise or add instruction text to change agent behavior.",
-        supported_edit_kinds=["instruction"],
-        supported_ops=["add_instruction", "revise_instruction"],
+        purpose="Patch the context graph to change model-visible behavior.",
+        supported_edit_kinds=["context"],
+        supported_ops=["add_context_section", "replace_context_section", "remove_context_section", "move_context_section", "reorder_context_sections"],
         activation_signals=["semantic_failures", "invalid_output", "general_correctness_gap"],
         expected_effects={"correctness": "possible_increase", "cost": "neutral", "latency": "neutral"},
         risks=["overconstrains behavior", "moves failures between slices"],
@@ -552,9 +544,9 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
     "output_contract_tightening": TransformFamily(
         name="output_contract_tightening",
         category="output",
-        purpose="Tighten externally visible output format or schema instructions.",
-        supported_edit_kinds=["output", "instruction"],
-        supported_ops=["add_output_constraint", "add_instruction", "revise_instruction"],
+        purpose="Tighten externally visible output format or response validation.",
+        supported_edit_kinds=["context", "response"],
+        supported_ops=["add_context_section", "replace_context_section", "validate", "validate_claims", "rewrite_response", "block_response"],
         activation_signals=["invalid_output", "output_contract_failure"],
         expected_effects={"invalid_output_rate": "decrease", "correctness": "possible_increase"},
         risks=["may reduce semantic quality while fixing format"],
@@ -570,9 +562,9 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
     "targeted_few_shot": TransformFamily(
         name="targeted_few_shot",
         category="examples",
-        purpose="Add representative examples for weak labels or slices.",
-        supported_edit_kinds=["few_shot"],
-        supported_ops=["add_few_shot"],
+        purpose="Add selected proposal-safe examples as a generated context section.",
+        supported_edit_kinds=["context"],
+        supported_ops=["add_context_section"],
         activation_signals=["weak_slice", "label_confusion", "invalid_output"],
         expected_effects={"target_slice_score": "possible_increase", "cost": "increase"},
         risks=["overfits examples", "increases prompt length"],
@@ -592,9 +584,9 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
     "model_substitution": TransformFamily(
         name="model_substitution",
         category="model",
-        purpose="Change to another allowed model.",
+        purpose="Change model invocation configuration.",
         supported_edit_kinds=["model"],
-        supported_ops=["change_model"],
+        supported_ops=["set_model_config"],
         activation_signals=["capability_gap", "cost_objective", "latency_objective"],
         expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
         risks=["changes behavior globally", "cost or latency regression"],
@@ -612,8 +604,8 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
         name="runtime_tuning",
         category="runtime",
         purpose="Tune runtime controls such as caps, reasoning settings, or validator flags.",
-        supported_edit_kinds=["runtime"],
-        supported_ops=["set_runtime_param"],
+        supported_edit_kinds=["model", "runtime"],
+        supported_ops=["set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"],
         activation_signals=["cost_objective", "latency_objective", "invalid_output"],
         expected_effects={"cost": "variable", "latency": "variable", "correctness": "variable"},
         risks=["hidden correctness tradeoff"],
@@ -631,7 +623,7 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
         category="tools",
         purpose="Revise tool descriptions, enablement, or tool-use policy exposed by the agent surface.",
         supported_edit_kinds=["tool"],
-        supported_ops=["revise_tool_description", "revise_tool_policy", "set_runtime_param"],
+        supported_ops=["annotate_tool", "rewrite_tool_description", "normalize_tool_args", "repair_tool_args", "validate", "replan"],
         activation_signals=["tool_dependent_slice", "tool_trajectory_defect", "cost_objective", "latency_objective"],
         expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
         risks=["tool overuse", "tool underuse", "tool-call regression"],
@@ -648,8 +640,8 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
         name="verifier_retry",
         category="runtime",
         purpose="Add or tune verifier/retry behavior for high-risk output failures.",
-        supported_edit_kinds=["verifier"],
-        supported_ops=["add_verifier_retry"],
+        supported_edit_kinds=["response", "state"],
+        supported_ops=["define_state", "validate", "validate_claims", "rewrite_response", "block_response", "replan"],
         activation_signals=["invalid_output", "runtime_errors", "high_risk_slice"],
         expected_effects={"correctness": "possible_increase", "cost": "increase", "latency": "increase"},
         risks=["extra model calls", "latency increase", "retry overfitting"],
@@ -813,16 +805,19 @@ def build_behavior_profile(summary: PatchSummary) -> BehaviorProfile:
 def build_search_hypothesis(
     *,
     summary: PatchSummary,
-    surface: list[EditableTarget],
+    surface: SurfaceSpec,
     objective: OptimizationObjective,
     history: list[dict[str, Any]],
     parent_patch_hash: str | None = None,
     diagnoses: list[FailureDiagnosis] | None = None,
     proposal_example_count: int = 0,
 ) -> SearchHypothesis:
+    if not isinstance(surface, SurfaceSpec):
+        raise TypeError(f"build_search_hypothesis requires SurfaceSpec, got {type(surface).__name__}.")
     profile = build_behavior_profile(summary)
-    surface_kinds = {target.kind for target in surface}
-    surface_ops = {op for target in surface for op in target.allowed_ops}
+    surface_targets = _surface_targets_for_search(surface)
+    surface_kinds = {target.kind for target in surface_targets}
+    surface_ops = {op for target in surface_targets for op in target.allowed_ops}
     branch_history = select_branch_history(history, parent_patch_hash or summary.patch_hash)
     diagnosis_signals = _diagnosis_signals(diagnoses or [])
     context_states: dict[str, TransformContextState] = {}
@@ -850,7 +845,7 @@ def build_search_hypothesis(
         base_suitability, base_evidence = _suitability(family, profile, objective)
         for context_key in _candidate_context_keys(
             family=family,
-            surface=surface,
+            surface=surface_targets,
             profile=profile,
             diagnosis_signals=diagnosis_signals,
         ):
@@ -915,7 +910,7 @@ def build_search_hypothesis(
 def validate_candidate_transform(
     candidate: CandidateProposal,
     *,
-    surface: list[EditableTarget],
+    surface: SurfaceSpec,
     search_hypothesis: SearchHypothesis | None = None,
 ) -> str | None:
     registry = TRANSFORM_FAMILIES
@@ -925,8 +920,6 @@ def validate_candidate_transform(
         return f"unknown candidate role {candidate.candidate_role!r}"
     if not candidate.applications:
         return "candidate must include at least one affordance application"
-    target_by_name = {target.name: target for target in surface}
-    target_by_path = {target.path: target for target in surface}
     for application in candidate.applications:
         family = registry.get(application.family)
         if family is None:
@@ -942,19 +935,7 @@ def validate_candidate_transform(
                 return "targeted_few_shot requires selection.source_case_ids"
             continue
         if application.family == "targeted_few_shot":
-            if application.operation is None:
-                return "targeted_few_shot requires selection.source_case_ids"
-            return "targeted_few_shot affordance applications must use selection, not inline add_few_shot values"
-        if application.operation is None:
-            return "affordance application must include operation or selection"
-        operation = application.operation
-        target = target_by_name.get(operation.target) or target_by_path.get(operation.target)
-        if target is None:
-            return f"unknown target {operation.target!r}"
-        if target.kind not in family.supported_edit_kinds or operation.op not in family.supported_ops:
-            if target.kind not in family.supported_edit_kinds:
-                return f"target kind {target.kind!r} is incompatible with transform family {family.name!r}"
-            return f"operation {operation.op!r} is incompatible with transform family {family.name!r}"
+            return "targeted_few_shot requires selection.source_case_ids"
     if search_hypothesis is not None:
         eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
         if eligibility_error is not None:
@@ -966,7 +947,7 @@ def validate_candidate_context(
     candidate: CandidateProposal,
     *,
     search_hypothesis: SearchHypothesis,
-    surface: list[EditableTarget] | None = None,
+    surface: SurfaceSpec | None = None,
 ) -> str | None:
     for family_name in sorted({application.family for application in candidate.applications}):
         family_state = search_hypothesis.family_states.get(family_name)
@@ -978,14 +959,12 @@ def validate_candidate_context(
         return f"inactive transform context {combined_key.id!r}"
     if exact_state is not None and exact_state.state == "constrained":
         return f"constrained transform context {combined_key.id!r} requires a materially distinct mechanism"
-    target_by_name = {target.name: target for target in surface or []}
-    target_by_path = {target.path: target for target in surface or []}
     for application in candidate.applications:
         if application.selection:
             operation_key = TransformContextKey(
                 family=application.family,
-                target_names=("few_shot",),
-                ops=("add_few_shot",),
+                target_names=("proposal_selected_examples",),
+                ops=("add_context_section",),
                 target_slice=candidate.target_slice,
                 mechanism=(application.mechanism,),
                 transform_instance=application.rationale or candidate.hypothesis or "candidate",
@@ -994,41 +973,7 @@ def validate_candidate_context(
             if operation_error is not None:
                 return operation_error
             continue
-        if application.operation is None:
-            continue
-        operation = application.operation
-        operation_family = application.family
-        operation_key = TransformContextKey.from_operation(
-            family=operation_family,
-            operation=operation,
-            target_slice=candidate.target_slice,
-            transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
-        )
-        operation_error = _operation_context_error(operation_key, search_hypothesis)
-        if operation_error is not None:
-            return operation_error
     return None
-
-
-def _compatible_operation_families(
-    *,
-    operation: PatchOperation,
-    target: EditableTarget,
-    mechanism_class: str,
-    search_hypothesis: SearchHypothesis | None,
-) -> list[str]:
-    families: list[str] = []
-    for name, family in TRANSFORM_FAMILIES.items():
-        if target.kind not in family.supported_edit_kinds:
-            continue
-        if operation.op not in family.supported_ops:
-            continue
-        if mechanism_error_for_family(name, mechanism_class) is not None:
-            continue
-        if search_hypothesis is not None and name not in search_hypothesis.active_families:
-            continue
-        families.append(name)
-    return families
 
 
 def select_branch_history(history: list[dict[str, Any]], parent_patch_hash: str | None) -> list[dict[str, Any]]:
@@ -1341,6 +1286,102 @@ def _candidate_context_keys(
     return keys or [TransformContextKey(family=family.name)]
 
 
+def _surface_targets_for_search(surface: SurfaceSpec) -> list[EditableTarget]:
+    targets: list[EditableTarget] = []
+    context_ops = ["add_context_section", "replace_context_section"]
+    if surface.context.removable_sections_allowed:
+        context_ops.append("remove_context_section")
+    if surface.context.reorderable_sections_allowed:
+        context_ops.extend(["move_context_section", "reorder_context_sections"])
+    for section in surface.context.graph.sections:
+        if section.name in surface.context.editable_sections:
+            targets.append(
+                EditableTarget(
+                    name=section.name,
+                    kind="context",
+                    path=f"context.{section.name}",
+                    current_value=section.content,
+                    allowed_ops=tuple(context_ops),
+                    description=f"Context section {section.name}.",
+                )
+            )
+    if surface.context.generated_sections_allowed:
+        targets.append(
+            EditableTarget(
+                name="generated_context",
+                kind="context",
+                path="context.generated",
+                current_value=None,
+                allowed_ops=("add_context_section", "render_state_section"),
+                description="Generated transform context sections.",
+            )
+        )
+    if surface.response.draft_response_interception_allowed:
+        response_ops = ["validate", "validate_claims"]
+        if surface.response.response_rewrite_allowed:
+            response_ops.append("rewrite_response")
+        if surface.response.response_blocking_allowed:
+            response_ops.append("block_response")
+        targets.append(
+            EditableTarget(
+                name="draft_response",
+                kind="response",
+                path="response.draft",
+                current_value=None,
+                allowed_ops=tuple(response_ops),
+                description="Intercepted draft response.",
+            )
+        )
+    if surface.state.supports_persistent_state:
+        targets.append(
+            EditableTarget(
+                name="state",
+                kind="state",
+                path="state",
+                current_value={"existing_fields": list(surface.state.existing_fields)},
+                allowed_ops=("define_state", "set_state", "append_state", "merge_state", "clear_state"),
+                description="Typed transform state.",
+            )
+        )
+    if (
+        surface.model.model_name_configurable
+        or surface.model.temperature_configurable
+        or surface.model.max_tokens_configurable
+        or surface.model.reasoning_effort_configurable
+        or surface.model.tool_choice_mode_configurable
+    ):
+        targets.append(
+            EditableTarget(
+                name="model_config",
+                kind="model",
+                path="model",
+                current_value=surface.model.to_dict(),
+                allowed_ops=("set_model_config",),
+                description="Model invocation configuration.",
+            )
+        )
+    tool_ops = []
+    if surface.tools.tool_metadata_allowed:
+        tool_ops.append("annotate_tool")
+    if surface.tools.tool_description_rewrite_allowed:
+        tool_ops.append("rewrite_tool_description")
+    if surface.tools.tool_call_interception_allowed:
+        tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
+    for tool in surface.tools.tools:
+        if tool_ops:
+            targets.append(
+                EditableTarget(
+                    name=tool.name,
+                    kind="tool",
+                    path=f"tools.{tool.name}",
+                    current_value=tool.to_dict(),
+                    allowed_ops=tuple(tool_ops),
+                    description=tool.description or f"Tool {tool.name}.",
+                )
+            )
+    return targets
+
+
 def _diagnosis_signals(diagnoses: list[FailureDiagnosis]) -> dict[str, set[str]]:
     target_names: set[str] = set()
     categories: set[str] = set()
@@ -1637,23 +1678,29 @@ def _high_metric_threshold(values: list[float]) -> float:
     return ordered[max(0, int(0.75 * (len(ordered) - 1)))]
 
 
-def _operation_mechanism_signature(operation: PatchOperation) -> str:
-    value = operation.value
-    if operation.op == "change_model":
-        return f"model:{_normalize_token(str(value), default='unknown')}"
-    if operation.op == "set_runtime_param":
-        return f"{operation.op}:{_value_class(value)}"
-    if operation.op == "add_few_shot":
-        return f"few_shot:{_few_shot_shape(value)}"
-    if operation.op in {
-        "add_instruction",
-        "revise_instruction",
-        "add_output_constraint",
-        "revise_tool_description",
-        "revise_tool_policy",
+def _transform_patch_target(patch: TransformPatch) -> str:
+    params = patch.op.params
+    for key in ("section", "field", "target", "tool"):
+        value = params.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return patch.hook or "global"
+
+
+def _transform_patch_mechanism_signature(patch: TransformPatch) -> str:
+    op = patch.op.op
+    params = patch.op.params
+    if op == "set_model_config":
+        return f"{str(params.get('field', 'model_config'))}:{_value_class(params.get('value'))}"
+    if op in {
+        "add_context_section",
+        "replace_context_section",
+        "render_state_section",
+        "rewrite_tool_description",
+        "rewrite_response",
     }:
-        return f"text:{_text_mechanism_class(str(value))}"
-    return f"{operation.op}:{_value_class(value)}"
+        return f"{op}:text:{_text_mechanism_class(str(params.get('content') or params.get('message') or params.get('append') or ''))}"
+    return f"{op}:{_mapping_shape(params)}"
 
 
 def _parameter_mechanism_signature(parameters: dict[str, Any]) -> tuple[str, ...]:

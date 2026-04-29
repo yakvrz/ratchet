@@ -19,15 +19,17 @@ from ratchet.experiments import (
     build_evidence_packet,
     build_task_theory,
 )
-from ratchet.io import extract_json_object, patch_hash
+from ratchet.io import extract_json_object, transform_program_hash
 from ratchet.model_client import (
     ResponsesModelClient,
     combine_response_diagnostics,
     error_response_diagnostics,
     response_diagnostics,
 )
-from ratchet.patches import compose_patches
 from ratchet.results import PatchSummary
+from ratchet.surfaces import SurfaceSpec
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import TransformPatch, TransformProgram
 from ratchet.transforms import (
     CandidateProposal,
     Intervention,
@@ -36,9 +38,8 @@ from ratchet.transforms import (
     transform_registry,
     validate_candidate_transform,
 )
-from ratchet.types import AgentPatch, AgentSpec, EditableTarget, FailureDiagnosis, OptimizationObjective, PatchOperation
+from ratchet.types import AgentSpec, FailureDiagnosis, OptimizationObjective
 from ratchet.types import EvalCase
-from ratchet.validation import PatchValidator
 
 
 MAX_PROPOSALS_PER_ITERATION = 8
@@ -47,13 +48,13 @@ PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
     "affordance_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
     "research questions, mechanisms, target slices, controls, and measurements. Treat research_theory "
-    "as the causal context for implementation; opportunities are not patch recipes. Each candidate must include applications[]. "
-    "Each application cites one optimization_affordance by affordance_id and supplies either operation or "
-    "selection. Use operation for patch edits and selection.source_case_ids for few-shot examples from "
-    "proposal_example_bank. Do not inline few-shot examples. Family, mechanism, measurements, and risks are "
-    "derived from cited affordances; do not emit candidate-level transform_family, mechanism_class, "
-    "affordance_ids, patch, or intervention fields. Patch operations must use editable target names, "
-    "allowed ops, and value schemas from the cited affordances. "
+    "as the causal context for implementation; opportunities are not patch recipes. Each candidate must include "
+    "a typed transform program under candidate.program and applications[] citing relevant optimization_affordances. "
+    "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy patch operations. "
+    "Every add_context_section patch needs section and content; every set_model_config patch needs field and value; every define_state patch needs field, type, and initial. Use selection.source_case_ids "
+    "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family, mechanism, "
+    "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
+    "mechanism_class, affordance_ids, patch, or intervention fields. "
     "Do not copy diagnostic_only_examples into patch values; only proposal-safe train examples may be copied, "
     "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
     "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
@@ -115,7 +116,7 @@ class CandidateImplementer:
     def propose(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget],
+        surface: SurfaceSpec,
         *,
         objective: OptimizationObjective,
         seen_hashes: set[str],
@@ -185,7 +186,6 @@ class CandidateImplementer:
         proposals.extend(llm_proposals)
         analysis_parts.append("Candidate implementer returned transform candidate proposals.")
         invalid_reasons.update(self._last_parse_invalid_reasons)
-        validator = PatchValidator()
         valid: list[CandidateProposal] = []
         budget_valid: list[CandidateProposal] = []
         local_seen: set[str] = set()
@@ -228,24 +228,21 @@ class CandidateImplementer:
                 invalid_reasons[affordance_error] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, affordance_error, materialization=materialization))
                 continue
-            is_valid, invalid_reason = validator.validate_with_reason(
-                candidate.patch,
-                current_spec=current_spec,
-                surface=surface,
-                objective=objective,
-                evidence_cases=[evaluation.case for evaluation in summary.evaluations],
-                proposal_example_case_ids=proposal_example_bank.case_ids if proposal_example_bank is not None else None,
-                proposal_example_cases=list(proposal_example_cases),
-            )
-            if not is_valid:
-                reason = invalid_reason or "invalid patch"
+            compile_report = TransformCompiler().compile(candidate.program, surface).report
+            if compile_report.status != "compiled":
+                issue = compile_report.rejection
+                reason = (
+                    f"transform compile rejected candidate: {issue.code}: {issue.message}"
+                    if issue is not None
+                    else "transform compile rejected candidate"
+                )
                 invalid_reasons[reason] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, reason, materialization=materialization))
                 continue
-            digest = patch_hash(compose_patches(summary.patch, candidate.patch))
+            digest = transform_program_hash(candidate.program)
             if digest in seen_hashes or digest in local_seen:
-                invalid_reasons["duplicate patch"] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, "duplicate patch", materialization=materialization))
+                invalid_reasons["duplicate transform program"] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(candidate, "duplicate transform program", materialization=materialization))
                 continue
             local_seen.add(digest)
             group_valid.append((candidate, materialization, digest))
@@ -264,9 +261,9 @@ class CandidateImplementer:
                         "rank": len(candidate_rows) + 1,
                         "proposal_group": proposal_group,
                         "variant_rank": variant_rank,
-                        "proposal_patch_hash": patch_hash(candidate.patch),
+                        "proposal_program_hash": transform_program_hash(candidate.program),
                         "patch_hash": digest,
-                        "proposal": candidate.patch.to_dict(),
+                        "proposal": candidate.program.to_dict(),
                         "candidate": candidate.to_dict(),
                         "applications": [application.to_dict() for application in candidate.applications],
                         "transform_family": candidate.transform_family,
@@ -312,7 +309,7 @@ class CandidateImplementer:
     def _llm_proposals(
         self,
         summary: PatchSummary,
-        surface: list[EditableTarget],
+        surface: SurfaceSpec,
         *,
         objective: OptimizationObjective,
         diagnoses: list[FailureDiagnosis],
@@ -340,6 +337,7 @@ class CandidateImplementer:
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
             "transform_library": active_family_rows,
+            "surface_spec": _compact_surface_spec(surface),
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "research_theory": _research_theory_prompt_view(research_theory),
             "task_theory": _research_theory_prompt_view(research_theory),
@@ -364,7 +362,7 @@ class CandidateImplementer:
                     "and constraint risk."
                 ),
             },
-            "current_patch": _compact_patch(summary.patch.to_dict()),
+            "current_candidate": summary.patch.to_dict() if summary.patch is not None else None,
             "behavior": {
                 "mean_score": summary.mean_score,
                 "pass_count": summary.pass_count,
@@ -461,6 +459,13 @@ class CandidateImplementer:
                                                         "hypothesis": {"type": "string", "maxLength": 360},
                                                         "expected_effects": {"type": "object"},
                                                         "evaluation_plan": {"type": "string", "maxLength": 240},
+                                                        "program": _program_schema(),
+                                                        "patches": {
+                                                            "type": "array",
+                                                            "items": _transform_patch_schema(),
+                                                            "minItems": 1,
+                                                            "maxItems": 12,
+                                                        },
                                                         "applications": {
                                                             "type": "array",
                                                             "minItems": 1,
@@ -468,7 +473,7 @@ class CandidateImplementer:
                                                             "items": _application_schema(),
                                                         },
                                                     },
-                                                    "required": ["candidate_role", "hypothesis", "applications"],
+                                                    "required": ["candidate_role", "hypothesis", "applications", "program"],
                                                 },
                                             },
                                         },
@@ -669,26 +674,6 @@ def _application_schema() -> dict[str, Any]:
         "type": "object",
         "properties": {
             "affordance_id": {"type": "string", "maxLength": 180},
-            "operation": {
-                "type": "object",
-                "properties": {
-                    "op": {"type": "string", "maxLength": 80},
-                    "target": {"type": "string", "maxLength": 180},
-                    "value": {
-                        "anyOf": [
-                            {"type": "string", "maxLength": 1600},
-                            {"type": "number"},
-                            {"type": "integer"},
-                            {"type": "boolean"},
-                            {"type": "object", "additionalProperties": True, "maxProperties": 12},
-                            {"type": "array", "items": {}, "maxItems": 8},
-                            {"type": "null"},
-                        ]
-                    },
-                    "rationale": {"type": "string", "maxLength": 240},
-                },
-                "required": ["op", "target", "value"],
-            },
             "selection": {
                 "type": "object",
                 "properties": {
@@ -708,6 +693,62 @@ def _application_schema() -> dict[str, Any]:
             "rationale": {"type": "string", "maxLength": 240},
         },
         "required": ["affordance_id"],
+    }
+
+
+def _program_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "candidate_id": {"type": "string", "maxLength": 120},
+            "hypothesis_id": {"type": "string", "maxLength": 120},
+            "metadata": {"type": "object", "additionalProperties": True, "maxProperties": 12},
+            "patches": {
+                "type": "array",
+                "items": _transform_patch_schema(),
+                "minItems": 1,
+                "maxItems": 12,
+            },
+        },
+        "required": ["patches"],
+    }
+
+
+def _transform_patch_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "hook": {
+                "type": "string",
+                "enum": [
+                    "on_task_start",
+                    "after_user_message",
+                    "before_model_call",
+                    "after_model_call",
+                    "before_tool_call",
+                    "after_tool_result",
+                    "on_tool_error",
+                    "before_user_response",
+                    "on_task_end",
+                ],
+            },
+            "op": {"type": "string", "maxLength": 80},
+            "section": {"type": "string", "maxLength": 160},
+            "field": {"type": "string", "maxLength": 160},
+            "target": {"type": "string", "maxLength": 160},
+            "tool": {"type": "string", "maxLength": 160},
+            "position": {"type": "string", "maxLength": 160},
+            "content": {},
+            "value": {},
+            "initial": {},
+            "type": {"type": "string", "maxLength": 160},
+            "checks": {"type": "array", "items": {}, "maxItems": 12},
+            "on_fail": {"type": "object", "additionalProperties": True},
+            "when": {"type": "object", "additionalProperties": True},
+            "unless": {"type": "object", "additionalProperties": True},
+        },
+        "required": ["op"],
+        "additionalProperties": True,
     }
 
 
@@ -1174,27 +1215,56 @@ def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
     }
 
 
-def _compact_editable_target(target: EditableTarget) -> dict[str, Any]:
-    current_value = target.current_value
-    if isinstance(current_value, str):
-        compact_value: Any = current_value[:160]
-    elif isinstance(current_value, list):
-        compact_value = {"type": "list", "count": len(current_value), "sample": current_value[:2]}
-    elif isinstance(current_value, dict):
-        compact_value = {"type": "object", "keys": sorted(str(key) for key in current_value.keys())[:16]}
-    else:
-        compact_value = current_value
+def _compact_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
     return {
-        "name": target.name,
-        "kind": target.kind,
-        "path": target.path,
-        "current_value": compact_value,
-        "allowed_ops": list(target.allowed_ops),
-        "description": target.description[:90],
-        "choices": list(target.choices)[:8],
-        "max_chars": target.max_chars,
-        "value_schema": dict(target.value_schema),
+        "agent_id": surface.agent_id,
+        "context": {
+            "sections": [
+                {
+                    "name": section.name,
+                    "role": section.role,
+                    "required": section.required,
+                    "editable": section.name in surface.context.editable_sections,
+                    "content_shape": _value_shape(section.content),
+                }
+                for section in surface.context.graph.sections
+            ],
+            "generated_sections_allowed": surface.context.generated_sections_allowed,
+            "removable_sections_allowed": surface.context.removable_sections_allowed,
+            "reorderable_sections_allowed": surface.context.reorderable_sections_allowed,
+        },
+        "hooks": {
+            name: {
+                "supported": hook.supported,
+                "method": hook.method,
+                "available_inputs": list(hook.available_inputs),
+                "allowed_ops": list(hook.allowed_ops),
+            }
+            for name, hook in sorted(surface.hooks.items())
+            if hook.supported
+        },
+        "state": surface.state.to_dict(),
+        "tools": {
+            "tools": [tool.to_dict() for tool in surface.tools.tools],
+            "tool_description_rewrite_allowed": surface.tools.tool_description_rewrite_allowed,
+            "tool_call_interception_allowed": surface.tools.tool_call_interception_allowed,
+            "tool_metadata_allowed": surface.tools.tool_metadata_allowed,
+        },
+        "model": surface.model.to_dict(),
+        "response": surface.response.to_dict(),
+        "immutable_boundaries": list(surface.immutable_boundaries),
+        "safety_constraints": list(surface.safety_constraints),
     }
+
+
+def _value_shape(value: Any) -> Any:
+    if isinstance(value, str):
+        return {"type": "string", "chars": len(value), "prefix": value[:180]}
+    if isinstance(value, list):
+        return {"type": "list", "count": len(value), "sample": value[:2]}
+    if isinstance(value, dict):
+        return {"type": "object", "keys": sorted(str(key) for key in value.keys())[:16]}
+    return {"type": type(value).__name__, "value": value}
 
 
 def _compact_proposal_example_bank(
@@ -1363,9 +1433,10 @@ def _invalid_candidate_row(
     *,
     materialization: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    digest = transform_program_hash(candidate.program)
     return {
-        "proposal_patch_hash": patch_hash(candidate.patch),
-        "proposal": candidate.patch.to_dict(),
+        "proposal_program_hash": digest,
+        "proposal": candidate.program.to_dict(),
         "candidate": candidate.to_dict(),
         "applications": [application.to_dict() for application in candidate.applications],
         "transform_family": candidate.transform_family,
@@ -1384,7 +1455,7 @@ def _invalid_candidate_row(
 
 def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any]:
     return {
-        "proposal_patch_hash": None,
+        "proposal_program_hash": None,
         "proposal": {},
         "candidate": {},
         "raw_candidate": _value_summary(raw_candidate),
@@ -1418,8 +1489,6 @@ def _targeted_few_shot_reference_error(candidate: CandidateProposal) -> str | No
             continue
         if not application.selection:
             return "targeted_few_shot affordance applications must use selection, not inline add_few_shot values"
-    if any(operation.op == "add_few_shot" for operation in candidate.patch.operations):
-        return "few-shot examples must be selected by source_case_ids, not inlined as add_few_shot operations"
     return None
 
 
@@ -1439,10 +1508,7 @@ def _materialize_candidate_references(
             )
         return candidate, {}
     example_by_id = {example.case_id: example for example in proposal_example_bank.examples}
-    operations: list[PatchOperation] = []
-    changed = False
     materialized_rows: list[dict[str, Any]] = []
-    transform_parameters = dict(candidate.transform_parameters)
     raw_parameter_source_ids = _example_selection_source_ids(candidate)
     parameter_source_ids = (
         [str(item) for item in raw_parameter_source_ids if isinstance(item, str) and item]
@@ -1462,68 +1528,45 @@ def _materialize_candidate_references(
                     "error": "unknown few-shot source_case_ids: " + ", ".join(unknown_source_ids[:6]),
                 },
             )
-    candidate_operations = list(candidate.patch.operations)
-    if parameter_source_ids and not any(operation.op == "add_few_shot" for operation in candidate_operations):
-        candidate_operations = [
-            *candidate_operations,
-            PatchOperation(
-                op="add_few_shot",
-                target="few_shot",
-                value=[{"source_case_id": source_id} for source_id in parameter_source_ids],
-                rationale="Materialize implementer-selected train examples.",
-            ),
-        ]
-    for operation in candidate_operations:
-        if operation.op != "add_few_shot":
-            operations.append(operation)
-            continue
-        raw_items = operation.value if isinstance(operation.value, list) else [operation.value]
-        source_ids = _few_shot_source_ids(raw_items) or parameter_source_ids
-        if not source_ids:
-            operations.append(operation)
-            continue
-        materialized_items: list[dict[str, Any]] = []
-        for index, source_id in enumerate(source_ids):
-            raw_item = raw_items[index] if index < len(raw_items) and isinstance(raw_items[index], dict) else {}
-            example = example_by_id.get(source_id)
-            if example is None:
-                materialized_items.append(dict(raw_item, source_case_id=source_id))
-                continue
-            item = {
+    if not parameter_source_ids:
+        return candidate, {}
+    examples = []
+    for source_id in parameter_source_ids:
+        example = example_by_id[source_id]
+        examples.append(
+            {
                 "source_case_id": source_id,
                 "input": example.input,
                 "output": example.expected,
-                "purpose": str(raw_item.get("purpose") or candidate.hypothesis or "proposal-selected train example")[:240],
+                "purpose": candidate.hypothesis or "proposal-selected train example",
             }
-            materialized_items.append(item)
-            materialized_rows.append({"source_case_id": source_id, "label": example.label})
-        operations.append(
-            PatchOperation(
-                op=operation.op,
-                target=operation.target,
-                value=materialized_items,
-                rationale=operation.rationale,
-            )
         )
-        changed = True
-        transform_parameters["source_case_ids"] = source_ids
-    if not changed:
-        return candidate, {}
-    patch = AgentPatch(
-        operations=operations,
-        rationale=candidate.patch.rationale,
-        expected_effect=candidate.patch.expected_effect,
+        materialized_rows.append({"source_case_id": source_id, "label": example.label})
+    materialized_program = TransformProgram(
+        candidate_id=candidate.program.candidate_id,
+        hypothesis_id=candidate.program.hypothesis_id,
+        patches=(
+            *candidate.program.patches,
+            TransformPatch.from_dict(
+                {
+                    "hook": "before_model_call",
+                    "op": "add_context_section",
+                    "section": "proposal_selected_examples",
+                    "position": "end",
+                    "content": examples,
+                }
+            ),
+        ),
         metadata={
-            **candidate.patch.metadata,
+            **candidate.program.metadata,
             "materialized_few_shot": True,
             "few_shot_source_case_ids": [row["source_case_id"] for row in materialized_rows],
             "few_shot_example_count": len(materialized_rows),
         },
     )
-    transform_parameters["few_shot_example_count"] = len(materialized_rows)
     return (
         CandidateProposal(
-            patch=patch,
+            program=materialized_program,
             applications=list(candidate.applications),
             experiment_id=candidate.experiment_id,
             candidate_role=candidate.candidate_role,
@@ -1538,7 +1581,7 @@ def _materialize_candidate_references(
             "materialized": True,
             "source_case_ids": [row["source_case_id"] for row in materialized_rows],
             "source_labels": [row["label"] for row in materialized_rows],
-            "raw_patch": candidate.patch.to_dict(),
+            "raw_program": candidate.program.to_dict(),
         },
     )
 

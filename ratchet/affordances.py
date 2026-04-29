@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
 from ratchet.experiments import MECHANISMS_BY_FAMILY, mechanism_error_for_family
+from ratchet.surfaces import SurfaceSpec
 from ratchet.transforms import TransformFamily, transform_registry
 from ratchet.types import EditableTarget, OptimizationObjective
 
@@ -105,36 +106,211 @@ class AffordanceProvider(Protocol):
 
 
 def generate_optimization_affordances(
-    surface: list[EditableTarget],
+    surface: SurfaceSpec,
     *,
     objective: OptimizationObjective | None = None,
     active_families: list[str] | None = None,
     evidence: dict[str, Any] | None = None,
 ) -> list[OptimizationAffordance]:
     objective = objective or OptimizationObjective()
+    if not isinstance(surface, SurfaceSpec):
+        raise TypeError(f"generate_optimization_affordances requires SurfaceSpec, got {type(surface).__name__}.")
+    return _generate_surface_affordances(
+        surface,
+        objective=objective,
+        active_families=active_families,
+        evidence=evidence or {},
+    )
+
+
+def _generate_surface_affordances(
+    surface: SurfaceSpec,
+    *,
+    objective: OptimizationObjective,
+    active_families: list[str] | None,
+    evidence: dict[str, Any],
+) -> list[OptimizationAffordance]:
     registry = transform_registry()
     active = set(active_families or registry)
-    providers = _providers()
     affordances: list[OptimizationAffordance] = []
-    for target in surface:
+    for target in _surface_targets(surface):
         for family_name in sorted(active):
             family = registry.get(family_name)
             if family is None or target.kind not in family.supported_edit_kinds:
                 continue
-            for provider in providers:
-                affordances.extend(
-                    provider.generate(
-                        target,
-                        family=family,
+            ops = sorted(set(target.allowed_ops) & set(family.supported_ops))
+            if not ops:
+                continue
+            mechanism = _surface_mechanism(family_name, target.kind, evidence=evidence, objective=objective)
+            affordances.append(
+                OptimizationAffordance(
+                    affordance_id=_affordance_id(family_name, mechanism, target),
+                    label=f"{family.purpose} ({target.name})",
+                    family=family_name,
+                    mechanism=mechanism,
+                    target_name=target.name,
+                    target_kind=target.kind,
+                    target_path=target.path,
+                    ops=ops,
+                    value_schema=target.value_schema,
+                    semantic_role=target.semantics.role,
+                    behavioral_axes=_axes_for_target(mechanism, target),
+                    expected_scope=target.semantics.scope,
+                    risk=_risk_for_target(target, "medium"),
+                    measurements=list(family.required_measurements),
+                    suitability=_suitability(
+                        mechanism=mechanism,
+                        target=target,
                         objective=objective,
-                        active_families=active,
-                        evidence=evidence or {},
-                    )
+                        evidence=evidence,
+                    ),
+                    evidence=_evidence_for(mechanism, target, evidence),
+                    budget_hint=family.complexity_cost,
+                    expected_cost_impact=str(family.expected_effects.get("cost", "unknown")),
+                    expected_latency_impact=str(family.expected_effects.get("latency", "unknown")),
+                    description=target.description,
                 )
+            )
     return sorted(
         _dedupe_affordances(affordances),
         key=lambda item: (-item.suitability, item.affordance_id),
     )
+
+
+def _surface_targets(surface: SurfaceSpec) -> list[EditableTarget]:
+    targets: list[EditableTarget] = []
+    for section in surface.context.graph.sections:
+        if section.name not in surface.context.editable_sections:
+            continue
+        targets.append(
+            EditableTarget(
+                name=section.name,
+                kind="context",
+                path=f"context.{section.name}",
+                current_value=section.content,
+                allowed_ops=tuple(_context_allowed_ops(surface)),
+                description=f"Context section {section.name}.",
+                max_chars=8000,
+            )
+        )
+    if surface.context.generated_sections_allowed:
+        targets.append(
+            EditableTarget(
+                name="generated_context",
+                kind="context",
+                path="context.generated",
+                current_value=None,
+                allowed_ops=("add_context_section", "render_state_section"),
+                description="Generated context sections that candidates may add to the model context graph.",
+            )
+        )
+    if surface.response.draft_response_interception_allowed:
+        response_ops = ["validate", "validate_claims", "extract_claims"]
+        if surface.response.response_rewrite_allowed:
+            response_ops.append("rewrite_response")
+        if surface.response.response_blocking_allowed:
+            response_ops.append("block_response")
+        targets.append(
+            EditableTarget(
+                name="draft_response",
+                kind="response",
+                path="response.draft",
+                current_value=None,
+                allowed_ops=tuple(response_ops),
+                description="Draft response before it is returned to the user or evaluator.",
+            )
+        )
+    if surface.state.supports_persistent_state:
+        state_ops = ["define_state"]
+        if surface.state.add_fields_allowed:
+            state_ops.extend(["set_state", "append_state", "merge_state", "clear_state", "expose_state"])
+        targets.append(
+            EditableTarget(
+                name="state",
+                kind="state",
+                path="state",
+                current_value={"existing_fields": list(surface.state.existing_fields)},
+                allowed_ops=tuple(state_ops),
+                description="Typed per-task transform state.",
+            )
+        )
+    model_ops = []
+    if (
+        surface.model.model_name_configurable
+        or surface.model.temperature_configurable
+        or surface.model.max_tokens_configurable
+        or surface.model.reasoning_effort_configurable
+        or surface.model.tool_choice_mode_configurable
+    ):
+        model_ops.append("set_model_config")
+    if surface.model.auxiliary_model_calls_allowed:
+        model_ops.append("call_model")
+    if model_ops:
+        targets.append(
+            EditableTarget(
+                name="model_config",
+                kind="model",
+                path="model",
+                current_value=surface.model.to_dict(),
+                allowed_ops=tuple(model_ops),
+                description="Model invocation configuration exposed by the adapter.",
+            )
+        )
+    tool_ops = []
+    if surface.tools.tool_metadata_allowed:
+        tool_ops.append("annotate_tool")
+    if surface.tools.tool_description_rewrite_allowed:
+        tool_ops.append("rewrite_tool_description")
+    if surface.tools.tool_call_interception_allowed:
+        tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
+    if tool_ops:
+        for tool in surface.tools.tools or ():
+            targets.append(
+                EditableTarget(
+                    name=tool.name,
+                    kind="tool",
+                    path=f"tools.{tool.name}",
+                    current_value=tool.to_dict(),
+                    allowed_ops=tuple(tool_ops),
+                    description=tool.description or f"Tool {tool.name}.",
+                )
+            )
+    return targets
+
+
+def _context_allowed_ops(surface: SurfaceSpec) -> list[str]:
+    ops = ["add_context_section", "replace_context_section"]
+    if surface.context.removable_sections_allowed:
+        ops.append("remove_context_section")
+    if surface.context.reorderable_sections_allowed:
+        ops.extend(["move_context_section", "reorder_context_sections"])
+    if surface.state.expose_to_context:
+        ops.append("render_state_section")
+    return ops
+
+
+def _surface_mechanism(
+    family_name: str,
+    target_kind: str,
+    *,
+    evidence: dict[str, Any],
+    objective: OptimizationObjective,
+) -> str:
+    if family_name == "model_substitution":
+        return "efficiency_probe" if objective.mode in {"cost", "latency"} else "model_capability_probe"
+    if family_name == "runtime_tuning":
+        return "efficiency_probe" if objective.mode in {"cost", "latency"} else "runtime_defect_fix"
+    if family_name == "tool_policy_revision":
+        if evidence.get("tool_trajectory_defect"):
+            return "tool_selection_policy"
+        return "tool_precondition_policy"
+    if family_name == "output_contract_tightening":
+        return "output_contract_fix"
+    if family_name == "targeted_few_shot":
+        return "representative_examples"
+    if family_name == "verifier_retry":
+        return "output_contract_fix" if target_kind == "response" else "runtime_defect_fix"
+    return "semantic_boundary_rewrite"
 
 
 def validate_candidate_applications(
@@ -145,24 +321,14 @@ def validate_candidate_applications(
     if not applications:
         return "candidate must include at least one affordance application"
     by_id = {affordance.affordance_id: affordance for affordance in affordances}
-    operation_count = 0
-    operation_signatures: set[tuple[str, str]] = set()
     selection_count = 0
     for application in applications:
         affordance_id = str(getattr(application, "affordance_id", ""))
         affordance = by_id.get(affordance_id)
         if affordance is None:
             return f"unknown affordance_id {affordance_id!r}"
-        operation = getattr(application, "operation", None)
         selection = getattr(application, "selection", None)
-        if operation is not None:
-            operation_count += 1
-            operation_signatures.add((str(operation.op), str(operation.target)))
-            if operation.op not in affordance.ops:
-                return f"operation {operation.op!r} is not allowed by affordance {affordance_id!r}"
-            if operation.target not in {affordance.target_name, affordance.target_path}:
-                return f"operation target {operation.target!r} is not covered by affordance {affordance_id!r}"
-        elif selection:
+        if selection:
             selection_count += 1
             if affordance.family != "targeted_few_shot":
                 return f"affordance {affordance_id!r} does not support example selection"
@@ -170,9 +336,7 @@ def validate_candidate_applications(
             if not isinstance(source_ids, list) or not all(isinstance(item, str) and item for item in source_ids):
                 return f"affordance {affordance_id!r} example selection requires non-empty source_case_ids"
         else:
-            return f"affordance application {affordance_id!r} must include operation or selection"
-    if operation_count > 0 and len(operation_signatures) == 1 and selection_count == 0 and len(applications) != 1:
-        return "single-operation candidates must cite exactly one covering affordance"
+            continue
     return None
 
 

@@ -10,7 +10,8 @@ from ratchet.adapters import AdapterProtocol
 from ratchet.io import write_json, write_jsonl
 from ratchet.objectives import compare_summaries
 from ratchet.results import PatchSummary, OptimizerStats, RatchetResult
-from ratchet.types import AgentPatch, OptimizationObjective
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import OptimizationObjective
 
 
 def build_outcome_analysis(
@@ -199,7 +200,7 @@ class RatchetReporter:
                     result.finalist_statuses,
                     result.selected_patch_hash,
                 ),
-                "patch": result.selected_patch.to_dict(),
+                "candidate": result.selected_patch.to_dict() if result.selected_patch is not None else None,
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
@@ -224,7 +225,7 @@ class RatchetReporter:
             },
         )
         export_dir = self.out_dir / "exported_patch"
-        self.adapter.export(None if result.selected_patch.is_empty else result.selected_patch, export_dir)
+        self.adapter.export(result.selected_patch, export_dir)
         self._write_report(result)
         self._write_summary_html(result)
         self._write_plots(result)
@@ -292,14 +293,11 @@ class RatchetReporter:
             "",
             "## Selected Patch",
             "",
-            *(changes or ["No patch operations; original baseline selected."]),
+            *(changes or ["No transform operations; original baseline selected."]),
             "",
             "## Generated Surface",
             "",
-            *[
-                f"- `{target['name']}` ({target['kind']}): {', '.join(target['allowed_ops'])}; schema={json.dumps(target.get('value_schema', {}), sort_keys=True)}"
-                for target in result.generated_surface
-            ],
+            *_surface_rows(result.generated_surface),
             "",
             "## Optimization Trace",
             "",
@@ -800,11 +798,11 @@ class RatchetReporter:
                         "operation_count": item.operation_count,
                         "operations": [
                             {
-                                "op": operation.op,
-                                "target": operation.target,
-                                "value_summary": RatchetReporter._format_value(operation.value),
+                                "op": operation.op.op,
+                                "target": operation.hook or "on_task_start",
+                                "value_summary": RatchetReporter._format_value(operation.op.params),
                             }
-                            for operation in item.patch.operations
+                            for operation in (item.patch.program.patches if item.patch is not None else ())
                         ],
                     }
                     for item in result.holdout_patches
@@ -1048,10 +1046,12 @@ class RatchetReporter:
         )
 
     @staticmethod
-    def _patch_change_rows(patch: AgentPatch) -> list[str]:
+    def _patch_change_rows(patch: CompiledCandidate | None) -> list[str]:
+        if patch is None:
+            return []
         return [
-            f"`{operation.op}` on `{operation.target}`: {RatchetReporter._format_value(operation.value)}"
-            for operation in patch.operations
+            f"`{operation.op.op}` at `{operation.hook or 'on_task_start'}`: {RatchetReporter._format_value(operation.op.params)}"
+            for operation in patch.program.patches
         ]
 
     @staticmethod
@@ -1161,3 +1161,19 @@ def _selected_finalist_status(
                 "comparison_to_baseline": row.get("comparison_to_baseline"),
             }
     return None
+
+
+def _surface_rows(surface_rows: list[dict[str, Any]]) -> list[str]:
+    rows: list[str] = []
+    for row in surface_rows:
+        if "agent_id" in row:
+            rows.append(
+                f"- `{row['agent_id']}`: context_sections={len((row.get('context') or {}).get('graph', {}).get('sections', []))}; "
+                f"hooks={len(row.get('hooks') or {})}"
+            )
+            continue
+        rows.append(
+            f"- `{row.get('name', 'surface')}` ({row.get('kind', 'unknown')}): "
+            f"{', '.join(row.get('allowed_ops') or [])}; schema={json.dumps(row.get('value_schema', {}), sort_keys=True)}"
+        )
+    return rows

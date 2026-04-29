@@ -8,7 +8,8 @@ from typing import Any
 from ratchet.evidence_ledger import confirmation_stability_result
 from ratchet.objectives import behavior_flip_summary, compare_summaries
 from ratchet.results import PatchSummary, RatchetResult
-from ratchet.types import AgentPatch, EvalCase, OptimizationObjective
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import EvalCase, OptimizationObjective
 
 
 LOW_OUTPUT_TOKEN_RATIO = 0.25
@@ -250,15 +251,18 @@ def _requested_output_cap(evaluation: Any) -> int | None:
         return None
 
 
-def _is_runtime_only_patch(patch: AgentPatch) -> bool:
-    return bool(patch.operations) and all(
-        operation.op == "set_runtime_param" and operation.target.startswith("runtime.")
-        for operation in patch.operations
+def _is_runtime_only_patch(patch: CompiledCandidate | None) -> bool:
+    return patch is not None and bool(patch.program.patches) and all(
+        transform.op.op in {"set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"}
+        for transform in patch.program.patches
     )
 
 
-def _touches_runtime(patch: AgentPatch) -> bool:
-    return any(operation.op == "set_runtime_param" and operation.target.startswith("runtime.") for operation in patch.operations)
+def _touches_runtime(patch: CompiledCandidate | None) -> bool:
+    return patch is not None and any(
+        transform.op.op in {"set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"}
+        for transform in patch.program.patches
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:

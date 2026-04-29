@@ -9,7 +9,7 @@ from typing import Any, Protocol, runtime_checkable
 
 from ratchet.surfaces import SurfaceSpec, surface_from_agent_spec
 from ratchet.transform_program import CompiledCandidate
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
+from ratchet.types import AgentSpec, EvalCase, GradeResult, RunRecord
 
 
 FINGERPRINTED_SOURCE_SUFFIXES = {

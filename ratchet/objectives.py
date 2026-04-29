@@ -684,13 +684,22 @@ def _frontier_variant_row(role: str, summary: PatchSummary) -> dict[str, Any]:
         "operation_count": summary.operation_count,
         "operations": [
             {
-                "op": operation.op,
-                "target": operation.target,
-                "value_summary": _operation_value_summary(operation.value),
+                "op": transform.op.op,
+                "hook": transform.hook,
+                "target": _transform_target(transform.to_dict()),
+                "value_summary": _operation_value_summary(transform.op.params),
             }
-            for operation in summary.patch.operations
+            for transform in (summary.patch.program.patches if summary.patch is not None else ())
         ],
     }
+
+
+def _transform_target(payload: dict[str, Any]) -> str:
+    for key in ("section", "field", "target", "tool"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return str(payload.get("hook") or "global")
 
 
 def _operation_value_summary(value: Any) -> Any:
