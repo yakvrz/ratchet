@@ -201,25 +201,6 @@ class SurfaceGenerator:
                             ),
                         )
                     )
-        if "retrieval" in allowed:
-            for key, value in sorted(spec.retrieval.items()):
-                targets.append(
-                    EditableTarget(
-                        name=f"retrieval.{key}",
-                        kind="retrieval",
-                        path=f"retrieval.{key}",
-                        current_value=value,
-                        allowed_ops=["set_retrieval_param"],
-                        description=f"Retrieval parameter {key}.",
-                        value_schema=_infer_value_schema(value),
-                        semantics=_target_semantics(
-                            spec,
-                            name=f"retrieval.{key}",
-                            kind="retrieval",
-                            path=f"retrieval.{key}",
-                        ),
-                    )
-                )
         if "runtime" in allowed:
             for key, value in sorted(spec.runtime.items()):
                 targets.append(
@@ -306,8 +287,6 @@ def _semantic_keys(*, name: str, path: str) -> list[str]:
             keys.append(value.removeprefix("instructions."))
         if value.startswith("runtime."):
             keys.append(value.removeprefix("runtime."))
-        if value.startswith("retrieval."):
-            keys.append(value.removeprefix("retrieval."))
     return list(dict.fromkeys(keys))
 
 
@@ -349,16 +328,6 @@ def _infer_target_semantics(*, name: str, kind: str, path: str) -> TargetSemanti
         return _infer_runtime_semantics(simple_name)
     if kind == "tool":
         return _infer_tool_semantics(name=name)
-    if kind == "retrieval":
-        return TargetSemantics(
-            role="retrieval_policy",
-            axes=["recall_precision_tradeoff", "context_relevance"],
-            scope="global",
-            risks=["cost_latency_regression", "quality_regression"],
-            measurement_hints=["score_delta", "latency_delta", "retrieval_volume_delta"],
-            confidence=0.8,
-            source="inferred",
-        )
     if kind == "verifier":
         return TargetSemantics(
             role="verifier_retry_policy",
@@ -523,20 +492,33 @@ def _infer_tool_semantics(*, name: str) -> TargetSemantics:
     if name.endswith(".description"):
         return TargetSemantics(
             role="tool_description",
-            axes=["tool_selection", "schema_grounding"],
+            axes=["tool_selection", "schema_grounding", "argument_grounding"],
             scope="slice",
-            risks=["wrong_tool_regression"],
-            measurement_hints=["wrong_call_delta", "target_slice_score_delta", "non_target_regression"],
+            risks=["wrong_tool_regression", "argument_regression"],
+            measurement_hints=[
+                "wrong_call_delta",
+                "invalid_tool_call_delta",
+                "tool_error_delta",
+                "target_slice_score_delta",
+                "non_target_regression",
+            ],
             confidence=0.85,
             source="inferred",
         )
     if name.endswith(".policy"):
         return TargetSemantics(
             role="tool_policy",
-            axes=["tool_selection", "action_policy"],
+            axes=["tool_selection", "action_policy", "precondition_checking", "stop_continue_boundary"],
             scope="slice",
-            risks=["wrong_tool_regression"],
-            measurement_hints=["wrong_call_delta", "target_slice_score_delta", "non_target_regression"],
+            risks=["wrong_tool_regression", "tool_overuse", "tool_underuse"],
+            measurement_hints=[
+                "wrong_call_delta",
+                "tool_call_delta",
+                "tool_error_delta",
+                "turn_delta",
+                "target_slice_score_delta",
+                "non_target_regression",
+            ],
             confidence=0.85,
             source="inferred",
         )

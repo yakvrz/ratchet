@@ -119,13 +119,49 @@ def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) 
     parser_fallback_case_ids: list[str] = []
     low_output_token_length_case_ids: list[str] = []
     finish_reason_counts: Counter[str] = Counter()
+    tool_call_counts: Counter[str] = Counter()
+    tool_status_counts: Counter[str] = Counter()
+    turn_outcome_counts: Counter[str] = Counter()
+    terminal_reason_counts: Counter[str] = Counter()
+    tool_error_case_ids: list[str] = []
+    invalid_tool_call_case_ids: list[str] = []
+    no_tool_call_case_ids: list[str] = []
+    premature_stop_case_ids: list[str] = []
 
     for case_id, evaluations, mean_score, _, case_passed in summary._case_rows():
         evaluation = next((item for item in evaluations if not item.grade.passed), evaluations[0])
         metadata = evaluation.record.diagnostics.metadata
+        diagnostics = evaluation.record.diagnostics
         finish_reason = str(metadata.get("finish_reason") or "")
         if finish_reason:
             finish_reason_counts[finish_reason] += 1
+        terminal_reason = diagnostics.terminal_reason or str(metadata.get("terminal_reason") or "")
+        if terminal_reason:
+            terminal_reason_counts[terminal_reason] += 1
+            if terminal_reason in {"premature_stop", "max_turns", "stopped_before_required_action"}:
+                premature_stop_case_ids.append(case_id)
+        case_tool_call_count = 0
+        case_has_tool_error = False
+        case_has_invalid_tool_call = False
+        for turn in diagnostics.turns:
+            if turn.outcome:
+                turn_outcome_counts[turn.outcome] += 1
+            for tool_call in turn.tool_calls:
+                case_tool_call_count += 1
+                tool_call_counts[tool_call.name] += 1
+                tool_status_counts[tool_call.status] += 1
+                case_has_tool_error = case_has_tool_error or bool(tool_call.error) or tool_call.status == "error"
+                case_has_invalid_tool_call = case_has_invalid_tool_call or tool_call.status == "invalid"
+        if not diagnostics.turns:
+            case_tool_call_count = len(diagnostics.tool_calls)
+            for tool_name in diagnostics.tool_calls:
+                tool_call_counts[tool_name] += 1
+        if case_tool_call_count == 0:
+            no_tool_call_case_ids.append(case_id)
+        if case_has_tool_error:
+            tool_error_case_ids.append(case_id)
+        if case_has_invalid_tool_call:
+            invalid_tool_call_case_ids.append(case_id)
         if finish_reason == "length":
             length_finish_case_ids.append(case_id)
             cap = _safe_int(metadata.get("requested_output_cap"))
@@ -204,6 +240,19 @@ def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) 
             "length_finish_case_ids": length_finish_case_ids[:max_case_ids],
             "parser_fallback_case_ids": parser_fallback_case_ids[:max_case_ids],
             "low_output_token_length_case_ids": low_output_token_length_case_ids[:max_case_ids],
+        },
+        "tool_interaction": {
+            "tool_call_counts": dict(sorted(tool_call_counts.items())),
+            "tool_status_counts": dict(sorted(tool_status_counts.items())),
+            "turn_outcome_counts": dict(sorted(turn_outcome_counts.items())),
+            "terminal_reason_counts": dict(sorted(terminal_reason_counts.items())),
+            "tool_error_case_ids": tool_error_case_ids[:max_case_ids],
+            "invalid_tool_call_case_ids": invalid_tool_call_case_ids[:max_case_ids],
+            "no_tool_call_case_ids": no_tool_call_case_ids[:max_case_ids],
+            "premature_stop_case_ids": premature_stop_case_ids[:max_case_ids],
+            "mean_turns": round(summary.mean_turns, 4),
+            "mean_tool_calls": round(summary.mean_tool_calls, 4),
+            "mean_model_calls": round(summary.mean_model_calls, 4),
         },
         "category_metrics": summary.category_metrics,
     }

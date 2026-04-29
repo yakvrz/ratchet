@@ -328,9 +328,12 @@ class RuntimeAffordanceProvider:
 
 class PassthroughAffordanceProvider:
     def generate(self, target: EditableTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name not in {"retrieval_tuning", "tool_policy_revision", "verifier_retry"}:
+        if family.name not in {"tool_policy_revision", "verifier_retry"}:
             return []
-        mechanisms = sorted(MECHANISMS_BY_FAMILY.get(family.name, set()) - {"ablation"})
+        if family.name == "tool_policy_revision":
+            mechanisms = _tool_mechanisms_for_target(target)
+        else:
+            mechanisms = sorted(MECHANISMS_BY_FAMILY.get(family.name, set()) - {"ablation"})
         return [
             _make_affordance(
                 target=target,
@@ -444,6 +447,10 @@ def _axes_for_mechanism(mechanism: str, role: str) -> list[str]:
         "contrastive_examples": ["classification_boundary", "neighbor_label_regression"],
         "model_capability_probe": ["model_capability", "global_correctness"],
         "efficiency_probe": ["cost_latency_tradeoff", "correctness_preservation"],
+        "tool_selection_policy": ["tool_choice", "tool_relevance_boundary", "action_ordering"],
+        "tool_argument_grounding": ["argument_grounding", "schema_adherence", "state_grounding"],
+        "tool_precondition_policy": ["precondition_checking", "irreversible_action_safety"],
+        "interaction_completion_policy": ["stop_continue_boundary", "terminal_state_recognition"],
     }
     return axes_by_mechanism.get(mechanism, [role])
 
@@ -457,6 +464,10 @@ def _measurements_for(mechanism: str, family: TransformFamily) -> list[str]:
         "contrastive_examples": ["target_label_score_delta", "neighbor_label_regression", "example_token_delta"],
         "model_capability_probe": ["score_delta", "cost_delta", "latency_delta"],
         "efficiency_probe": ["cost_delta", "latency_delta", "correctness_guard"],
+        "tool_selection_policy": ["score_delta", "tool_call_delta", "wrong_tool_delta", "non_target_regression"],
+        "tool_argument_grounding": ["score_delta", "invalid_tool_call_delta", "tool_error_delta"],
+        "tool_precondition_policy": ["score_delta", "policy_violation_delta", "state_mutation_error_delta"],
+        "interaction_completion_policy": ["score_delta", "turn_delta", "premature_stop_delta"],
         "ablation": ["score_delta", "complexity_delta", "cost_delta"],
     }
     return measurements_by_mechanism.get(mechanism, list(family.required_measurements))
@@ -471,6 +482,13 @@ def _suitability(*, mechanism: str, target: EditableTarget, objective: Optimizat
     if mechanism == "output_contract_fix" and (bottleneck == "output_contract" or evidence.get("invalid_output")):
         score += 0.45
     if mechanism == "runtime_defect_fix" and evidence.get("runtime_defect"):
+        score += 0.45
+    if mechanism in {
+        "tool_selection_policy",
+        "tool_argument_grounding",
+        "tool_precondition_policy",
+        "interaction_completion_policy",
+    } and evidence.get("tool_trajectory_defect"):
         score += 0.45
     if mechanism in {"representative_examples", "contrastive_examples"} and evidence.get("example_coverage"):
         score += 0.30
@@ -508,9 +526,16 @@ def _suitability(*, mechanism: str, target: EditableTarget, objective: Optimizat
         "reasoning_effort_control",
         "output_budget_control",
         "runtime_control",
-        "retrieval_policy",
     }:
         score += 0.10
+    if mechanism in {"tool_selection_policy", "tool_argument_grounding", "tool_precondition_policy"} and role in {
+        "tool_description",
+        "tool_policy",
+        "tool_relevance_boundary",
+    }:
+        score += 0.15
+    if mechanism == "interaction_completion_policy" and role in {"tool_policy", "no_call_policy", "decision_policy"}:
+        score += 0.15
     score += min(target.semantics.confidence, 1.0) * 0.05
     if target.name in set(evidence.get("diagnosis_target_names") or []):
         score += 0.20
@@ -534,7 +559,30 @@ def _evidence_for(mechanism: str, target: EditableTarget, evidence: dict[str, An
         rows.append("runtime finish/parser defects observed")
     if mechanism == "output_contract_fix" and evidence.get("invalid_output"):
         rows.append("invalid-output failures observed")
+    if mechanism in {
+        "tool_selection_policy",
+        "tool_argument_grounding",
+        "tool_precondition_policy",
+        "interaction_completion_policy",
+    } and evidence.get("tool_trajectory_defect"):
+        rows.append("tool/environment trajectory defects observed")
     return rows
+
+
+def _tool_mechanisms_for_target(target: EditableTarget) -> list[str]:
+    if target.kind != "tool":
+        return []
+    role = target.semantics.role
+    if role == "tool_description":
+        return ["tool_selection_policy", "tool_argument_grounding", "efficiency_probe"]
+    if role == "tool_policy":
+        return [
+            "tool_precondition_policy",
+            "tool_selection_policy",
+            "interaction_completion_policy",
+            "efficiency_probe",
+        ]
+    return ["tool_selection_policy", "tool_argument_grounding", "efficiency_probe"]
 
 
 def _impact(effects: dict[str, str], key: str) -> str:

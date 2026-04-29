@@ -4,61 +4,105 @@ import argparse
 import ast
 import json
 from pathlib import Path
-import re
 import urllib.request
 
 
-BASE_URL = "https://raw.githubusercontent.com/sierra-research/tau2-bench/main"
-DOMAINS = ("airline", "retail", "telecom")
+BASE_URL = "https://raw.githubusercontent.com/sierra-research/tau-bench/main"
+DOMAINS = ("retail", "airline")
 DEFAULT_COUNTS = {
-    "airline": 12,
-    "retail": 20,
-    "telecom": 64,
+    "retail_train": 48,
+    "retail_dev": 48,
+    "airline_holdout": 48,
+}
+TOOL_FILES = {
+    "retail": [
+        "calculate",
+        "cancel_pending_order",
+        "exchange_delivered_order_items",
+        "find_user_id_by_email",
+        "find_user_id_by_name_zip",
+        "get_order_details",
+        "get_product_details",
+        "get_user_details",
+        "list_all_product_types",
+        "modify_pending_order_address",
+        "modify_pending_order_items",
+        "modify_pending_order_payment",
+        "modify_user_address",
+        "return_delivered_order_items",
+        "think",
+        "transfer_to_human_agents",
+    ],
+    "airline": [
+        "book_reservation",
+        "calculate",
+        "cancel_reservation",
+        "get_reservation_details",
+        "get_user_details",
+        "list_all_airports",
+        "search_direct_flight",
+        "search_onestop_flight",
+        "send_certificate",
+        "think",
+        "transfer_to_human_agents",
+        "update_reservation_baggages",
+        "update_reservation_flights",
+        "update_reservation_passengers",
+    ],
 }
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build a tau-bench action-policy Ratchet assessment split.")
+    parser = argparse.ArgumentParser(description="Build an original tau-bench action-policy Ratchet assessment split.")
     parser.add_argument("--out", default="evals.assessment.jsonl")
     parser.add_argument("--cache-dir", default=".cache")
-    parser.add_argument("--airline-per-split", type=int, default=DEFAULT_COUNTS["airline"])
-    parser.add_argument("--retail-per-split", type=int, default=DEFAULT_COUNTS["retail"])
-    parser.add_argument("--telecom-per-split", type=int, default=DEFAULT_COUNTS["telecom"])
+    parser.add_argument("--retail-train", type=int, default=DEFAULT_COUNTS["retail_train"])
+    parser.add_argument("--retail-dev", type=int, default=DEFAULT_COUNTS["retail_dev"])
+    parser.add_argument("--airline-holdout", type=int, default=DEFAULT_COUNTS["airline_holdout"])
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
     cache_dir = (root / args.cache_dir).resolve()
     cache_dir.mkdir(parents=True, exist_ok=True)
-    counts = {
-        "airline": args.airline_per_split,
-        "retail": args.retail_per_split,
-        "telecom": args.telecom_per_split,
-    }
+
+    retail_train = _load_tasks(cache_dir, "retail", "tasks_train.py", "TASKS_TRAIN")[: args.retail_train]
+    retail_test = _load_tasks(cache_dir, "retail", "tasks_test.py", "TASKS_TEST")[: args.retail_dev]
+    airline_test = _load_tasks(cache_dir, "airline", "tasks_test.py", "TASKS")[: args.airline_holdout]
     rows: list[dict[str, object]] = []
-    for domain in DOMAINS:
-        tasks = _load_json(cache_dir, domain, "tasks.json")
-        tools_source = _load_text(cache_dir, domain, "tools.py", source=True)
-        policy = _load_text(cache_dir, domain, "policy.md", required=False)
-        tasks_by_id = {str(task["id"]): task for task in tasks}
-        ordered_tasks = [tasks_by_id[task_id] for task_id in sorted(tasks_by_id, key=_task_sort_key)]
-        required = counts[domain] * 3
-        if len(ordered_tasks) < required:
-            raise ValueError(f"Not enough tau-bench {domain} tasks for requested split counts.")
-        tool_catalog = _tool_catalog(tools_source)
-        for split_index, split in enumerate(("train", "dev", "holdout")):
-            start = split_index * counts[domain]
-            selected = ordered_tasks[start: start + counts[domain]]
-            rows.extend(
-                _case_row(
-                    domain=domain,
-                    split=split,
-                    index=index + 1,
-                    task=task,
-                    tool_catalog=tool_catalog,
-                    policy=policy,
-                )
-                for index, task in enumerate(selected)
-            )
+    rows.extend(
+        _case_row(
+            domain="retail",
+            split="train",
+            index=index + 1,
+            task=task,
+            tool_catalog=_tool_catalog(cache_dir, "retail"),
+            policy=_load_text(cache_dir, "retail", "wiki.md"),
+        )
+        for index, task in enumerate(retail_train)
+    )
+    rows.extend(
+        _case_row(
+            domain="retail",
+            split="dev",
+            index=index + 1,
+            task=task,
+            tool_catalog=_tool_catalog(cache_dir, "retail"),
+            policy=_load_text(cache_dir, "retail", "wiki.md"),
+        )
+        for index, task in enumerate(retail_test)
+    )
+    rows.extend(
+        _case_row(
+            domain="airline",
+            split="holdout",
+            index=index + 1,
+            task=task,
+            tool_catalog=_tool_catalog(cache_dir, "airline"),
+            policy=_load_text(cache_dir, "airline", "wiki.md"),
+        )
+        for index, task in enumerate(airline_test)
+    )
+
     out_path = root / args.out
     with out_path.open("w", encoding="utf-8") as handle:
         for row in rows:
@@ -66,60 +110,61 @@ def main() -> None:
     print(f"Wrote {len(rows)} cases to {out_path}")
 
 
-def _load_json(cache_dir: Path, domain: str, name: str) -> object:
-    path = cache_dir / domain / name
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        url = f"{BASE_URL}/data/tau2/domains/{domain}/{name}"
-        path.write_bytes(urllib.request.urlopen(url, timeout=60).read())
-    return json.loads(path.read_text())
-
-
-def _load_text(cache_dir: Path, domain: str, name: str, *, source: bool = False, required: bool = True) -> str:
-    path = cache_dir / domain / name
-    if not path.exists():
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if source:
-            url = f"{BASE_URL}/src/tau2/domains/{domain}/{name}"
-        else:
-            url = f"{BASE_URL}/data/tau2/domains/{domain}/{name}"
-        try:
-            path.write_bytes(urllib.request.urlopen(url, timeout=60).read())
-        except Exception:
-            if required:
-                raise
-            return ""
-    return path.read_text()
-
-
-def _task_sort_key(task_id: str) -> tuple[int, str]:
-    if task_id.isdigit():
-        return (int(task_id), task_id)
-    return (10_000, task_id)
-
-
-def _tool_catalog(source: str) -> list[dict[str, str]]:
+def _load_tasks(cache_dir: Path, domain: str, filename: str, symbol: str) -> list[dict[str, object]]:
+    source = _load_source(cache_dir, f"tau_bench/envs/{domain}/{filename}")
     tree = ast.parse(source)
-    tools = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef):
-            continue
-        if not any(_decorator_name(decorator) == "is_tool" for decorator in node.decorator_list):
-            continue
-        doc = ast.get_docstring(node) or ""
-        summary = " ".join(line.strip() for line in doc.splitlines() if line.strip())
-        tools.append({"name": node.name, "description": summary[:500]})
-    return sorted(tools, key=lambda item: item["name"])
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == symbol for target in node.targets):
+            return [_task_from_call(item) for item in node.value.elts if isinstance(item, ast.Call)]
+    raise ValueError(f"Could not find {symbol} in {domain}/{filename}")
 
 
-def _decorator_name(node: ast.AST) -> str:
+def _task_from_call(node: ast.Call) -> dict[str, object]:
+    values = {keyword.arg: _literal_or_actions(keyword.value) for keyword in node.keywords if keyword.arg}
+    return {
+        "user_id": values.get("user_id", ""),
+        "instruction": values.get("instruction", ""),
+        "actions": values.get("actions", []),
+        "outputs": values.get("outputs", []),
+    }
+
+
+def _literal_or_actions(node: ast.AST) -> object:
+    if isinstance(node, ast.List):
+        return [_literal_or_actions(item) for item in node.elts]
     if isinstance(node, ast.Call):
-        node = node.func
-    if isinstance(node, ast.Name):
-        return node.id
-    if isinstance(node, ast.Attribute):
-        return node.attr
-    return ""
+        values = {keyword.arg: ast.literal_eval(keyword.value) for keyword in node.keywords if keyword.arg}
+        if getattr(node.func, "id", "") == "Action":
+            return {"name": values.get("name", ""), "arguments": values.get("kwargs", {})}
+        return values
+    return ast.literal_eval(node)
+
+
+def _tool_catalog(cache_dir: Path, domain: str) -> list[dict[str, str]]:
+    rows = []
+    for name in TOOL_FILES[domain]:
+        source = _load_source(cache_dir, f"tau_bench/envs/{domain}/tools/{name}.py")
+        tree = ast.parse(source)
+        description = ""
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef):
+                description = ast.get_docstring(node) or ""
+                break
+        rows.append({"name": name, "description": " ".join(description.split())[:500]})
+    return rows
+
+
+def _load_text(cache_dir: Path, domain: str, filename: str) -> str:
+    return _load_source(cache_dir, f"tau_bench/envs/{domain}/{filename}")
+
+
+def _load_source(cache_dir: Path, path: str) -> str:
+    cached = cache_dir / path
+    if not cached.exists():
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        url = f"{BASE_URL}/{path}"
+        cached.write_bytes(urllib.request.urlopen(url, timeout=60).read())
+    return cached.read_text()
 
 
 def _case_row(
@@ -131,10 +176,10 @@ def _case_row(
     tool_catalog: list[dict[str, str]],
     policy: str,
 ) -> dict[str, object]:
-    criteria = task.get("evaluation_criteria") if isinstance(task.get("evaluation_criteria"), dict) else {}
+    actions = task["actions"] if isinstance(task.get("actions"), list) else []
     expected_actions = [
         {"name": str(action.get("name")), "arguments": action.get("arguments") or {}}
-        for action in criteria.get("actions") or []
+        for action in actions
         if isinstance(action, dict) and action.get("name")
     ]
     return {
@@ -143,7 +188,10 @@ def _case_row(
         "input": json.dumps(
             {
                 "domain": domain,
-                "task": _task_context(task),
+                "task": {
+                    "user_id": task.get("user_id"),
+                    "instruction": task.get("instruction"),
+                },
                 "available_tools": tool_catalog,
                 "policy_excerpt": _compact_policy(policy),
             },
@@ -151,36 +199,19 @@ def _case_row(
         ),
         "expected": {
             "actions": expected_actions,
-            "communicate_info": criteria.get("communicate_info") or [],
-            "nl_assertions": criteria.get("nl_assertions") or [],
-            "reward_basis": criteria.get("reward_basis") or [],
+            "outputs": task.get("outputs") if isinstance(task.get("outputs"), list) else [],
         },
         "metadata": {
             "category": domain,
-            "source": "tau2_bench",
-            "source_id": str(task.get("id")),
+            "source": "tau_bench",
+            "source_id": f"{domain}:{split}:{index}",
             "expected_action_count": len(expected_actions),
         },
     }
 
 
-def _task_context(task: dict[str, object]) -> dict[str, object]:
-    scenario = task.get("user_scenario") if isinstance(task.get("user_scenario"), dict) else {}
-    instructions = scenario.get("instructions") if isinstance(scenario.get("instructions"), dict) else {}
-    description = task.get("description") if isinstance(task.get("description"), dict) else {}
-    return {
-        "purpose": description.get("purpose"),
-        "reason_for_call": instructions.get("reason_for_call"),
-        "known_info": instructions.get("known_info"),
-        "unknown_info": instructions.get("unknown_info"),
-        "task_instructions": instructions.get("task_instructions"),
-        "ticket": task.get("ticket"),
-    }
-
-
 def _compact_policy(policy: str) -> str:
-    text = re.sub(r"\s+", " ", policy).strip()
-    return text[:3500]
+    return " ".join(policy.split())[:3500]
 
 
 if __name__ == "__main__":

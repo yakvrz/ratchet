@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any
 
 
@@ -10,7 +10,6 @@ PATCH_OPS = {
     "add_output_constraint",
     "revise_tool_description",
     "revise_tool_policy",
-    "set_retrieval_param",
     "set_runtime_param",
     "change_model",
     "add_few_shot",
@@ -21,7 +20,6 @@ EDIT_KINDS = {
     "instruction",
     "output",
     "tool",
-    "retrieval",
     "runtime",
     "model",
     "few_shot",
@@ -102,7 +100,6 @@ class AgentSpec:
     model: str
     instructions: dict[str, str] = field(default_factory=dict)
     tools: dict[str, AgentTool] = field(default_factory=dict)
-    retrieval: dict[str, Any] = field(default_factory=dict)
     output_contract: str = ""
     runtime: dict[str, Any] = field(default_factory=dict)
     model_options: list[str] = field(default_factory=list)
@@ -124,7 +121,6 @@ class AgentSpec:
             "model": self.model,
             "instructions": dict(self.instructions),
             "tools": {name: tool.to_dict() for name, tool in sorted(self.tools.items())},
-            "retrieval": dict(self.retrieval),
             "output_contract": self.output_contract,
             "runtime": dict(self.runtime),
             "model_options": list(self.model_options),
@@ -147,7 +143,6 @@ class AgentSpec:
                 else AgentTool.from_dict(dict(tool))
                 for name, tool in payload.get("tools", {}).items()
             },
-            retrieval=dict(payload.get("retrieval", {})),
             output_contract=str(payload.get("output_contract", "")),
             runtime=dict(payload.get("runtime", {})),
             model_options=[str(item) for item in payload.get("model_options", [])],
@@ -370,6 +365,9 @@ class OperationalMetrics:
     output_tokens: int
     total_tokens: int
     cost_usd: float
+    model_calls: int = 1
+    tool_calls: int = 0
+    turns: int = 1
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -383,7 +381,87 @@ class OperationalMetrics:
             output_tokens=int(payload.get("output_tokens", 0)),
             total_tokens=int(payload.get("total_tokens", 0)),
             cost_usd=float(payload.get("cost_usd", 0.0)),
+            model_calls=int(payload.get("model_calls", 1)),
+            tool_calls=int(payload.get("tool_calls", 0)),
+            turns=int(payload.get("turns", 1)),
             error=payload.get("error"),
+        )
+
+
+@dataclass(frozen=True)
+class ToolCallTrace:
+    name: str
+    arguments: Any = None
+    result: Any = None
+    status: str = "ok"
+    latency_s: float | None = None
+    error: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("ToolCallTrace name must be non-empty.")
+        if self.status not in {"ok", "error", "invalid", "skipped"}:
+            raise ValueError(f"Unsupported ToolCallTrace status: {self.status}")
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | "ToolCallTrace") -> "ToolCallTrace":
+        if isinstance(payload, ToolCallTrace):
+            return payload
+        return cls(
+            name=str(payload["name"]),
+            arguments=payload.get("arguments"),
+            result=payload.get("result"),
+            status=str(payload.get("status", "ok")),
+            latency_s=float(payload["latency_s"]) if payload.get("latency_s") is not None else None,
+            error=payload.get("error"),
+            metadata=dict(payload.get("metadata", {})),
+        )
+
+
+@dataclass(frozen=True)
+class InteractionTurn:
+    index: int
+    actor: str
+    message: Any = None
+    tool_calls: list[ToolCallTrace] = field(default_factory=list)
+    outcome: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.index < 0:
+            raise ValueError("InteractionTurn index must be non-negative.")
+        if not self.actor:
+            raise ValueError("InteractionTurn actor must be non-empty.")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "actor": self.actor,
+            "message": self.message,
+            "tool_calls": [tool_call.to_dict() for tool_call in self.tool_calls],
+            "outcome": self.outcome,
+            "metadata": dict(self.metadata),
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any] | "InteractionTurn") -> "InteractionTurn":
+        if isinstance(payload, InteractionTurn):
+            return payload
+        return cls(
+            index=int(payload.get("index", 0)),
+            actor=str(payload.get("actor", "agent")),
+            message=payload.get("message"),
+            tool_calls=[
+                ToolCallTrace.from_dict(dict(item))
+                for item in payload.get("tool_calls", [])
+                if isinstance(item, dict)
+            ],
+            outcome=str(payload.get("outcome", "")),
+            metadata=dict(payload.get("metadata", {})),
         )
 
 
@@ -391,16 +469,39 @@ class OperationalMetrics:
 class DiagnosticTrace:
     tool_calls: list[str] = field(default_factory=list)
     raw_output_text: str = ""
+    turns: list[InteractionTurn] = field(default_factory=list)
+    terminal_state: dict[str, Any] = field(default_factory=dict)
+    terminal_reason: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        tool_names = list(self.tool_calls)
+        for turn in self.turns:
+            tool_names.extend(tool_call.name for tool_call in turn.tool_calls)
+        object.__setattr__(self, "tool_calls", list(dict.fromkeys(str(name) for name in tool_names if name)))
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            "tool_calls": list(self.tool_calls),
+            "raw_output_text": self.raw_output_text,
+            "turns": [turn.to_dict() for turn in self.turns],
+            "terminal_state": dict(self.terminal_state),
+            "terminal_reason": self.terminal_reason,
+            "metadata": dict(self.metadata),
+        }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "DiagnosticTrace":
         return cls(
             tool_calls=[str(item) for item in payload.get("tool_calls", [])],
             raw_output_text=str(payload.get("raw_output_text", "")),
+            turns=[
+                InteractionTurn.from_dict(dict(item))
+                for item in payload.get("turns", [])
+                if isinstance(item, dict)
+            ],
+            terminal_state=dict(payload.get("terminal_state", {})),
+            terminal_reason=str(payload.get("terminal_reason", "")),
             metadata=dict(payload.get("metadata", {})),
         )
 
@@ -410,6 +511,28 @@ class RunRecord:
     output: Any
     metrics: OperationalMetrics
     diagnostics: DiagnosticTrace = field(default_factory=DiagnosticTrace)
+
+    def __post_init__(self) -> None:
+        derived_tool_calls = sum(len(turn.tool_calls) for turn in self.diagnostics.turns)
+        if not derived_tool_calls:
+            derived_tool_calls = len(self.diagnostics.tool_calls)
+        derived_turns = max(1, len(self.diagnostics.turns))
+        if (
+            self.metrics.tool_calls == 0
+            and derived_tool_calls > 0
+        ) or (
+            self.metrics.turns == 1
+            and derived_turns > 1
+        ):
+            object.__setattr__(
+                self,
+                "metrics",
+                replace(
+                    self.metrics,
+                    tool_calls=derived_tool_calls if self.metrics.tool_calls == 0 else self.metrics.tool_calls,
+                    turns=derived_turns if self.metrics.turns == 1 else self.metrics.turns,
+                ),
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -513,13 +636,6 @@ def _apply_operation(spec: dict[str, Any], operation: PatchOperation) -> None:
             raise ValueError(f"Unknown tool target: {tool_name}")
         tools[tool_name][field_name] = str(value)
         spec["tools"] = tools
-        return
-
-    if operation.op == "set_retrieval_param":
-        key = _strip_prefix(target, "retrieval.")
-        retrieval = dict(spec.get("retrieval", {}))
-        retrieval[key] = value
-        spec["retrieval"] = retrieval
         return
 
     if operation.op == "set_runtime_param":

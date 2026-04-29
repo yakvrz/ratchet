@@ -287,7 +287,6 @@ def _sentinel_op(target: EditableTarget) -> str:
         "add_output_constraint",
         "revise_tool_description",
         "revise_tool_policy",
-        "set_retrieval_param",
         "set_runtime_param",
         "add_verifier_retry",
     ):

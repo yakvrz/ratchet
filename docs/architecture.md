@@ -43,7 +43,7 @@ Ratchet owns:
 
 ## Core Artifacts
 
-`EditableTarget` is the low-level edit handle generated from `AgentSpec`: an instruction, model choice, runtime setting, output contract, retrieval policy, tool policy, or few-shot bank.
+`EditableTarget` is the low-level edit handle generated from `AgentSpec`: an instruction, model choice, runtime setting, output contract, tool policy, or few-shot bank.
 
 `OptimizationAffordance` is the primary optimizer surface. It names one meaningful legal move, including the family, mechanism, target, allowed operations, expected measurements, risk, composition guidance, suitability, and evidence. Planner and implementer prompts should reason over affordances, not raw source files or arbitrary string targets.
 
@@ -56,6 +56,8 @@ Ratchet owns:
 `EvidenceLedger` is the measurement source of truth. It records paired candidate-vs-reference deltas, pass flips, invalid-output changes, cost/latency/token deltas, sample sizes, reliability signals, measurement cost, and baseline-instability flags.
 
 `MeasurementDecision` is selector output. It chooses which already-valid candidates receive more measurement. It must not create candidates or alter experiment intents.
+
+`DiagnosticTrace` is the adapter-owned behavior trace. For single-call tasks it may contain only raw output text and metadata. For interactive tasks it should contain `InteractionTurn`, `ToolCallTrace`, terminal state, and terminal reason. Ratchet treats these traces as evidence; it does not infer tool behavior from final text alone.
 
 ## Model Roles
 
@@ -89,6 +91,18 @@ Model calls should provide judgment:
 - concrete candidate content within legal affordances
 - measurement value tradeoffs under evidence uncertainty
 
+## Tool-Call Tasks
+
+Tool calls are handled as an extension of Ratchet's evidence loop, not as a tau-bench-specific recipe.
+
+- adapters execute the real environment loop and return structured trajectories
+- behavior diagnostics summarize tool status, tool errors, premature stopping, turn counts, and tool-call counts
+- affordance providers expose meaningful tool/action moves such as tool selection policy, argument grounding, precondition policy, and interaction completion
+- candidates still apply legal affordances through normal `AgentPatch` operations
+- evidence and reports distinguish task score gains from extra model calls, tool calls, turns, latency, and measurement spend
+
+Known public benchmark integrations should use the official simulator when available. The optional tau-bench bridge converts original `tau-bench` retail/airline results into Ratchet `RunRecord`s; static action-list proxies are useful only as development probes, not leaderboard-comparable tau-bench evaluation.
+
 Hard-coded task recipes, fallback proposal generators, or model-bypass switches violate the architecture. Tests may use fakes, but production optimization should fail visibly when a model role cannot produce valid output.
 
 ## Measurement Semantics
@@ -98,6 +112,8 @@ Ratchet separates deployed-policy tradeoffs from measurement spend.
 Deployed-policy metrics describe what a selected patch would cost or how fast it would run per case.
 
 Measurement budgets control development spend while evaluating candidates. Expensive model probes may still be measured when they provide useful frontier evidence, but deterministic code must not exceed configured measurement budgets.
+
+For interactive agents, measurement budgets may also cap candidate tool calls and interaction turns. These caps control development spend and runaway trajectories; they do not replace deployed-policy cost, latency, or quality constraints.
 
 Staged evaluation has distinct roles:
 

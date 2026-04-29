@@ -717,10 +717,21 @@ class RatchetReporter:
         return [
             f"- Ledger-estimated candidate measurement cost: `${float(measurement_cost.get('estimated_total_cost_usd') or 0.0):.6f}`",
             f"- Ledger-estimated candidate measurement tokens: {int(measurement_cost.get('estimated_total_tokens') or 0)}",
+            f"- Ledger-estimated model calls: {int(measurement_cost.get('estimated_model_calls') or 0)}",
+            f"- Ledger-estimated tool calls: {int(measurement_cost.get('estimated_tool_calls') or 0)}",
+            f"- Ledger-estimated interaction turns: {int(measurement_cost.get('estimated_turns') or 0)}",
             f"- Dev measurement budget used: `${float(result.manifest.get('dev_measurement_cost_used_usd') or 0.0):.6f}`"
             f" / `{result.manifest.get('max_dev_measurement_cost_usd')}`",
             f"- Holdout measurement budget used: `${float(result.manifest.get('holdout_measurement_cost_used_usd') or 0.0):.6f}`"
             f" / `{result.manifest.get('max_holdout_measurement_cost_usd')}`",
+            f"- Dev tool-call budget used: `{float(result.manifest.get('dev_measurement_tool_calls_used') or 0.0):.1f}`"
+            f" / `{result.manifest.get('max_dev_measurement_tool_calls')}`",
+            f"- Holdout tool-call budget used: `{float(result.manifest.get('holdout_measurement_tool_calls_used') or 0.0):.1f}`"
+            f" / `{result.manifest.get('max_holdout_measurement_tool_calls')}`",
+            f"- Dev turn budget used: `{float(result.manifest.get('dev_measurement_turns_used') or 0.0):.1f}`"
+            f" / `{result.manifest.get('max_dev_measurement_turns')}`",
+            f"- Holdout turn budget used: `{float(result.manifest.get('holdout_measurement_turns_used') or 0.0):.1f}`"
+            f" / `{result.manifest.get('max_holdout_measurement_turns')}`",
             f"- Expensive deployed-policy reporting threshold: `{result.manifest.get('expensive_candidate_cost_ratio')}x` baseline cost",
             f"- Total eval cost: `${float((run_cost.get('eval') or {}).get('cost_usd') or 0.0):.6f}`",
             f"- Fresh case evaluations: {((result.manifest.get('stats') or {}).get('fresh_case_evaluations', 0))}",

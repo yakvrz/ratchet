@@ -33,6 +33,9 @@ class EvidenceSummary:
     token_delta: float
     cost_delta: float
     latency_delta: float
+    model_call_delta: float
+    tool_call_delta: float
+    turn_delta: float
     sign_consistency: str
     confidence_tier: str
     baseline_instability_flags: list[str]
@@ -159,6 +162,9 @@ def build_evidence_summary(
         token_delta=comparison.token_delta,
         cost_delta=comparison.cost_delta,
         latency_delta=comparison.latency_delta,
+        model_call_delta=comparison.model_call_delta,
+        tool_call_delta=comparison.tool_call_delta,
+        turn_delta=comparison.turn_delta,
         sign_consistency=_sign_consistency(pass_gain=pass_gain, score_delta=comparison.score_delta),
         confidence_tier=confidence,
         baseline_instability_flags=flags,
@@ -177,13 +183,22 @@ def _measurement_cost(candidate: PatchSummary) -> dict[str, Any]:
     fresh_evaluations = [evaluation for evaluation in candidate.evaluations if not evaluation.cached]
     fresh_cost = sum(evaluation.record.metrics.cost_usd for evaluation in fresh_evaluations)
     fresh_tokens = sum(evaluation.record.metrics.total_tokens for evaluation in fresh_evaluations)
+    fresh_model_calls = sum(evaluation.record.metrics.model_calls for evaluation in fresh_evaluations)
+    fresh_tool_calls = sum(evaluation.record.metrics.tool_calls for evaluation in fresh_evaluations)
+    fresh_turns = sum(evaluation.record.metrics.turns for evaluation in fresh_evaluations)
     return {
         "candidate_samples": candidate.sample_count,
         "fresh_candidate_samples": len(fresh_evaluations),
         "candidate_mean_cost_usd": candidate.mean_cost_usd,
         "candidate_mean_total_tokens": candidate.mean_total_tokens,
+        "candidate_mean_model_calls": candidate.mean_model_calls,
+        "candidate_mean_tool_calls": candidate.mean_tool_calls,
+        "candidate_mean_turns": candidate.mean_turns,
         "estimated_total_cost_usd": fresh_cost,
         "estimated_total_tokens": int(fresh_tokens),
+        "estimated_model_calls": int(fresh_model_calls),
+        "estimated_tool_calls": int(fresh_tool_calls),
+        "estimated_turns": int(fresh_turns),
     }
 
 
@@ -261,6 +276,15 @@ def ledger_summary(records: list[EvidenceSummary]) -> dict[str, Any]:
             "estimated_total_tokens": int(
                 sum(record.measurement_cost.get("estimated_total_tokens", 0.0) for record in records)
             ),
+            "estimated_model_calls": int(
+                sum(record.measurement_cost.get("estimated_model_calls", 0.0) for record in records)
+            ),
+            "estimated_tool_calls": int(
+                sum(record.measurement_cost.get("estimated_tool_calls", 0.0) for record in records)
+            ),
+            "estimated_turns": int(
+                sum(record.measurement_cost.get("estimated_turns", 0.0) for record in records)
+            ),
         },
     }
 
@@ -314,6 +338,10 @@ def _baseline_instability_flags(
     candidate_finish = _finish_reason_counts(candidate)
     if reference_finish.get("length", 0) > candidate_finish.get("length", 0):
         flags.append("runtime_repeat_required")
+    reference_tool_problems = len(_tool_problem_case_ids(reference))
+    candidate_tool_problems = len(_tool_problem_case_ids(candidate))
+    if candidate_tool_problems < reference_tool_problems:
+        flags.append("tool_trajectory_repeat_required")
     return sorted(set(flags))
 
 
@@ -343,6 +371,39 @@ def _finish_reason_counts(summary: PatchSummary) -> Counter[str]:
             if finish_reason:
                 counts[finish_reason] += 1
     return counts
+
+
+def _tool_problem_case_ids(summary: PatchSummary) -> list[str]:
+    rows: list[str] = []
+    for case_id, evaluations in summary.grouped_evaluations.items():
+        if any(_has_tool_problem(evaluation) for evaluation in evaluations):
+            rows.append(case_id)
+    return sorted(rows)
+
+
+def _has_tool_problem(evaluation: Any) -> bool:
+    diagnostics = evaluation.record.diagnostics
+    if diagnostics.terminal_reason in {"premature_stop", "max_turns", "stopped_before_required_action"}:
+        return True
+    for turn in diagnostics.turns:
+        if turn.outcome in {
+            "invalid_tool_call",
+            "wrong_tool",
+            "missing_tool",
+            "unnecessary_tool",
+            "bad_tool_arguments",
+            "premature_stop",
+            "policy_violation",
+            "state_mutation_error",
+        }:
+            return True
+        for tool_call in turn.tool_calls:
+            if tool_call.status in {"error", "invalid"} or tool_call.error:
+                return True
+    return any(
+        label.startswith(("wrong_tool", "missing_tool", "invalid_tool", "bad_tool"))
+        for label in evaluation.grade.labels
+    )
 
 
 def _counter_delta(reference: Counter[str], candidate: Counter[str]) -> dict[str, int]:

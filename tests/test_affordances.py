@@ -16,7 +16,6 @@ class OptimizationAffordanceTests(unittest.TestCase):
             model_options=["base", "strong"],
             instructions={"system_prompt": "Classify."},
             output_contract="Return JSON.",
-            retrieval={"top_k": 3},
             runtime={"output_cap": 120},
             tools={
                 "search": AgentTool(
@@ -37,8 +36,34 @@ class OptimizationAffordanceTests(unittest.TestCase):
         self.assertIn(("targeted_few_shot", "few_shot"), keys)
         self.assertIn(("model_substitution", "model"), keys)
         self.assertIn(("runtime_tuning", "runtime"), keys)
-        self.assertIn(("retrieval_tuning", "retrieval"), keys)
+        self.assertIn(("tool_policy_revision", "tool"), keys)
         self.assertIn(("verifier_retry", "verifier"), keys)
+
+    def test_tool_trajectory_evidence_activates_tool_affordances(self) -> None:
+        spec = AgentSpec(
+            name="sample",
+            model="base",
+            tools={
+                "refund_order": AgentTool(
+                    name="refund_order",
+                    description="Refund an order.",
+                    policy="Use only after checking eligibility.",
+                )
+            },
+        )
+        surface = SurfaceGenerator().generate(spec, OptimizationObjective())
+
+        affordances = generate_optimization_affordances(
+            surface,
+            active_families=["tool_policy_revision"],
+            evidence={"tool_trajectory_defect": True},
+        )
+        mechanisms = {item.mechanism for item in affordances}
+
+        self.assertIn("tool_selection_policy", mechanisms)
+        self.assertIn("tool_argument_grounding", mechanisms)
+        self.assertIn("tool_precondition_policy", mechanisms)
+        self.assertTrue(any(item.suitability >= 0.7 for item in affordances))
 
     def test_validation_requires_affordance_to_cover_operation(self) -> None:
         spec = AgentSpec(

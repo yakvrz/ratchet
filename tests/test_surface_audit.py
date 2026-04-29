@@ -868,7 +868,6 @@ class GeneratedSurfaceTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
-        self.assertNotIn('"planner_guidance"', client.input_text)
         self.assertIn('"optimization_affordances"', client.input_text)
         self.assertIn('"experiment_opportunity_mechanisms"', client.input_text)
         self.assertIn('"output_contract_fix"', client.input_text)

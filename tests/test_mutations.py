@@ -30,7 +30,6 @@ class V2PatchSurfaceTests(unittest.TestCase):
             model_options=["small", "large"],
             instructions={"system_prompt": "Answer politely."},
             tools={"search": AgentTool(name="search", description="Search.", policy="Use search.", enabled=False)},
-            retrieval={"top_k": 4},
             output_contract="Return text.",
             runtime={"output_cap": 128},
         )
@@ -101,7 +100,7 @@ class V2PatchSurfaceTests(unittest.TestCase):
         objective = OptimizationObjective(
             mode="correctness",
             constraints=OptimizationConstraints(
-                allowed_edits=["instruction", "tool", "model", "retrieval", "runtime", "output"],
+                allowed_edits=["instruction", "tool", "model", "runtime", "output"],
                 allowed_models=["small", "large"],
             ),
         )
@@ -112,7 +111,6 @@ class V2PatchSurfaceTests(unittest.TestCase):
         self.assertIn("instructions.system_prompt", names)
         self.assertIn("tools.search.enabled", names)
         self.assertIn("tools.search.description", names)
-        self.assertIn("retrieval.top_k", names)
         self.assertIn("runtime.output_cap", names)
         self.assertIn("model", names)
         schemas = {target.name: target.value_schema for target in targets}

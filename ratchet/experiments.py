@@ -16,6 +16,10 @@ MECHANISM_CLASSES = {
     "contrastive_examples",
     "model_capability_probe",
     "efficiency_probe",
+    "tool_selection_policy",
+    "tool_argument_grounding",
+    "tool_precondition_policy",
+    "interaction_completion_policy",
     "ablation",
 }
 
@@ -26,8 +30,15 @@ MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
     "targeted_few_shot": {"representative_examples", "contrastive_examples", "semantic_boundary_rewrite", "ablation"},
     "model_substitution": {"runtime_defect_fix", "model_capability_probe", "efficiency_probe", "ablation"},
     "runtime_tuning": {"runtime_defect_fix", "efficiency_probe", "output_contract_fix", "ablation"},
-    "retrieval_tuning": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
-    "tool_policy_revision": {"efficiency_probe", "semantic_boundary_rewrite", "ablation"},
+    "tool_policy_revision": {
+        "efficiency_probe",
+        "semantic_boundary_rewrite",
+        "tool_selection_policy",
+        "tool_argument_grounding",
+        "tool_precondition_policy",
+        "interaction_completion_policy",
+        "ablation",
+    },
     "verifier_retry": {"runtime_defect_fix", "output_contract_fix", "semantic_boundary_rewrite", "ablation"},
 }
 
@@ -43,6 +54,7 @@ class TaskTheory:
     weak_slices: list[str]
     runtime_defects: dict[str, Any]
     output_defects: dict[str, Any]
+    tool_defects: dict[str, Any]
     example_coverage: dict[str, Any]
     cost_latency_profile: dict[str, Any]
     confidence: str
@@ -184,6 +196,7 @@ def build_task_theory(
 ) -> TaskTheory:
     diagnostics = build_behavior_diagnostics(summary)
     runtime = dict(diagnostics.get("runtime_reliability") or {})
+    tool_interaction = dict(diagnostics.get("tool_interaction") or {})
     invalid_case_ids = list(diagnostics.get("invalid_output_case_ids") or [])
     confusions = list(diagnostics.get("confusions") or [])
     weak_labels = [str(item) for item in diagnostics.get("weak_labels", [])]
@@ -192,6 +205,9 @@ def build_task_theory(
     if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
         bottleneck = "runtime_or_output_defect"
         evidence.append("runtime/output trace defects observed")
+    elif _has_tool_trajectory_defect(tool_interaction):
+        bottleneck = "tool_trajectory"
+        evidence.append("tool/environment trajectory defects observed")
     elif invalid_case_ids:
         bottleneck = "output_contract"
         evidence.append("invalid output failures observed")
@@ -215,6 +231,7 @@ def build_task_theory(
         bottleneck_class=bottleneck,
         residual_failure_modes=_residual_failure_modes(
             invalid_case_ids=invalid_case_ids,
+            tool_interaction=tool_interaction,
             confusions=confusions,
             weak_labels=weak_labels,
             diagnosis_categories=diagnosis_categories,
@@ -231,6 +248,15 @@ def build_task_theory(
             "invalid_output_case_ids": invalid_case_ids,
             "invalid_output_count": len(invalid_case_ids),
         },
+        tool_defects={
+            "tool_call_counts": tool_interaction.get("tool_call_counts", {}),
+            "tool_status_counts": tool_interaction.get("tool_status_counts", {}),
+            "turn_outcome_counts": tool_interaction.get("turn_outcome_counts", {}),
+            "terminal_reason_counts": tool_interaction.get("terminal_reason_counts", {}),
+            "tool_error_case_ids": tool_interaction.get("tool_error_case_ids", []),
+            "invalid_tool_call_case_ids": tool_interaction.get("invalid_tool_call_case_ids", []),
+            "premature_stop_case_ids": tool_interaction.get("premature_stop_case_ids", []),
+        },
         example_coverage={
             "example_count": len(proposal_example_bank.examples) if proposal_example_bank else 0,
             "label_counts": dict(label_counts),
@@ -244,6 +270,9 @@ def build_task_theory(
         cost_latency_profile={
             "mean_cost_usd": summary.mean_cost_usd,
             "mean_total_tokens": summary.mean_total_tokens,
+            "mean_model_calls": summary.mean_model_calls,
+            "mean_tool_calls": summary.mean_tool_calls,
+            "mean_turns": summary.mean_turns,
             "median_latency_s": summary.median_latency_s,
         },
         confidence="medium" if summary.case_count >= 20 else "low",
@@ -252,6 +281,7 @@ def build_task_theory(
             bottleneck=bottleneck,
             runtime=runtime,
             invalid_case_ids=invalid_case_ids,
+            tool_interaction=tool_interaction,
             confusions=confusions,
             weak_labels=weak_labels,
             example_source_ids=example_source_ids,
@@ -287,6 +317,7 @@ def compatible_families_for_mechanism(
 def _residual_failure_modes(
     *,
     invalid_case_ids: list[str],
+    tool_interaction: dict[str, Any],
     confusions: list[dict[str, Any]],
     weak_labels: list[str],
     diagnosis_categories: list[str],
@@ -294,6 +325,8 @@ def _residual_failure_modes(
     modes: list[str] = []
     if invalid_case_ids:
         modes.append("invalid_output")
+    if _has_tool_trajectory_defect(tool_interaction):
+        modes.append("tool_trajectory")
     if confusions:
         modes.append("label_confusion")
     if weak_labels:
@@ -307,6 +340,7 @@ def _experiment_opportunities(
     bottleneck: str,
     runtime: dict[str, Any],
     invalid_case_ids: list[str],
+    tool_interaction: dict[str, Any],
     confusions: list[dict[str, Any]],
     weak_labels: list[str],
     example_source_ids: dict[str, list[str]],
@@ -334,6 +368,33 @@ def _experiment_opportunities(
                 "measurements": ["invalid_output_delta", "score_delta", "non_target_regression"],
                 "rationale": "Invalid outputs should be tested as contract/format failures before adding semantic complexity.",
                 "disconfirming_result": "Invalid-output cases remain invalid or regress elsewhere.",
+            }
+        )
+    if _has_tool_trajectory_defect(tool_interaction):
+        target_slices = (
+            _slice_ids("invalid_tool", tool_interaction.get("invalid_tool_call_case_ids", []))
+            + _slice_ids("tool_error", tool_interaction.get("tool_error_case_ids", []))
+            + _slice_ids("premature_stop", tool_interaction.get("premature_stop_case_ids", []))
+        )
+        opportunities.append(
+            {
+                "mechanism_class": "tool_selection_policy",
+                "target_slices": target_slices or ["tool_trajectory"],
+                "candidate_roles": ["atomic", "control"],
+                "compatible_mechanisms": [
+                    "tool_argument_grounding",
+                    "tool_precondition_policy",
+                    "interaction_completion_policy",
+                ],
+                "measurements": [
+                    "score_delta",
+                    "tool_call_delta",
+                    "tool_error_delta",
+                    "turn_delta",
+                    "non_target_regression",
+                ],
+                "rationale": "Tool/environment traces indicate failure in action selection, arguments, ordering, or stopping.",
+                "disconfirming_result": "Tool trajectory errors persist or success improves only through excessive extra turns.",
             }
         )
     for row in confusions[:4]:
@@ -404,6 +465,15 @@ def _experiment_opportunities(
             }
         )
     return opportunities[:8]
+
+
+def _has_tool_trajectory_defect(tool_interaction: dict[str, Any]) -> bool:
+    return bool(
+        tool_interaction.get("tool_error_case_ids")
+        or tool_interaction.get("invalid_tool_call_case_ids")
+        or tool_interaction.get("premature_stop_case_ids")
+        or tool_interaction.get("turn_outcome_counts")
+    )
 
 
 def _target_example_labels(*, confusions: list[dict[str, Any]], weak_labels: list[str]) -> list[str]:

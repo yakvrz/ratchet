@@ -257,6 +257,10 @@ class ResearchRoleTests(unittest.TestCase):
             samples_per_case=1,
             measurement_cost_used_usd=0.02,
             max_measurement_cost_usd=0.05,
+            measurement_tool_calls_used=1,
+            max_measurement_tool_calls=10,
+            measurement_turns_used=2,
+            max_measurement_turns=20,
         )
 
         row = packet["evidence_ledger"]["candidate_evidence"][0]
@@ -264,6 +268,8 @@ class ResearchRoleTests(unittest.TestCase):
         self.assertAlmostEqual(row["marginal_measurement_cost_usd"], 0.02)
         self.assertAlmostEqual(row["remaining_measurement_budget_usd"], 0.03)
         self.assertAlmostEqual(row["deployed_cost_ratio"], 10.0)
+        self.assertEqual(packet["budget"]["remaining_measurement_tool_calls"], 9)
+        self.assertEqual(packet["budget"]["remaining_measurement_turns"], 18)
 
     def test_measurement_budget_guard_blocks_only_hard_budget_overrun(self) -> None:
         self.assertFalse(_measurement_budget_exhausted(used_usd=0.05, marginal_usd=0.04, max_usd=0.10))

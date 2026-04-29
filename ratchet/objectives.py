@@ -95,6 +95,18 @@ def compare_summaries(reference: PatchSummary, patch_summary: PatchSummary) -> C
         patch_by_id[case_id]["latency"] - reference_by_id[case_id]["latency"]
         for case_id in case_ids
     ]
+    model_call_deltas = [
+        patch_by_id[case_id]["model_calls"] - reference_by_id[case_id]["model_calls"]
+        for case_id in case_ids
+    ]
+    tool_call_deltas = [
+        patch_by_id[case_id]["tool_calls"] - reference_by_id[case_id]["tool_calls"]
+        for case_id in case_ids
+    ]
+    turn_deltas = [
+        patch_by_id[case_id]["turns"] - reference_by_id[case_id]["turns"]
+        for case_id in case_ids
+    ]
     flips = behavior_flip_summary(reference, patch_summary)
     pass_significance = PassSignificance(
         fixed_count=flips["fixed_count"],
@@ -112,6 +124,9 @@ def compare_summaries(reference: PatchSummary, patch_summary: PatchSummary) -> C
         token_ci=bootstrap_mean_ci(token_deltas),
         latency_delta=statistics.fmean(latency_deltas),
         latency_ci=bootstrap_mean_ci(latency_deltas),
+        model_call_delta=statistics.fmean(model_call_deltas),
+        tool_call_delta=statistics.fmean(tool_call_deltas),
+        turn_delta=statistics.fmean(turn_deltas),
         pass_significance=pass_significance,
     )
 
@@ -124,6 +139,9 @@ def _case_metric_rows(summary: PatchSummary) -> dict[str, dict[str, float]]:
             "cost": statistics.fmean(evaluation.record.metrics.cost_usd for evaluation in evaluations),
             "tokens": statistics.fmean(float(evaluation.record.metrics.total_tokens) for evaluation in evaluations),
             "latency": statistics.median(evaluation.record.metrics.latency_s for evaluation in evaluations),
+            "model_calls": statistics.fmean(float(evaluation.record.metrics.model_calls) for evaluation in evaluations),
+            "tool_calls": statistics.fmean(float(evaluation.record.metrics.tool_calls) for evaluation in evaluations),
+            "turns": statistics.fmean(float(evaluation.record.metrics.turns) for evaluation in evaluations),
         }
     return rows
 
