@@ -32,14 +32,6 @@ AgentSpec
   -> HoldoutValidation
 ```
 
-The important artifacts are:
-
-- `EditableTarget`: low-level adapter-exposed edit handle, such as an instruction, model choice, runtime setting, output contract, retrieval policy, tool policy, or few-shot bank.
-- `OptimizationAffordance`: the primary optimizer surface. It names a meaningful legal move, its mechanism, target, operations, expected measurements, risks, composition guidance, suitability, and evidence.
-- `ExperimentIntent`: planner output describing a research question and the affordances that may be used to test it. It contains no patch content.
-- `CandidateProposal`: implementer output that applies one or more affordances through concrete operations or proposal-safe few-shot selections.
-- `EvidenceLedger`: paired candidate-vs-reference evidence used by the measurement selector, reports, and promotion gates.
-
 Model roles are split deliberately:
 
 - diagnoser: labels failure modes from eval traces
@@ -48,6 +40,8 @@ Model roles are split deliberately:
 - measurement selector: chooses which already-valid candidates receive more measurement
 
 Ratchet validates every optimizer output. There are no hand-authored proposal recipes, candidate generators, or task-specific rule profiles in the core loop.
+
+See [docs/architecture.md](docs/architecture.md) for artifact definitions, role boundaries, measurement semantics, and failure policy.
 
 ## Quickstart
 
@@ -149,6 +143,7 @@ Helper utilities:
 - `env_file`
 - `dev_budget`
 - `holdout_budget`
+- `holdout_top_k`
 - `optimizer_model`
 - `optimizer_reasoning`
 - `diagnoser_model`
@@ -168,6 +163,7 @@ Helper utilities:
 - `max_dev_measurement_cost_usd`
 - `max_holdout_measurement_cost_usd`
 - `fail_fast`
+- `sanitize_examples`
 
 Optional eval health config:
 
@@ -197,6 +193,7 @@ allowed_edits = ["instruction", "tool", "retrieval", "runtime", "model", "output
 allowed_models = ["gpt-4o-2024-08-06", "gpt-5.4-mini"]
 max_cost_ratio = 1.0
 max_latency_ratio = 1.1
+max_patch_operations = 3
 min_correctness_delta = 0.0 # optional; defaults to strict improvement for correctness and non-inferiority for cost/latency
 ```
 
@@ -211,6 +208,7 @@ Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repea
 - `python3 -m ratchet check --config ratchet.toml`
 - `python3 -m ratchet eval-health --config ratchet.toml`
 - `python3 -m ratchet optimize --config ratchet.toml`
+- `python3 -m ratchet assess-ideation --run-dir results/run --spec ideation_assessment.json`
 
 `run` remains as an alias for `optimize`.
 
@@ -240,6 +238,8 @@ Each run writes:
 - `samples/clinc150_intent_agent/`
 
 The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary agentic benchmark for function-call and output-contract behavior. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
+
+See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, and criteria for adding new benchmarks.
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
