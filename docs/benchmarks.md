@@ -5,6 +5,7 @@ Ratchet's sample suite is intentionally limited to public, trusted assessment ve
 Current samples:
 
 - `samples/bfcl_function_calling_agent/`
+- `samples/taubench_action_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
 
@@ -24,6 +25,23 @@ It is useful because it exercises behavior that a policy optimizer should actual
 Good Ratchet behavior on BFCL means discovering mechanism-relevant candidates, preserving useful quality-frontier information even when deployed cost is high, and validating real holdout gains without using holdout feedback during search.
 
 BFCL is not a full leaderboard run in this repo. The sample is a fixed development assessment split large enough to inspect optimizer behavior while remaining affordable and reproducible.
+
+## tau-bench Action
+
+The tau-bench action sample is the primary workflow/action-policy probe.
+
+It is built from public `sierra-research/tau2-bench` task data across airline, retail, and telecom. The adapter does not run the full interactive tau-bench simulator. Instead, it turns each public task into an action-policy planning case: the agent sees task context, a compact tool catalog, and a policy excerpt, then predicts the required workflow action names.
+
+This is useful for:
+
+- tool/action selection
+- policy-constrained workflow planning
+- multi-domain customer-service tasks
+- output-contract behavior
+- model capability probes
+- few-shot and instruction improvements
+
+It should be interpreted as a Ratchet development assessment, not an official tau-bench leaderboard result. Official tau-bench evaluation requires the simulator, user model, domain state, and environment dynamics.
 
 ## BANKING77
 
@@ -73,10 +91,7 @@ Removed samples should stay removed unless they are replaced by a public benchma
 Ratchet still needs stronger public benchmarks for:
 
 - grounded retrieval QA
-- workflow/action agents
 
 For grounded retrieval QA, candidates worth evaluating include KILT-style tasks and RAG-focused benchmarks with public corpora and clear provenance requirements.
-
-For workflow/action agents, candidates worth evaluating include tau-bench style retail/airline tasks and browser/workflow environments such as WorkArena, depending on how much environment complexity Ratchet should support.
 
 These should be added only after the adapter/eval shape is clear enough to avoid reintroducing synthetic samples under a different name.
