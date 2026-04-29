@@ -495,6 +495,8 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     optimizer_model = "default-model"
                     optimizer_reasoning = "medium"
                     diagnoser_model = "diagnoser-model"
+                    research_theorist_model = "theorist-model"
+                    research_theorist_reasoning = "high"
                     research_planner_reasoning = "high"
                     candidate_implementer_model = "implementer-model"
                     measurement_selector_model = "selector-model"
@@ -508,6 +510,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 loaded.optimizer_role_models(),
                 {
                     "diagnoser": "diagnoser-model",
+                    "research_theorist": "theorist-model",
                     "research_planner": "default-model",
                     "candidate_implementer": "implementer-model",
                     "measurement_selector": "selector-model",
@@ -517,6 +520,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 loaded.optimizer_role_reasoning(),
                 {
                     "diagnoser": "medium",
+                    "research_theorist": "high",
                     "research_planner": "high",
                     "candidate_implementer": "medium",
                     "measurement_selector": "low",

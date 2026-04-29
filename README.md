@@ -155,6 +155,8 @@ Helper utilities:
 - `optimizer_reasoning`
 - `diagnoser_model`
 - `diagnoser_reasoning`
+- `research_theorist_model`
+- `research_theorist_reasoning`
 - `research_planner_model`
 - `research_planner_reasoning`
 - `candidate_implementer_model`
@@ -255,4 +257,4 @@ See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, a
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
-Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through generated `change_model` patches.
+Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_theorist_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through generated `change_model` patches.

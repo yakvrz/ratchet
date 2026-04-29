@@ -579,18 +579,23 @@ class RatchetReporter:
             return ["No task theory snapshots were recorded."]
         rows = []
         for item in result.task_theories[-5:]:
-            theory = item.get("task_theory") or {}
+            theory = item.get("research_theory") or item.get("task_theory") or {}
             opportunities = [
                 str(row.get("mechanism_class"))
                 for row in theory.get("experiment_opportunities", [])[:3]
                 if isinstance(row, dict) and row.get("mechanism_class")
             ]
+            hypotheses = [
+                str(row.get("hypothesis_id"))
+                for row in theory.get("hypotheses", [])[:3]
+                if isinstance(row, dict) and row.get("hypothesis_id")
+            ]
             rows.append(
                 "- "
                 f"iteration={item.get('iteration')} parent=`{item.get('parent_patch_hash')}` "
-                f"bottleneck=`{theory.get('bottleneck_class')}` "
+                f"primary=`{theory.get('primary_hypothesis_id') or theory.get('bottleneck_class')}` "
+                f"hypotheses={json.dumps(hypotheses)} "
                 f"residual={json.dumps(theory.get('residual_failure_modes', []))} "
-                f"weak={json.dumps(theory.get('weak_slices', [])[:6])} "
                 f"opportunities={json.dumps(opportunities)} "
                 f"confidence={theory.get('confidence')}"
             )

@@ -9,7 +9,16 @@ from typing import Any
 from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_applications
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import CANDIDATE_ROLES, ExperimentIntent, ExperimentSpec, TaskTheory, build_task_theory
+from ratchet.experiments import (
+    CANDIDATE_ROLES,
+    EvidencePacket,
+    ExperimentIntent,
+    ExperimentSpec,
+    ResearchTheory,
+    TaskTheory,
+    build_evidence_packet,
+    build_task_theory,
+)
 from ratchet.io import extract_json_object, patch_hash
 from ratchet.model_client import (
     ResponsesModelClient,
@@ -37,8 +46,8 @@ PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
     "affordance_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
-    "research questions, mechanisms, target slices, controls, and measurements. Treat task_theory.experiment_opportunities "
-    "as supporting evidence only; they are not patch recipes. Each candidate must include applications[]. "
+    "research questions, mechanisms, target slices, controls, and measurements. Treat research_theory "
+    "as the causal context for implementation; opportunities are not patch recipes. Each candidate must include applications[]. "
     "Each application cites one optimization_affordance by affordance_id and supplies either operation or "
     "selection. Use operation for patch edits and selection.source_case_ids for few-shot examples from "
     "proposal_example_bank. Do not inline few-shot examples. Family, mechanism, measurements, and risks are "
@@ -116,6 +125,8 @@ class CandidateImplementer:
         diagnosis: FailureDiagnosis | None = None,
         diagnoses: list[FailureDiagnosis] | None = None,
         task_theory: TaskTheory | None = None,
+        research_theory: ResearchTheory | None = None,
+        evidence_packet: EvidencePacket | None = None,
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
@@ -135,6 +146,13 @@ class CandidateImplementer:
                 proposal_example_count=len(proposal_example_bank.examples) if proposal_example_bank else 0,
             )
         diagnosis_context = list(diagnoses or ([] if diagnosis is None else [diagnosis]))
+        if evidence_packet is None:
+            evidence_packet = build_evidence_packet(
+                summary=summary,
+                diagnoses=diagnosis_context,
+                objective=objective,
+                proposal_example_bank=proposal_example_bank,
+            )
         if task_theory is None:
             task_theory = build_task_theory(
                 summary=summary,
@@ -142,11 +160,13 @@ class CandidateImplementer:
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
+        if research_theory is None:
+            research_theory = _legacy_research_theory_from_task_theory(task_theory)
         active_affordances = list(affordances or generate_optimization_affordances(
             surface,
             objective=objective,
             active_families=search_hypothesis.active_families,
-            evidence=_affordance_evidence(task_theory, diagnosis_context),
+            evidence=_affordance_evidence(evidence_packet, diagnosis_context),
         ))
         llm_proposals, affordance_considerations = self._llm_proposals(
             summary,
@@ -155,7 +175,8 @@ class CandidateImplementer:
             diagnoses=diagnosis_context,
             history=history,
             search_hypothesis=search_hypothesis,
-            task_theory=task_theory,
+            research_theory=research_theory,
+            evidence_packet=evidence_packet,
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
             experiment_intents=experiment_intents or [],
@@ -297,7 +318,8 @@ class CandidateImplementer:
         diagnoses: list[FailureDiagnosis],
         history: list[dict[str, Any]],
         search_hypothesis: SearchHypothesis,
-        task_theory: TaskTheory,
+        research_theory: ResearchTheory,
+        evidence_packet: EvidencePacket,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
         experiment_intents: list[ExperimentIntent],
@@ -319,7 +341,9 @@ class CandidateImplementer:
             "proposal_budget": proposal_budget,
             "transform_library": active_family_rows,
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
-            "task_theory": _compact_task_theory(task_theory),
+            "research_theory": _research_theory_prompt_view(research_theory),
+            "task_theory": _research_theory_prompt_view(research_theory),
+            "evidence_packet": _compact_evidence_packet(evidence_packet),
             "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
             "optimization_affordances": [_compact_affordance(affordance) for affordance in affordances],
             "proposal_policy": {
@@ -625,7 +649,7 @@ class CandidateImplementer:
             raw_experiments=raw_experiments,
             parsed_candidates=candidates,
             experiment_intents=experiment_intents,
-            task_theory=task_theory,
+            research_theory=research_theory,
             proposal_budget=proposal_budget,
         )
         considerations = [
@@ -777,6 +801,84 @@ def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
     }
 
 
+def _research_theory_prompt_view(research_theory: ResearchTheory) -> dict[str, Any]:
+    row = research_theory.to_dict()
+    return {
+        "theory_id": row.get("theory_id"),
+        "summary": str(row.get("summary") or "")[:900],
+        "primary_hypothesis_id": row.get("primary_hypothesis_id"),
+        "hypotheses": [
+            {
+                "hypothesis_id": item.get("hypothesis_id"),
+                "statement": str(item.get("statement") or "")[:700],
+                "mechanism_class": item.get("mechanism_class"),
+                "target_slices": list(item.get("target_slices") or [])[:6],
+                "supporting_evidence": list(item.get("supporting_evidence") or [])[:5],
+                "competing_evidence": list(item.get("competing_evidence") or [])[:4],
+                "disconfirming_result": str(item.get("disconfirming_result") or "")[:320],
+                "confidence": item.get("confidence"),
+            }
+            for item in list(row.get("hypotheses") or [])[:5]
+            if isinstance(item, dict)
+        ],
+        "experiment_opportunities": [
+            {
+                "opportunity_id": item.get("opportunity_id"),
+                "hypothesis_ids": list(item.get("hypothesis_ids") or [])[:4],
+                "mechanism_class": item.get("mechanism_class"),
+                "target_slices": list(item.get("target_slices") or [])[:6],
+                "rationale": str(item.get("rationale") or "")[:600],
+                "measurements": list(item.get("measurements") or [])[:6],
+                "disconfirming_result": str(item.get("disconfirming_result") or "")[:320],
+                "candidate_roles": list(item.get("candidate_roles") or [])[:5],
+                "compatible_mechanisms": list(item.get("compatible_mechanisms") or [])[:5],
+                "affordance_ids": list(item.get("affordance_ids") or [])[:10],
+                "priority": item.get("priority"),
+            }
+            for item in list(row.get("experiment_opportunities") or [])[:6]
+            if isinstance(item, dict)
+        ],
+        "experiment_opportunity_mechanisms": [
+            str(item.get("mechanism_class"))
+            for item in list(row.get("experiment_opportunities") or [])[:6]
+            if isinstance(item, dict) and item.get("mechanism_class")
+        ],
+        "disconfirmed_explanations": list(row.get("disconfirmed_explanations") or [])[:5],
+        "surprising_observations": list(row.get("surprising_observations") or [])[:5],
+        "prior_lessons": list(row.get("prior_lessons") or [])[:5],
+        "uncertainty": str(row.get("uncertainty") or "")[:500],
+        "confidence": row.get("confidence"),
+    }
+
+
+def _compact_evidence_packet(evidence_packet: EvidencePacket) -> dict[str, Any]:
+    row = evidence_packet.to_dict()
+    return {
+        "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:8],
+        "label_confusions": list(row.get("label_confusions") or [])[:6],
+        "weak_slices": list(row.get("weak_slices") or [])[:8],
+        "runtime_defects": row.get("runtime_defects", {}),
+        "output_defects": row.get("output_defects", {}),
+        "tool_defects": row.get("tool_defects", {}),
+        "example_coverage": {
+            "example_count": (row.get("example_coverage") or {}).get("example_count"),
+            "weak_labels_without_examples": list(
+                (row.get("example_coverage") or {}).get("weak_labels_without_examples") or []
+            )[:8],
+            "target_label_source_case_ids": {
+                str(label): list(case_ids)[:4]
+                for label, case_ids in ((row.get("example_coverage") or {}).get("target_label_source_case_ids") or {}).items()
+                if isinstance(case_ids, list)
+            },
+            "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=8),
+        },
+        "cost_latency_profile": row.get("cost_latency_profile", {}),
+        "diagnosis_categories": list(row.get("diagnosis_categories") or [])[:8],
+        "confidence": row.get("confidence"),
+        "evidence": list(row.get("evidence") or [])[:8],
+    }
+
+
 def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
     return {
         "intent_id": intent.intent_id,
@@ -815,15 +917,22 @@ def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
     }
 
 
-def _affordance_evidence(task_theory: TaskTheory, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
-    theory = task_theory.to_dict()
-    runtime = theory.get("runtime_defects") or {}
-    output = theory.get("output_defects") or {}
+def _affordance_evidence(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+    packet = evidence_packet.to_dict()
+    runtime = packet.get("runtime_defects") or {}
+    output = packet.get("output_defects") or {}
+    tool = packet.get("tool_defects") or {}
     return {
-        "bottleneck_class": theory.get("bottleneck_class"),
+        "bottleneck_class": ",".join(packet.get("residual_failure_modes") or []),
         "runtime_defect": bool(runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids")),
         "invalid_output": bool(output.get("invalid_output_count")),
-        "example_coverage": bool((theory.get("example_coverage") or {}).get("example_count")),
+        "tool_trajectory_defect": bool(
+            tool.get("tool_error_case_ids")
+            or tool.get("invalid_tool_call_case_ids")
+            or tool.get("premature_stop_case_ids")
+            or tool.get("turn_outcome_counts")
+        ),
+        "example_coverage": bool((packet.get("example_coverage") or {}).get("example_count")),
         "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }
 
@@ -833,7 +942,7 @@ def _audit_experiment_plan(
     raw_experiments: list[Any],
     parsed_candidates: list[CandidateProposal],
     experiment_intents: list[ExperimentIntent],
-    task_theory: TaskTheory,
+    research_theory: ResearchTheory,
     proposal_budget: int,
 ) -> dict[str, Any]:
     experiment_count = sum(1 for item in raw_experiments if isinstance(item, dict))
@@ -842,7 +951,7 @@ def _audit_experiment_plan(
     primary_mechanisms = [intent.mechanism_class for intent in experiment_intents]
     opportunity_mechanisms = [
         str(item.get("mechanism_class"))
-        for item in task_theory.experiment_opportunities
+        for item in research_theory.to_dict().get("experiment_opportunities", [])
         if isinstance(item, dict) and item.get("mechanism_class")
     ]
     candidate_mechanisms = set(mechanism_counts)
@@ -882,12 +991,12 @@ def _audit_experiment_plan(
         warnings.append("candidate implementer did not return any requested experiment intent IDs")
     if mechanism_mismatch_ids:
         warnings.append("returned experiment mechanism differed from requested intent mechanism")
-    if task_theory.bottleneck_class == "semantic_boundary_confusion":
+    if research_theory.bottleneck_class == "semantic_boundary_rewrite":
         has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
         has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
         if has_examples and not has_rewrite:
             warnings.append("example experiment lacks a semantic-boundary rewrite control")
-        if _semantic_opportunity_has_examples(task_theory) and has_rewrite and not has_examples:
+        if _semantic_opportunity_has_examples(research_theory) and has_rewrite and not has_examples:
             warnings.append("semantic-boundary plan did not test available example anchoring")
     if role_counts.get("composed", 0) and not (role_counts.get("control", 0) or role_counts.get("ablation", 0)):
         warnings.append("composed candidate lacks a control or ablation in the returned plan")
@@ -912,14 +1021,85 @@ def _audit_experiment_plan(
     }
 
 
-def _semantic_opportunity_has_examples(task_theory: TaskTheory) -> bool:
-    for row in task_theory.experiment_opportunities:
+def _semantic_opportunity_has_examples(research_theory: ResearchTheory) -> bool:
+    for row in research_theory.to_dict().get("experiment_opportunities", []):
         if row.get("mechanism_class") != "semantic_boundary_rewrite":
             continue
         source_ids = row.get("source_case_ids_by_label")
         if isinstance(source_ids, dict) and any(source_ids.values()):
             return True
     return False
+
+
+def _legacy_research_theory_from_task_theory(task_theory: TaskTheory) -> ResearchTheory:
+    opportunities = []
+    hypothesis_id = "legacy_h1"
+    mechanism = _legacy_mechanism_for_bottleneck(task_theory.bottleneck_class)
+    for index, row in enumerate(task_theory.experiment_opportunities or [], start=1):
+        if not isinstance(row, dict):
+            continue
+        opportunities.append(
+            {
+                "opportunity_id": f"legacy_opp_{index}",
+                "hypothesis_ids": [hypothesis_id],
+                "mechanism_class": str(row.get("mechanism_class") or mechanism),
+                "target_slices": list(row.get("target_slices") or [])[:6],
+                "rationale": str(row.get("rationale") or "Legacy task-theory opportunity."),
+                "measurements": list(row.get("measurements") or [])[:6],
+                "disconfirming_result": str(row.get("disconfirming_result") or ""),
+                "candidate_roles": list(row.get("candidate_roles") or ["atomic"])[:5],
+                "compatible_mechanisms": list(row.get("compatible_mechanisms") or [])[:5],
+                "affordance_ids": list(row.get("affordance_ids") or [])[:10],
+                "priority": index,
+            }
+        )
+    if not opportunities:
+        opportunities.append(
+            {
+                "opportunity_id": "legacy_opp_1",
+                "hypothesis_ids": [hypothesis_id],
+                "mechanism_class": mechanism,
+                "target_slices": ["failed_cases"],
+                "rationale": "Legacy compatibility theory from deterministic task evidence.",
+                "measurements": ["score_delta", "non_target_regression"],
+                "disconfirming_result": "No improvement on staged eval.",
+                "candidate_roles": ["atomic"],
+                "priority": 1,
+            }
+        )
+    return ResearchTheory.from_dict(
+        {
+            "theory_id": "legacy_task_theory",
+            "summary": "Compatibility research theory derived from legacy task-theory evidence.",
+            "primary_hypothesis_id": hypothesis_id,
+            "hypotheses": [
+                {
+                    "hypothesis_id": hypothesis_id,
+                    "statement": "Legacy deterministic task theory identified the active optimization mechanism.",
+                    "mechanism_class": mechanism,
+                    "target_slices": list(task_theory.weak_slices[:6]) or ["failed_cases"],
+                    "supporting_evidence": list(task_theory.evidence[:6]),
+                    "competing_evidence": [],
+                    "disconfirming_result": "No improvement on staged eval.",
+                    "confidence": task_theory.confidence,
+                }
+            ],
+            "experiment_opportunities": opportunities,
+            "confidence": task_theory.confidence,
+        }
+    )
+
+
+def _legacy_mechanism_for_bottleneck(bottleneck: str) -> str:
+    if bottleneck == "runtime_or_output_defect":
+        return "runtime_defect_fix"
+    if bottleneck == "tool_trajectory":
+        return "tool_selection_policy"
+    if bottleneck == "output_contract":
+        return "output_contract_fix"
+    if bottleneck == "efficiency_tradeoff":
+        return "efficiency_probe"
+    return "semantic_boundary_rewrite"
 
 
 def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
