@@ -470,7 +470,8 @@ class BranchingAdapter:
             labels=[] if passed else ["failed"],
         )
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, patch: AgentPatch | None, out_dir: Path) -> None:
+        patch = patch or AgentPatch.empty()
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
 
@@ -496,7 +497,7 @@ class SleepingAdapter:
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0, passed=True)
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, patch: AgentPatch | None, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
 
 

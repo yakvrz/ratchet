@@ -119,7 +119,8 @@ class FakeAdapter:
             return GradeResult(score=1.0, passed=True, labels=[])
         return GradeResult(score=0.0, passed=False, labels=["failed"], notes="Fake exact-match grader")
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, patch: AgentPatch | None, out_dir: Path) -> None:
+        patch = patch or AgentPatch.empty()
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
         (out_dir / "agent_spec.json").write_text(json.dumps(BASE_SPEC.apply_patch(patch).to_dict(), indent=2, sort_keys=True))

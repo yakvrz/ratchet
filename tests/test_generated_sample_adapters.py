@@ -4,6 +4,8 @@ import json
 import unittest
 
 from ratchet.adapter_generation import GeneratedSingleCallAdapter
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import TransformProgram
 from ratchet.types import AgentPatch, EvalCase, PatchOperation
 from samples.banking77_intent_agent.ratchet_adapter import Banking77IntentAdapter
 from samples.bfcl_function_calling_agent.ratchet_adapter import BfclFunctionCallingAdapter
@@ -85,24 +87,41 @@ class GeneratedSampleAdapterTests(unittest.TestCase):
         self.assertTrue(grade.passed)
         self.assertIn("label_rule", record.diagnostics.metadata["rendered_context_sections"])
 
-        patched = adapter.run_case(
-            case,
-            AgentPatch(
-                operations=[
-                    PatchOperation(
-                        op="add_instruction",
-                        target="instructions.label_rule",
-                        value="Use concise labels.",
-                    )
-                ]
-            ),
+        program = TransformProgram.from_dict(
+            {
+                "id": "C_add_label_rule",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "replace_context_section",
+                        "section": "label_rule",
+                        "content": "Use concise labels.",
+                    }
+                ],
+            }
         )
+        candidate = TransformCompiler().compile_or_raise(program, adapter.surface_spec())
+        patched = adapter.run_case(case, candidate)
         self.assertIn("Use concise labels.", str(client.calls[-1]["instructions"]))
         self.assertEqual(
             patched.diagnostics.metadata["transform_compile_report"]["status"],
             "compiled",
         )
         self.assertTrue(patched.diagnostics.metadata["transform_trace"])
+
+        with self.assertRaisesRegex(TypeError, "CompiledCandidate"):
+            adapter.run_case(
+                case,
+                AgentPatch(
+                    operations=[
+                        PatchOperation(
+                            op="add_instruction",
+                            target="instructions.label_rule",
+                            value="legacy patches are not adapter candidates",
+                        )
+                    ]
+                ),  # type: ignore[arg-type]
+            )
 
     def test_clinc150_uses_generated_single_call_adapter(self) -> None:
         adapter = Clinc150IntentAdapter(client=FakeClient({"label": "weather"}))

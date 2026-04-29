@@ -224,7 +224,7 @@ class RatchetReporter:
             },
         )
         export_dir = self.out_dir / "exported_patch"
-        self.adapter.export(result.selected_patch, export_dir)
+        self.adapter.export(None if result.selected_patch.is_empty else result.selected_patch, export_dir)
         self._write_report(result)
         self._write_summary_html(result)
         self._write_plots(result)
