@@ -30,47 +30,6 @@ EDIT_KINDS = {
 
 
 @dataclass(frozen=True)
-class TargetSemantics:
-    role: str = "generic_policy"
-    axes: list[str] = field(default_factory=list)
-    scope: str = "global"
-    risks: list[str] = field(default_factory=list)
-    measurement_hints: list[str] = field(default_factory=list)
-    confidence: float = 0.0
-    source: str = "default"
-
-    def __post_init__(self) -> None:
-        if not self.role:
-            raise ValueError("TargetSemantics role must be non-empty.")
-        if self.scope not in {"local", "slice", "global"}:
-            raise ValueError(f"Unsupported TargetSemantics scope: {self.scope}")
-        if self.confidence < 0.0 or self.confidence > 1.0:
-            raise ValueError("TargetSemantics confidence must be between 0.0 and 1.0.")
-        object.__setattr__(self, "axes", [str(item) for item in self.axes])
-        object.__setattr__(self, "risks", [str(item) for item in self.risks])
-        object.__setattr__(self, "measurement_hints", [str(item) for item in self.measurement_hints])
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any] | "TargetSemantics" | None) -> "TargetSemantics":
-        if payload is None:
-            return cls()
-        if isinstance(payload, TargetSemantics):
-            return payload
-        return cls(
-            role=str(payload.get("role", "generic_policy")),
-            axes=[str(item) for item in payload.get("axes", [])],
-            scope=str(payload.get("scope", "global")),
-            risks=[str(item) for item in payload.get("risks", [])],
-            measurement_hints=[str(item) for item in payload.get("measurement_hints", [])],
-            confidence=float(payload.get("confidence", 0.0)),
-            source=str(payload.get("source", "default")),
-        )
-
-
-@dataclass(frozen=True)
 class AgentTool:
     name: str
     description: str = ""
@@ -107,7 +66,6 @@ class AgentSpec:
     runtime: dict[str, Any] = field(default_factory=dict)
     model_options: list[str] = field(default_factory=list)
     few_shot: list[dict[str, Any]] = field(default_factory=list)
-    target_semantics: dict[str, TargetSemantics] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -129,9 +87,6 @@ class AgentSpec:
             "runtime": dict(self.runtime),
             "model_options": list(self.model_options),
             "few_shot": [dict(item) for item in self.few_shot],
-            "target_semantics": {
-                key: semantics.to_dict() for key, semantics in sorted(self.target_semantics.items())
-            },
             "metadata": dict(self.metadata),
         }
 
@@ -152,10 +107,6 @@ class AgentSpec:
             runtime=dict(payload.get("runtime", {})),
             model_options=[str(item) for item in payload.get("model_options", [])],
             few_shot=[dict(item) for item in payload.get("few_shot", [])],
-            target_semantics={
-                str(key): TargetSemantics.from_dict(value)
-                for key, value in payload.get("target_semantics", {}).items()
-            },
             metadata=dict(payload.get("metadata", {})),
         )
 
@@ -179,7 +130,6 @@ class EditableTarget:
     choices: list[str] = field(default_factory=list)
     max_chars: int | None = None
     value_schema: dict[str, Any] = field(default_factory=dict)
-    semantics: TargetSemantics = field(default_factory=TargetSemantics)
 
     def __post_init__(self) -> None:
         if self.kind not in EDIT_KINDS:
@@ -205,7 +155,6 @@ class EditableTarget:
             choices=[str(item) for item in payload.get("choices", [])],
             max_chars=int(payload["max_chars"]) if payload.get("max_chars") is not None else None,
             value_schema=dict(payload.get("value_schema", {})),
-            semantics=TargetSemantics.from_dict(payload.get("semantics")),
         )
 
 

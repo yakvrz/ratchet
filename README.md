@@ -234,11 +234,10 @@ Each run writes:
 ## Samples
 
 - `samples/bfcl_function_calling_agent/`
-- `samples/taubench_action_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
 
-The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary agentic benchmark for function-call and output-contract behavior. The tau-bench action sample is the primary workflow/action-policy probe. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
+The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary agentic benchmark for function-call and output-contract behavior. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
 
 See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, and criteria for adding new benchmarks.
 

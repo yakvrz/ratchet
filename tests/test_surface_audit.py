@@ -512,7 +512,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
         ]
         self.assertTrue(efficiency_opportunities)
         self.assertIn(
-            "model_substitution.efficiency_probe.model_choice.model",
+            "model_substitution.efficiency_probe.model.model",
             efficiency_opportunities[0]["affordance_ids"],
         )
 
@@ -919,9 +919,7 @@ class GeneratedSurfaceTests(unittest.TestCase):
                     intent_id="requested_intent",
                     mechanism_class="semantic_boundary_rewrite",
                     hypothesis="Implement only this requested intent.",
-                    affordance_ids=[
-                        "prompt_rewrite.semantic_boundary_rewrite.task_instructions.instructions_system_prompt"
-                    ],
+                    affordance_ids=["prompt_rewrite.semantic_boundary_rewrite.instruction.instructions_system_prompt"],
                 )
             ],
         )

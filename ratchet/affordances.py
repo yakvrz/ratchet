@@ -145,9 +145,6 @@ def validate_candidate_applications(
     if not applications:
         return "candidate must include at least one affordance application"
     by_id = {affordance.affordance_id: affordance for affordance in affordances}
-    operation_count = 0
-    operation_signatures: set[tuple[str, str]] = set()
-    selection_count = 0
     for application in applications:
         affordance_id = str(getattr(application, "affordance_id", ""))
         affordance = by_id.get(affordance_id)
@@ -156,14 +153,11 @@ def validate_candidate_applications(
         operation = getattr(application, "operation", None)
         selection = getattr(application, "selection", None)
         if operation is not None:
-            operation_count += 1
-            operation_signatures.add((str(operation.op), str(operation.target)))
             if operation.op not in affordance.ops:
                 return f"operation {operation.op!r} is not allowed by affordance {affordance_id!r}"
             if operation.target not in {affordance.target_name, affordance.target_path}:
                 return f"operation target {operation.target!r} is not covered by affordance {affordance_id!r}"
         elif selection:
-            selection_count += 1
             if affordance.family != "targeted_few_shot":
                 return f"affordance {affordance_id!r} does not support example selection"
             source_ids = selection.get("source_case_ids")
@@ -171,8 +165,6 @@ def validate_candidate_applications(
                 return f"affordance {affordance_id!r} example selection requires non-empty source_case_ids"
         else:
             return f"affordance application {affordance_id!r} must include operation or selection"
-    if operation_count > 0 and len(operation_signatures) == 1 and selection_count == 0 and len(applications) != 1:
-        return "single-operation candidates must cite exactly one covering affordance"
     return None
 
 
@@ -197,7 +189,7 @@ class PromptAffordanceProvider:
     ) -> list[OptimizationAffordance]:
         if family.name != "prompt_rewrite" or target.kind != "instruction":
             return []
-        role = target.semantics.role
+        role = _semantic_role(target)
         mechanisms = ["semantic_boundary_rewrite", "output_contract_fix"]
         if evidence.get("runtime_defect"):
             mechanisms.append("runtime_defect_fix")
@@ -207,13 +199,10 @@ class PromptAffordanceProvider:
                 family=family,
                 mechanism=mechanism,
                 label=_label("Rewrite", role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(
-                    target,
-                    "neighbor_label_regression" if mechanism == "semantic_boundary_rewrite" else "contract_regression",
-                ),
+                semantic_role=role,
+                behavioral_axes=_axes_for_mechanism(mechanism, role),
+                expected_scope="slice" if mechanism == "semantic_boundary_rewrite" else "global",
+                risk="neighbor_label_regression" if mechanism == "semantic_boundary_rewrite" else "contract_regression",
                 composition=AffordanceComposition(
                     can_pair_with=["targeted_few_shot.contrastive_examples.*", "targeted_few_shot.representative_examples.*"],
                     should_not_pair_with=[],
@@ -236,10 +225,10 @@ class OutputContractAffordanceProvider:
                 family=family,
                 mechanism="output_contract_fix",
                 label="Tighten output contract",
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target("output_contract_fix", target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "contract_regression"),
+                semantic_role="output_contract",
+                behavioral_axes=["format_validity", "parser_compatibility"],
+                expected_scope="global",
+                risk="contract_regression",
                 composition=AffordanceComposition(can_pair_with=["runtime_tuning.output_contract_fix.*"]),
                 suitability=_suitability(mechanism="output_contract_fix", target=target, objective=objective, evidence=evidence),
                 evidence=_evidence_for("output_contract_fix", target, evidence),
@@ -259,10 +248,10 @@ class FewShotAffordanceProvider:
                     family=family,
                     mechanism=mechanism,
                     label=("Select contrastive examples" if mechanism == "contrastive_examples" else "Select representative examples"),
-                    semantic_role=target.semantics.role,
-                    behavioral_axes=_axes_for_target(mechanism, target),
-                    expected_scope=target.semantics.scope,
-                    risk=_risk_for_target(target, "neighbor_label_regression"),
+                    semantic_role="example_bank",
+                    behavioral_axes=["example_anchoring", "classification_boundary"],
+                    expected_scope="slice",
+                    risk="neighbor_label_regression",
                     composition=AffordanceComposition(
                         can_pair_with=["prompt_rewrite.semantic_boundary_rewrite.*"],
                         should_not_pair_with=[],
@@ -285,13 +274,10 @@ class ModelAffordanceProvider:
                 family=family,
                 mechanism=mechanism,
                 label="Probe model capability" if mechanism == "model_capability_probe" else "Probe model efficiency",
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(
-                    target,
-                    "cost_latency_regression" if mechanism == "model_capability_probe" else "quality_regression",
-                ),
+                semantic_role="model_choice",
+                behavioral_axes=["model_capability"] if mechanism == "model_capability_probe" else ["cost_latency_tradeoff"],
+                expected_scope="global",
+                risk="cost_latency_regression" if mechanism == "model_capability_probe" else "quality_regression",
                 composition=AffordanceComposition(should_not_pair_with=["prompt_rewrite.semantic_boundary_rewrite.*"]),
                 suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
                 evidence=_evidence_for(mechanism, target, evidence),
@@ -312,11 +298,11 @@ class RuntimeAffordanceProvider:
                 target=target,
                 family=family,
                 mechanism=mechanism,
-                label=_label("Tune", target.semantics.role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "cost_latency_regression"),
+                label=_label("Tune", _semantic_role(target)),
+                semantic_role=_semantic_role(target),
+                behavioral_axes=_axes_for_mechanism(mechanism, _semantic_role(target)),
+                expected_scope="global",
+                risk="cost_latency_regression",
                 composition=AffordanceComposition(can_pair_with=["output_contract_tightening.output_contract_fix.*"]),
                 suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
                 evidence=_evidence_for(mechanism, target, evidence),
@@ -336,11 +322,11 @@ class PassthroughAffordanceProvider:
                 target=target,
                 family=family,
                 mechanism=mechanism,
-                label=_label("Revise", target.semantics.role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "quality_regression"),
+                label=_label("Revise", _semantic_role(target)),
+                semantic_role=_semantic_role(target),
+                behavioral_axes=_axes_for_mechanism(mechanism, _semantic_role(target)),
+                expected_scope="slice" if mechanism == "semantic_boundary_rewrite" else "global",
+                risk="quality_regression",
                 suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
                 evidence=_evidence_for(mechanism, target, evidence),
             )
@@ -389,7 +375,7 @@ def _make_affordance(
         behavioral_axes=behavioral_axes,
         expected_scope=expected_scope,
         risk=risk,
-        measurements=_merge_unique(_measurements_for(mechanism, family), target.semantics.measurement_hints),
+        measurements=_measurements_for(mechanism, family),
         composition=composition or AffordanceComposition(),
         suitability=suitability,
         evidence=evidence,
@@ -413,7 +399,7 @@ def _affordance_id(family: str, mechanism: str, target: EditableTarget) -> str:
         [
             family,
             mechanism,
-            _canonical_segment(target.semantics.role),
+            target.kind,
             _canonical_segment(target.name),
         ]
     )
@@ -423,16 +409,23 @@ def _canonical_segment(value: str) -> str:
     return value.replace(".", "_").replace("/", "_").replace(" ", "_").lower()
 
 
+def _semantic_role(target: EditableTarget) -> str:
+    name = target.name.lower()
+    if "label" in name or "intent" in name or "alias" in name:
+        return "label_alias_mapping"
+    if "system" in name or "instruction" in name:
+        return "task_instructions"
+    if "output" in name or target.kind == "output":
+        return "output_contract"
+    if "runtime" in name or target.kind == "runtime":
+        return "runtime_control"
+    if target.kind == "few_shot":
+        return "example_bank"
+    return f"{target.kind}_policy"
+
+
 def _label(verb: str, role: str) -> str:
     return f"{verb} {role.replace('_', ' ')}"
-
-
-def _axes_for_target(mechanism: str, target: EditableTarget) -> list[str]:
-    return _merge_unique(_axes_for_mechanism(mechanism, target.semantics.role), target.semantics.axes)
-
-
-def _risk_for_target(target: EditableTarget, default: str) -> str:
-    return target.semantics.risks[0] if target.semantics.risks else default
 
 
 def _axes_for_mechanism(mechanism: str, role: str) -> list[str]:
@@ -464,7 +457,6 @@ def _measurements_for(mechanism: str, family: TransformFamily) -> list[str]:
 
 def _suitability(*, mechanism: str, target: EditableTarget, objective: OptimizationObjective, evidence: dict[str, Any]) -> float:
     score = 0.25
-    role = target.semantics.role
     bottleneck = str(evidence.get("bottleneck_class") or "")
     if mechanism == "semantic_boundary_rewrite" and bottleneck == "semantic_boundary_confusion":
         score += 0.45
@@ -478,40 +470,6 @@ def _suitability(*, mechanism: str, target: EditableTarget, objective: Optimizat
         score += 0.15
     if mechanism == "efficiency_probe" and objective.mode in {"cost", "latency"}:
         score += 0.45
-    if mechanism == "semantic_boundary_rewrite" and role in {
-        "argument_extraction_policy",
-        "confusable_label_policy",
-        "decision_policy",
-        "label_alias_mapping",
-        "label_description",
-        "label_space",
-        "schema_adherence_policy",
-        "tool_description",
-        "tool_policy",
-    }:
-        score += 0.10
-    if mechanism == "output_contract_fix" and role in {
-        "external_output_contract",
-        "output_budget_control",
-        "output_format_rule",
-        "schema_adherence_policy",
-    }:
-        score += 0.10
-    if mechanism == "runtime_defect_fix" and role in {
-        "output_budget_control",
-        "runtime_control",
-        "verifier_retry_policy",
-    }:
-        score += 0.10
-    if mechanism == "efficiency_probe" and role in {
-        "model_choice",
-        "reasoning_effort_control",
-        "output_budget_control",
-        "runtime_control",
-        "retrieval_policy",
-    }:
-        score += 0.10
-    score += min(target.semantics.confidence, 1.0) * 0.05
     if target.name in set(evidence.get("diagnosis_target_names") or []):
         score += 0.20
     return round(min(score, 1.0), 3)
@@ -523,11 +481,6 @@ def _evidence_for(mechanism: str, target: EditableTarget, evidence: dict[str, An
         rows.append(f"task theory bottleneck: {evidence['bottleneck_class']}")
     if target.name in set(evidence.get("diagnosis_target_names") or []):
         rows.append(f"diagnosis targeted {target.name}")
-    if target.semantics.source != "default":
-        rows.append(
-            f"target semantics: {target.semantics.role} ({target.semantics.source}, "
-            f"confidence={target.semantics.confidence:.2f})"
-        )
     if mechanism in {"representative_examples", "contrastive_examples"} and evidence.get("example_coverage"):
         rows.append("proposal-safe train examples cover relevant labels")
     if mechanism == "runtime_defect_fix" and evidence.get("runtime_defect"):
@@ -539,14 +492,6 @@ def _evidence_for(mechanism: str, target: EditableTarget, evidence: dict[str, An
 
 def _impact(effects: dict[str, str], key: str) -> str:
     return effects.get(key, "unknown")
-
-
-def _merge_unique(left: list[str], right: list[str]) -> list[str]:
-    merged: list[str] = []
-    for item in [*left, *right]:
-        if item and item not in merged:
-            merged.append(item)
-    return merged
 
 
 def _dedupe_affordances(affordances: list[OptimizationAffordance]) -> list[OptimizationAffordance]:

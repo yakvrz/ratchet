@@ -5,7 +5,7 @@ import unittest
 
 from ratchet.affordances import generate_optimization_affordances, validate_candidate_applications
 from ratchet.surface import SurfaceGenerator
-from ratchet.types import AgentSpec, AgentTool, OptimizationObjective, TargetSemantics
+from ratchet.types import AgentSpec, AgentTool, OptimizationObjective
 
 
 class OptimizationAffordanceTests(unittest.TestCase):
@@ -80,70 +80,6 @@ class OptimizationAffordanceTests(unittest.TestCase):
             )
             or "",
         )
-
-    def test_affordance_uses_explicit_target_semantics(self) -> None:
-        spec = AgentSpec(
-            name="sample",
-            model="base",
-            instructions={"boundary": "Keep the routing boundary narrow."},
-            target_semantics={
-                "boundary": TargetSemantics(
-                    role="tool_relevance_boundary",
-                    axes=["tool_selection", "abstention"],
-                    scope="slice",
-                    risks=["false_positive_calls"],
-                    measurement_hints=["wrong_call_delta"],
-                    confidence=1.0,
-                    source="test",
-                )
-            },
-        )
-        surface = SurfaceGenerator().generate(spec, OptimizationObjective())
-        target = next(item for item in surface if item.name == "instructions.boundary")
-
-        self.assertEqual(target.semantics.role, "tool_relevance_boundary")
-        affordance = next(
-            item
-            for item in generate_optimization_affordances(surface, active_families=["prompt_rewrite"])
-            if item.mechanism == "semantic_boundary_rewrite"
-        )
-
-        self.assertEqual(affordance.semantic_role, "tool_relevance_boundary")
-        self.assertIn("tool_selection", affordance.behavioral_axes)
-        self.assertIn("wrong_call_delta", affordance.measurements)
-        self.assertEqual(
-            affordance.affordance_id,
-            "prompt_rewrite.semantic_boundary_rewrite.tool_relevance_boundary.instructions_boundary",
-        )
-
-    def test_single_operation_application_cites_one_affordance(self) -> None:
-        spec = AgentSpec(
-            name="sample",
-            model="base",
-            instructions={"system_prompt": "Classify."},
-        )
-        surface = SurfaceGenerator().generate(spec, OptimizationObjective())
-        affordances = generate_optimization_affordances(surface, active_families=["prompt_rewrite"])
-        semantic = next(item for item in affordances if item.mechanism == "semantic_boundary_rewrite")
-        contract = next(item for item in affordances if item.mechanism == "output_contract_fix")
-
-        error = validate_candidate_applications(
-            applications=[
-                SimpleNamespace(
-                    affordance_id=semantic.affordance_id,
-                    operation=SimpleNamespace(op="add_instruction", target="instructions.system_prompt"),
-                    selection={},
-                ),
-                SimpleNamespace(
-                    affordance_id=contract.affordance_id,
-                    operation=SimpleNamespace(op="add_instruction", target="instructions.system_prompt"),
-                    selection={},
-                ),
-            ],
-            affordances=affordances,
-        )
-
-        self.assertIn("single-operation candidates", error or "")
 
 
 if __name__ == "__main__":

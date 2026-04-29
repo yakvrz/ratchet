@@ -26,7 +26,6 @@ from ratchet.types import (
     OperationalMetrics,
     PatchOperation,
     RunRecord,
-    TargetSemantics,
 )
 
 __all__ = [
@@ -57,7 +56,6 @@ __all__ = [
     "ResearchState",
     "RunRecord",
     "TaskTheory",
-    "TargetSemantics",
     "CandidateImplementation",
     "CandidateImplementer",
     "MeasurementDecision",

@@ -43,7 +43,7 @@ def few_shot_candidate(
         patch=patch or AgentPatch.empty(),
         applications=[
             CandidateAffordanceApplication(
-                affordance_id="targeted_few_shot.representative_examples.example_bank.few_shot",
+                affordance_id="targeted_few_shot.representative_examples.few_shot.few_shot",
                 selection=selection,
                 rationale=hypothesis,
             )
@@ -277,7 +277,7 @@ class ProfilingTests(unittest.TestCase):
                 "hypothesis": "Use a representative train example.",
                 "applications": [
                     {
-                        "affordance_id": "targeted_few_shot.representative_examples.example_bank.few_shot",
+                        "affordance_id": "targeted_few_shot.representative_examples.few_shot.few_shot",
                         "selection": {"source_case_ids": ["train-1"]},
                     }
                 ],

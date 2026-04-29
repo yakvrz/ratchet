@@ -798,7 +798,6 @@ def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
         "label": affordance.label,
         "target_name": affordance.target_name,
         "target_kind": affordance.target_kind,
-        "target_path": affordance.target_path,
         "family": affordance.family,
         "mechanism": affordance.mechanism,
         "ops": list(affordance.ops),

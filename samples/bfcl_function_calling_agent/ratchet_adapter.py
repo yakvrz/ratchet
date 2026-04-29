@@ -9,7 +9,7 @@ from typing import Any
 
 from ratchet.model_client import ResponsesModelClient
 from ratchet.rendering import render_few_shot_prompt
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord, TargetSemantics
+from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
 
 try:
     from agent import BfclFunctionCallingRunner
@@ -47,107 +47,6 @@ BASE_SPEC = AgentSpec(
     },
     output_contract="Return JSON: {\"calls\":[{\"name\":\"function_name\",\"arguments\":{...}}]}.",
     runtime={"reasoning_effort": "low", "output_cap": 512},
-    target_semantics={
-        "task_rule": TargetSemantics(
-            role="task_instructions",
-            axes=["task_framing", "function_calling"],
-            scope="global",
-            risks=["broad_behavior_shift"],
-            measurement_hints=["score_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "schema_rule": TargetSemantics(
-            role="schema_adherence_policy",
-            axes=["schema_grounding", "argument_name_validity"],
-            scope="global",
-            risks=["contract_regression"],
-            measurement_hints=["wrong_call_delta", "invalid_output_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "argument_rule": TargetSemantics(
-            role="argument_extraction_policy",
-            axes=["argument_selection", "literal_value_grounding"],
-            scope="slice",
-            risks=["neighbor_case_regression"],
-            measurement_hints=["wrong_argument_delta", "target_slice_score_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "no_call_rule": TargetSemantics(
-            role="no_call_policy",
-            axes=["tool_relevance_boundary", "abstention"],
-            scope="slice",
-            risks=["false_negative_calls", "false_positive_calls"],
-            measurement_hints=["wrong_call_count_delta", "target_slice_score_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "decision_rule": TargetSemantics(
-            role="decision_policy",
-            axes=["tool_selection", "call_ordering", "tie_breaking"],
-            scope="global",
-            risks=["wrong_tool_regression", "broad_behavior_shift"],
-            measurement_hints=["wrong_call_delta", "wrong_call_count_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "output_rule": TargetSemantics(
-            role="output_format_rule",
-            axes=["format_validity", "parser_compatibility"],
-            scope="global",
-            risks=["contract_regression"],
-            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "output_contract": TargetSemantics(
-            role="external_output_contract",
-            axes=["format_validity", "parser_compatibility", "contract_preservation"],
-            scope="global",
-            risks=["contract_regression"],
-            measurement_hints=["invalid_output_delta", "score_delta", "non_target_regression"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "few_shot": TargetSemantics(
-            role="example_bank",
-            axes=["example_anchoring", "target_slice_recall"],
-            scope="slice",
-            risks=["neighbor_case_regression", "example_overfit"],
-            measurement_hints=["target_slice_score_delta", "non_target_regression", "example_token_delta"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "model": TargetSemantics(
-            role="model_choice",
-            axes=["model_capability", "cost_latency_tradeoff"],
-            scope="global",
-            risks=["cost_latency_regression", "quality_regression"],
-            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "output_cap": TargetSemantics(
-            role="output_budget_control",
-            axes=["completion_integrity", "cost_latency_tradeoff"],
-            scope="global",
-            risks=["truncation_regression", "cost_latency_regression"],
-            measurement_hints=["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
-            confidence=1.0,
-            source="adapter",
-        ),
-        "reasoning_effort": TargetSemantics(
-            role="reasoning_effort_control",
-            axes=["reasoning_depth", "cost_latency_tradeoff"],
-            scope="global",
-            risks=["cost_latency_regression", "quality_regression"],
-            measurement_hints=["score_delta", "cost_delta", "latency_delta"],
-            confidence=1.0,
-            source="adapter",
-        ),
-    },
 )
 
 
