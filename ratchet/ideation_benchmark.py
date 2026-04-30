@@ -54,7 +54,7 @@ def assess_ideation_run(
     candidate_metrics = _read_json(root / "candidate_metrics.json")
     ideation_metrics = _read_json(root / "ideation_metrics.json")
     proposals = _read_jsonl(root / "proposals.jsonl")
-    task_theories = _read_jsonl(root / "task_theories.jsonl")
+    research_theories = _read_jsonl(root / "research_theories.jsonl")
 
     candidate_rows = [row for row in proposals if _is_candidate_row(row)]
     valid_rows = [row for row in candidate_rows if row.get("valid") is not False]
@@ -68,7 +68,7 @@ def assess_ideation_run(
         if str(row.get("status") or "") == "validated" and row.get("candidate_id")
     }
     candidate_mechanisms = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
-    opportunity_mechanisms = _opportunity_mechanisms(task_theories)
+    opportunity_mechanisms = _opportunity_mechanisms(research_theories)
     expected_mechanisms = set(spec.mechanisms_of_interest or sorted(opportunity_mechanisms))
     pivotal_mechanisms = set(spec.pivotal_mechanisms)
     mechanisms_discovered = set(candidate_mechanisms)
@@ -158,14 +158,14 @@ def _is_candidate_row(row: dict[str, Any]) -> bool:
         return True
     return bool(
         (row.get("proposal_candidate") or row.get("compiled_candidate") or row.get("candidate"))
-        and (row.get("transform_family") or row.get("mechanism_class"))
+        and (row.get("surface_mechanism") or row.get("mechanism_class"))
     )
 
 
-def _opportunity_mechanisms(task_theories: list[dict[str, Any]]) -> set[str]:
+def _opportunity_mechanisms(research_theories: list[dict[str, Any]]) -> set[str]:
     mechanisms: set[str] = set()
-    for row in task_theories:
-        theory = row.get("task_theory") if "task_theory" in row else row
+    for row in research_theories:
+        theory = row.get("research_theory") if "research_theory" in row else row
         if not isinstance(theory, dict):
             continue
         for opportunity in theory.get("experiment_opportunities") or []:

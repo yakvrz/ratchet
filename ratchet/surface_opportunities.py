@@ -8,7 +8,7 @@ from ratchet.types import OptimizationObjective
 
 
 @dataclass(frozen=True)
-class AffordanceComposition:
+class OpportunityComposition:
     can_pair_with: list[str] = field(default_factory=list)
     should_not_pair_with: list[str] = field(default_factory=list)
 
@@ -17,8 +17,8 @@ class AffordanceComposition:
 
 
 @dataclass(frozen=True)
-class OptimizationAffordance:
-    affordance_id: str
+class SurfaceOpportunity:
+    surface_opportunity_id: str
     label: str
     family: str
     mechanism: str
@@ -32,7 +32,7 @@ class OptimizationAffordance:
     expected_scope: str
     risk: str
     measurements: list[str]
-    composition: AffordanceComposition = field(default_factory=AffordanceComposition)
+    composition: OpportunityComposition = field(default_factory=OpportunityComposition)
     suitability: float = 0.0
     evidence: list[str] = field(default_factory=list)
     budget_hint: float = 0.0
@@ -41,7 +41,7 @@ class OptimizationAffordance:
     description: str = ""
 
     @property
-    def transform_family(self) -> str:
+    def surface_mechanism(self) -> str:
         return self.family
 
     @property
@@ -66,7 +66,7 @@ class OptimizationAffordance:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "affordance_id": self.affordance_id,
+            "surface_opportunity_id": self.surface_opportunity_id,
             "label": self.label,
             "family": self.family,
             "mechanism": self.mechanism,
@@ -90,40 +90,42 @@ class OptimizationAffordance:
         }
 
 
-def generate_optimization_affordances(
+def generate_surface_opportunities(
     surface: SurfaceSpec,
     *,
     objective: OptimizationObjective | None = None,
-    active_families: list[str] | None = None,
+    active_mechanisms: list[str] | None = None,
     evidence: dict[str, Any] | None = None,
-) -> list[OptimizationAffordance]:
+) -> list[SurfaceOpportunity]:
     objective = objective or OptimizationObjective()
     if not isinstance(surface, SurfaceSpec):
-        raise TypeError(f"generate_optimization_affordances requires SurfaceSpec, got {type(surface).__name__}.")
-    return _generate_surface_affordances(
+        raise TypeError(f"generate_surface_opportunities requires SurfaceSpec, got {type(surface).__name__}.")
+    return _generate_surface_opportunities(
         surface,
         objective=objective,
-        active_families=active_families,
+        active_mechanisms=active_mechanisms,
         evidence=evidence or {},
     )
 
 
-def _generate_surface_affordances(
+def _generate_surface_opportunities(
     surface: SurfaceSpec,
     *,
     objective: OptimizationObjective,
-    active_families: list[str] | None,
+    active_mechanisms: list[str] | None,
     evidence: dict[str, Any],
-) -> list[OptimizationAffordance]:
-    affordances: list[OptimizationAffordance] = []
+) -> list[SurfaceOpportunity]:
+    surface_opportunities: list[SurfaceOpportunity] = []
     for target in surface_targets(surface):
         ops = sorted(target.allowed_ops)
         if not ops:
             continue
         mechanism = _surface_mechanism(target)
-        affordances.append(
-            OptimizationAffordance(
-                affordance_id=_surface_opportunity_id(mechanism, target),
+        if active_mechanisms is not None and mechanism not in set(active_mechanisms):
+            continue
+        surface_opportunities.append(
+            SurfaceOpportunity(
+                surface_opportunity_id=_surface_opportunity_id(mechanism, target),
                 label=f"{target.kind} surface: {target.name}",
                 family="surface_program",
                 mechanism=mechanism,
@@ -151,8 +153,8 @@ def _generate_surface_affordances(
             )
         )
     return sorted(
-        _dedupe_affordances(affordances),
-        key=lambda item: (-item.suitability, item.affordance_id),
+        _dedupe_surface_opportunities(surface_opportunities),
+        key=lambda item: (-item.suitability, item.surface_opportunity_id),
     )
 
 
@@ -214,39 +216,41 @@ def _surface_latency_impact(target: SurfaceTarget) -> str:
     return "token-dependent"
 
 
-def validate_candidate_applications(
+def validate_candidate_surface_applications(
     *,
     applications: list[Any],
-    affordances: list[OptimizationAffordance],
+    surface_opportunities: list[SurfaceOpportunity],
 ) -> str | None:
     if not applications:
         return "candidate must include at least one surface opportunity application"
-    by_id = {affordance.affordance_id: affordance for affordance in affordances}
+    by_id = {surface_opportunity.surface_opportunity_id: surface_opportunity for surface_opportunity in surface_opportunities}
     selection_count = 0
     for application in applications:
-        affordance_id = str(getattr(application, "affordance_id", ""))
-        affordance = by_id.get(affordance_id)
-        if affordance is None:
-            return f"unknown surface_opportunity_id {affordance_id!r}"
+        surface_opportunity_id = str(getattr(application, "surface_opportunity_id", ""))
+        surface_opportunity = by_id.get(surface_opportunity_id)
+        if surface_opportunity is None:
+            return f"unknown surface_opportunity_id {surface_opportunity_id!r}"
         selection = getattr(application, "selection", None)
         source_ids = selection.get("source_case_ids") if isinstance(selection, dict) else None
-        if source_ids is not None:
+        if source_ids:
             selection_count += 1
-            if affordance.target_kind != "few_shot":
-                return f"surface opportunity {affordance_id!r} does not support example selection"
+            if surface_opportunity.target_kind != "few_shot":
+                return f"surface opportunity {surface_opportunity_id!r} does not support example selection"
             if not isinstance(source_ids, list) or not all(isinstance(item, str) and item for item in source_ids):
-                return f"surface opportunity {affordance_id!r} example selection requires non-empty source_case_ids"
+                return f"surface opportunity {surface_opportunity_id!r} example selection requires non-empty source_case_ids"
+        elif source_ids is not None and not isinstance(source_ids, list):
+            return f"surface opportunity {surface_opportunity_id!r} example selection requires source_case_ids[]"
         else:
             continue
     return None
 
 
-def affordance_family(affordance_id: str) -> str:
-    return affordance_id.split(".", 1)[0] if "." in affordance_id else ""
+def surface_opportunity_family(surface_opportunity_id: str) -> str:
+    return surface_opportunity_id.split(".", 1)[0] if "." in surface_opportunity_id else ""
 
 
-def affordance_mechanism(affordance_id: str) -> str:
-    parts = affordance_id.split(".")
+def surface_opportunity_mechanism(surface_opportunity_id: str) -> str:
+    parts = surface_opportunity_id.split(".")
     return parts[1] if len(parts) > 1 else ""
 
 
@@ -349,7 +353,7 @@ def _suitability(*, mechanism: str, target: SurfaceTarget, objective: Optimizati
 def _evidence_for(mechanism: str, target: SurfaceTarget, evidence: dict[str, Any]) -> list[str]:
     rows: list[str] = []
     if evidence.get("bottleneck_class"):
-        rows.append(f"task theory bottleneck: {evidence['bottleneck_class']}")
+        rows.append(f"research theory bottleneck: {evidence['bottleneck_class']}")
     if target.name in set(evidence.get("diagnosis_target_names") or []):
         rows.append(f"diagnosis targeted {target.name}")
     if target.semantics.source != "default":
@@ -376,10 +380,10 @@ def _merge_unique(left: list[str], right: list[str]) -> list[str]:
     return merged
 
 
-def _dedupe_affordances(affordances: list[OptimizationAffordance]) -> list[OptimizationAffordance]:
-    by_id: dict[str, OptimizationAffordance] = {}
-    for affordance in affordances:
-        current = by_id.get(affordance.affordance_id)
-        if current is None or affordance.suitability > current.suitability:
-            by_id[affordance.affordance_id] = affordance
+def _dedupe_surface_opportunities(surface_opportunities: list[SurfaceOpportunity]) -> list[SurfaceOpportunity]:
+    by_id: dict[str, SurfaceOpportunity] = {}
+    for surface_opportunity in surface_opportunities:
+        current = by_id.get(surface_opportunity.surface_opportunity_id)
+        if current is None or surface_opportunity.suitability > current.suitability:
+            by_id[surface_opportunity.surface_opportunity_id] = surface_opportunity
     return list(by_id.values())

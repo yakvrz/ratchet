@@ -276,7 +276,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 "event": "candidate_evaluated",
                 "elapsed_s": 125,
                 "frontier_status": "screened_out",
-                "transform_family": "surface_examples",
+                "surface_mechanism": "surface_examples",
                 "candidate_id": "abcdef123456",
                 "score_delta": 0.125,
                 "cost_delta": -0.002,

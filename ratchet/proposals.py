@@ -6,7 +6,7 @@ import json
 import time
 from typing import Any
 
-from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances, validate_candidate_applications
+from ratchet.surface_opportunities import SurfaceOpportunity, generate_surface_opportunities, validate_candidate_surface_applications
 from ratchet.evidence import ProposalExampleBank, build_behavior_diagnostics
 from ratchet.errors import OptimizerModelError
 from ratchet.experiments import (
@@ -28,16 +28,17 @@ from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformPatch, TransformProgram
-from ratchet.transforms import (
-    CandidateProposal,
-    Intervention,
+from ratchet.candidates import CandidateProposal, Intervention
+from ratchet.surface_search import (
     SearchHypothesis,
     build_search_hypothesis,
-    transform_registry,
+)
+from ratchet.transform_validation import (
     validate_candidate_transform,
 )
 from ratchet.types import AgentSpec, FailureDiagnosis, OptimizationObjective
 from ratchet.types import EvalCase
+from ratchet.capabilities import validation_check_schema
 
 
 MAX_PROPOSALS_PER_ITERATION = 8
@@ -45,24 +46,24 @@ PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[]. "
     "Keep text concise. Implement experiment_intents exactly: they define the research questions, target slices, "
-    "controls, and measurements. Treat research_theory as causal context; opportunities are not candidate recipes. "
+    "and measurements. Treat research_theory as causal context; opportunities are not candidate recipes. "
     "Each candidate must include a typed transform program under candidate.program and applications[] citing "
     "relevant surface_opportunities. "
     "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not untyped candidate operations. "
     "For add_context_section or replace_context_section, emit one focused patch with non-empty content containing the actual rendered instruction or context data; prefer a concise string. Do not emit empty content objects, repeated placeholder patches, or context text in value. "
     "Every set_model_config candidate needs field and value; for field=model_name, value must be one of the model values exposed by the cited model surface and should differ from the current model. Every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
-    "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family and mechanism "
-    "labels are derived from cited surface_opportunities; do not emit candidate-level transform_family, "
-    "mechanism_class, affordance_ids, patch, or intervention fields. "
+    "only for few-shot examples from proposal_example_bank; omit source_case_ids for all context, tool-loop, state, response, model, and runtime candidates. Do not inline few-shot examples. Family and mechanism "
+    "labels are derived from cited surface_opportunities; do not emit candidate-level surface_mechanism, "
+    "mechanism_class, surface_opportunity_ids, patch, or intervention fields. "
     "For interactive tool-loop surfaces, prefer general middleware programs: define state on_task_start, "
     "normalize or validate tool_call at before_tool_call, replan on validation failure, append real tool_result "
     "observations at after_tool_result, rewrite model-facing tool descriptions at before_model_call, and guard final responses at before_user_response. Every validate patch "
-    "must use implemented checks[] such as args_schema_valid or not_duplicate_tool_call plus an executable on_fail "
+    "must use the structured executable checks[] advertised by the cited surface, e.g. {\"type\":\"args_schema_valid\"} or {\"type\":\"not_duplicate_tool_call\"}, plus an executable on_fail "
     "operation such as replan; prose-only validation content is invalid. Never rewrite tool_result, "
     "modify tool implementations, branch on task/case IDs, or use benchmark-specific domain rules. "
-    "Never mention simulator control tokens, evaluator sentinels, hidden labels, gold answers, or trace-only stop markers in candidate content. "
+    "Never mention simulator control tokens, evaluator sentinels, hidden labels, gold answers, or trace-only stop markers in candidate content, even as examples of what not to do. "
     "Do not copy diagnostic_only_examples into candidate values; only proposal-safe train examples may be copied, "
-    "and only through source_case_id. Prefer minimal, independently evaluable candidates. For cost/latency modes, "
+    "and only through source_case_id. Do not return no-op, log-only, or control/baseline candidates; baseline comparisons are automatic measurement infrastructure. Prefer minimal, independently evaluable candidates. For cost/latency modes, "
     "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
     "Return empty experiments only when no safe evaluable candidate exists."
 )
@@ -77,7 +78,7 @@ class ProposalStats:
     duplicate_count: int = 0
     error: str | None = None
     invalid_reasons: dict[str, int] | None = None
-    affordance_considerations: list[dict[str, Any]] | None = None
+    surface_opportunity_considerations: list[dict[str, Any]] | None = None
     plan_audit: dict[str, Any] | None = None
     raw_output_text: str = ""
     call_diagnostics: dict[str, Any] | None = None
@@ -91,7 +92,7 @@ class ProposalStats:
             "duplicate_count": self.duplicate_count,
             "error": self.error,
             "invalid_reasons": dict(self.invalid_reasons or {}),
-            "affordance_considerations": list(self.affordance_considerations or []),
+            "surface_opportunity_considerations": list(self.surface_opportunity_considerations or []),
             "plan_audit": dict(self.plan_audit or {}),
             "raw_output_text": self.raw_output_text,
             "call_diagnostics": dict(self.call_diagnostics or {}),
@@ -137,7 +138,7 @@ class CandidateImplementer:
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
         experiment_intents: list[ExperimentIntent] | None = None,
-        affordances: list[OptimizationAffordance] | None = None,
+        surface_opportunities: list[SurfaceOpportunity] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
         analysis_parts: list[str] = []
@@ -161,13 +162,13 @@ class CandidateImplementer:
             )
         if research_theory is None:
             raise ValueError("CandidateImplementer requires a ResearchTheory from the research planner.")
-        active_affordances = list(affordances or generate_optimization_affordances(
+        active_surface_opportunities = list(surface_opportunities or generate_surface_opportunities(
             surface,
             objective=objective,
-            active_families=search_hypothesis.active_families,
-            evidence=_affordance_evidence(evidence_packet, diagnosis_context),
+            active_mechanisms=search_hypothesis.active_mechanisms,
+            evidence=_surface_opportunity_evidence(evidence_packet, diagnosis_context),
         ))
-        llm_proposals, affordance_considerations = self._llm_proposals(
+        llm_proposals, surface_opportunity_considerations = self._llm_proposals(
             summary,
             surface,
             objective=objective,
@@ -179,7 +180,7 @@ class CandidateImplementer:
             proposal_example_bank=proposal_example_bank,
             proposal_budget=proposal_budget,
             experiment_intents=experiment_intents or [],
-            affordances=active_affordances,
+            surface_opportunities=active_surface_opportunities,
         )
         proposals.extend(llm_proposals)
         analysis_parts.append("Candidate implementer returned transform candidate proposals.")
@@ -190,7 +191,7 @@ class CandidateImplementer:
             proposals,
             surface=surface,
             search_hypothesis=search_hypothesis,
-            active_affordances=active_affordances,
+            active_surface_opportunities=active_surface_opportunities,
             seen_hashes=seen_hashes,
             proposal_example_bank=proposal_example_bank,
         )
@@ -210,18 +211,18 @@ class CandidateImplementer:
                 proposal_example_bank=proposal_example_bank,
                 proposal_budget=proposal_budget,
                 experiment_intents=experiment_intents or [],
-                affordances=active_affordances,
+                surface_opportunities=active_surface_opportunities,
                 repair_feedback=repair_feedback,
             )
             raw_count += self._last_raw_candidate_count
-            affordance_considerations.extend(repaired_considerations)
+            surface_opportunity_considerations.extend(repaired_considerations)
             invalid_reasons.update(self._last_parse_invalid_reasons)
             invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
             repaired_valid, repaired_rows, repaired_invalid_rows, repaired_invalid_reasons = self._validate_candidate_proposals(
                 repaired_proposals,
                 surface=surface,
                 search_hypothesis=search_hypothesis,
-                active_affordances=active_affordances,
+                active_surface_opportunities=active_surface_opportunities,
                 seen_hashes=seen_hashes,
                 proposal_example_bank=proposal_example_bank,
             )
@@ -241,7 +242,7 @@ class CandidateImplementer:
             duplicate_count=invalid_reasons.get("duplicate candidate", 0),
             error=None,
             invalid_reasons=dict(sorted(invalid_reasons.items())),
-            affordance_considerations=affordance_considerations,
+            surface_opportunity_considerations=surface_opportunity_considerations,
             plan_audit=self._last_plan_audit,
             raw_output_text=self._last_raw_output_text,
             call_diagnostics=self.last_call_diagnostics,
@@ -264,7 +265,7 @@ class CandidateImplementer:
         *,
         surface: SurfaceSpec,
         search_hypothesis: SearchHypothesis,
-        active_affordances: list[OptimizationAffordance],
+        active_surface_opportunities: list[SurfaceOpportunity],
         seen_hashes: set[str],
         proposal_example_bank: ProposalExampleBank | None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]], list[dict[str, Any]], Counter[str]]:
@@ -295,13 +296,13 @@ class CandidateImplementer:
                 invalid_reasons[family_error] += 1
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, family_error, materialization=materialization))
                 continue
-            affordance_error = validate_candidate_applications(
+            surface_opportunity_error = validate_candidate_surface_applications(
                 applications=candidate.applications,
-                affordances=active_affordances,
+                surface_opportunities=active_surface_opportunities,
             )
-            if affordance_error is not None:
-                invalid_reasons[affordance_error] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(candidate, affordance_error, materialization=materialization))
+            if surface_opportunity_error is not None:
+                invalid_reasons[surface_opportunity_error] += 1
+                invalid_candidate_rows.append(_invalid_candidate_row(candidate, surface_opportunity_error, materialization=materialization))
                 continue
             compile_report = TransformCompiler().compile(candidate.program, surface).report
             if compile_report.status != "compiled":
@@ -335,12 +336,12 @@ class CandidateImplementer:
                     "proposal": candidate.program.to_dict(),
                     "candidate": candidate.to_dict(),
                     "applications": [application.to_dict() for application in candidate.applications],
-                    "transform_family": candidate.transform_family,
+                    "surface_mechanism": candidate.surface_mechanism,
                     "mechanism_class": candidate.mechanism_class,
                     "experiment_id": candidate.experiment_id,
                     "candidate_role": candidate.candidate_role,
                     "comparison_group": candidate.comparison_group,
-                    "affordance_ids": list(candidate.affordance_ids),
+                    "surface_opportunity_ids": list(candidate.surface_opportunity_ids),
                     "transform_instance": candidate.transform_instance,
                     "target_slice": candidate.target_slice,
                     "hypothesis": candidate.hypothesis,
@@ -364,7 +365,7 @@ class CandidateImplementer:
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
         experiment_intents: list[ExperimentIntent],
-        affordances: list[OptimizationAffordance],
+        surface_opportunities: list[SurfaceOpportunity],
         repair_feedback: list[dict[str, Any]] | None = None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
@@ -379,10 +380,10 @@ class CandidateImplementer:
             "surface_spec": _compact_surface_spec(surface),
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "research_theory": _research_theory_prompt_view(research_theory),
-            "task_theory": _research_theory_prompt_view(research_theory),
+            "research_theory": _research_theory_prompt_view(research_theory),
             "evidence_packet": _compact_evidence_packet(evidence_packet),
             "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
-            "surface_opportunities": [_compact_affordance(affordance) for affordance in affordances],
+            "surface_opportunities": [_compact_surface_opportunity(surface_opportunity) for surface_opportunity in surface_opportunities],
             "proposal_policy": {
                 "experiment_intents": (
                     "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
@@ -474,7 +475,7 @@ class CandidateImplementer:
                             "properties": {
                                 "surface_opportunity_considerations": {
                                     "type": "array",
-                                    "maxItems": max(len(affordances), 1),
+                                    "maxItems": max(len(surface_opportunities), 1),
                                     "items": {
                                         "type": "object",
                                         "properties": {
@@ -506,7 +507,10 @@ class CandidateImplementer:
                                                 "items": {
                                                     "type": "object",
                                                     "properties": {
-                                                        "candidate_role": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
+                                                        "candidate_role": {
+                                                            "type": "string",
+                                                            "enum": sorted(CANDIDATE_ROLES - {"control"}),
+                                                        },
                                                         "comparison_group": {"type": "string", "maxLength": 80},
                                                         "target_slice": {"type": "string", "maxLength": 160},
                                                         "hypothesis": {"type": "string", "maxLength": 360},
@@ -690,8 +694,8 @@ class CandidateImplementer:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
-                if intent is not None and intent.affordance_ids:
-                    unknown_for_intent = sorted(set(candidate.affordance_ids) - set(intent.affordance_ids))
+                if intent is not None and intent.surface_opportunity_ids:
+                    unknown_for_intent = sorted(set(candidate.surface_opportunity_ids) - set(intent.surface_opportunity_ids))
                     if unknown_for_intent:
                         reason = (
                             f"candidate surface_opportunity_ids {unknown_for_intent} are not allowed by experiment intent "
@@ -712,12 +716,12 @@ class CandidateImplementer:
         )
         considerations = [
             {
-                "affordance_id": str(item.get("affordance_id", "")),
-                "surface_opportunity_id": str(item.get("surface_opportunity_id") or item.get("affordance_id") or ""),
+                "surface_opportunity_id": str(item.get("surface_opportunity_id", "")),
+                "surface_opportunity_id": str(item.get("surface_opportunity_id") or item.get("surface_opportunity_id") or ""),
                 "decision": str(item.get("decision", "")),
                 "rationale": str(item.get("rationale", "")),
             }
-            for item in payload.get("surface_opportunity_considerations", payload.get("affordance_considerations", []))
+            for item in payload.get("surface_opportunity_considerations", payload.get("surface_opportunity_considerations", []))
             if isinstance(item, dict)
         ]
         return candidates, considerations
@@ -804,7 +808,7 @@ def _transform_patch_schema() -> dict[str, Any]:
             "value": {},
             "initial": {},
             "type": {"type": "string", "maxLength": 160},
-            "checks": {"type": "array", "items": {}, "maxItems": 12},
+            "checks": {"type": "array", "items": validation_check_schema(), "maxItems": 12},
             "on_fail": {"type": "object", "additionalProperties": True},
             "when": {"type": "object", "additionalProperties": True},
             "unless": {"type": "object", "additionalProperties": True},
@@ -814,7 +818,7 @@ def _transform_patch_schema() -> dict[str, Any]:
     }
 
 
-def _compact_transform_family(row: dict[str, Any]) -> dict[str, Any]:
+def _compact_surface_mechanism(row: dict[str, Any]) -> dict[str, Any]:
     return {
         "name": row.get("name"),
         "category": row.get("category"),
@@ -827,21 +831,21 @@ def _compact_transform_family(row: dict[str, Any]) -> dict[str, Any]:
 
 def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str, Any]:
     row = search_hypothesis.to_prompt_dict(
-        max_contexts_per_family=1,
+        max_contexts_per_mechanism=1,
         max_constrained_contexts=2,
     )
     return {
-        "family_states": {
+        "mechanism_states": {
             name: {
                 "state": value.get("state"),
                 "suitability": value.get("suitability"),
                 "budget_share": value.get("budget_share"),
                 "constraints": list(value.get("constraints") or [])[:3],
             }
-            for name, value in (row.get("family_states") or {}).items()
+            for name, value in (row.get("mechanism_states") or {}).items()
             if isinstance(value, dict)
         },
-        "active_families": list(row.get("active_families") or []),
+        "active_mechanisms": list(row.get("active_mechanisms") or []),
         "active_contexts": [
             _compact_context_prompt_row(context)
             for context in list(row.get("active_contexts") or [])[:5]
@@ -904,7 +908,7 @@ def _research_theory_prompt_view(research_theory: ResearchTheory) -> dict[str, A
                 "candidate_roles": list(item.get("candidate_roles") or [])[:5],
                 "compatible_mechanisms": list(item.get("compatible_mechanisms") or [])[:5],
                 "surface_opportunity_ids": list(
-                    item.get("surface_opportunity_ids", item.get("affordance_ids") or [])
+                    item.get("surface_opportunity_ids", item.get("surface_opportunity_ids") or [])
                 )[:10],
                 "priority": item.get("priority"),
             }
@@ -960,35 +964,35 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
         "target_slices": list(intent.target_slices)[:5],
         "candidate_roles": list(intent.candidate_roles)[:5],
         "measurements": list(intent.measurements)[:5],
-        "surface_opportunity_ids": list(intent.affordance_ids)[:8],
+        "surface_opportunity_ids": list(intent.surface_opportunity_ids)[:8],
         "success_criteria": intent.success_criteria[:240],
         "disconfirming_result": intent.disconfirming_result[:240],
         "priority": intent.priority,
     }
 
 
-def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
+def _compact_surface_opportunity(surface_opportunity: SurfaceOpportunity) -> dict[str, Any]:
     return {
-        "surface_opportunity_id": affordance.affordance_id,
-        "label": affordance.label,
-        "target_name": affordance.target_name,
-        "target_kind": affordance.target_kind,
-        "target_path": affordance.target_path,
-        "ops": list(affordance.ops),
-        "value_schema": affordance.value_schema,
-        "semantic_role": affordance.semantic_role,
-        "behavioral_axes": list(affordance.behavioral_axes)[:5],
-        "expected_scope": affordance.expected_scope,
-        "risk": affordance.risk,
-        "measurements": list(affordance.measurements)[:5],
-        "composition": affordance.composition.to_dict(),
-        "suitability": affordance.suitability,
-        "evidence": list(affordance.evidence)[:4],
-        "budget_hint": affordance.budget_hint,
+        "surface_opportunity_id": surface_opportunity.surface_opportunity_id,
+        "label": surface_opportunity.label,
+        "target_name": surface_opportunity.target_name,
+        "target_kind": surface_opportunity.target_kind,
+        "target_path": surface_opportunity.target_path,
+        "ops": list(surface_opportunity.ops),
+        "value_schema": surface_opportunity.value_schema,
+        "semantic_role": surface_opportunity.semantic_role,
+        "behavioral_axes": list(surface_opportunity.behavioral_axes)[:5],
+        "expected_scope": surface_opportunity.expected_scope,
+        "risk": surface_opportunity.risk,
+        "measurements": list(surface_opportunity.measurements)[:5],
+        "composition": surface_opportunity.composition.to_dict(),
+        "suitability": surface_opportunity.suitability,
+        "evidence": list(surface_opportunity.evidence)[:4],
+        "budget_hint": surface_opportunity.budget_hint,
     }
 
 
-def _affordance_evidence(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+def _surface_opportunity_evidence(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
     packet = evidence_packet.to_dict()
     runtime = packet.get("runtime_defects") or {}
     output = packet.get("output_defects") or {}
@@ -1308,7 +1312,7 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
                 "attempt": row.get("attempt"),
                 "parent_candidate_id": row.get("parent_candidate_id"),
                 "candidate_id": row.get("candidate_id"),
-                "transform_family": row.get("transform_family"),
+                "surface_mechanism": row.get("surface_mechanism"),
                 "mechanism_class": row.get("mechanism_class"),
                 "experiment_id": row.get("experiment_id"),
                 "candidate_role": row.get("candidate_role"),
@@ -1391,9 +1395,9 @@ def _invalid_candidate_row(
         "proposal_candidate": candidate.to_dict(),
         "candidate": candidate.to_dict(),
         "applications": [application.to_dict() for application in candidate.applications],
-        "transform_family": candidate.transform_family,
+        "surface_mechanism": candidate.surface_mechanism,
         "mechanism_class": candidate.mechanism_class,
-        "affordance_ids": list(candidate.affordance_ids),
+        "surface_opportunity_ids": list(candidate.surface_opportunity_ids),
         "transform_instance": candidate.transform_instance,
         "transform_parameters": candidate.transform_parameters,
         "target_slice": candidate.target_slice,
@@ -1411,7 +1415,7 @@ def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any
         "proposal": {},
         "candidate": {},
         "raw_candidate": _value_summary(raw_candidate),
-        "transform_family": None,
+        "surface_mechanism": None,
         "transform_instance": None,
         "transform_parameters": {},
         "target_slice": None,
@@ -1455,7 +1459,7 @@ def _candidate_budget_group(candidate: CandidateProposal) -> str:
     target_slice = candidate.target_slice or "global"
     return "|".join(
         [
-            candidate.transform_family,
+            candidate.surface_mechanism,
             str(comparison_group),
             str(target_slice),
         ]

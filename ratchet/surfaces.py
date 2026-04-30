@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from ratchet.capabilities import validation_checks_for_hook
 from ratchet.context_graph import ContextGraph, ContextSection
 from ratchet.types import AgentSpec, TargetSemantics
 
@@ -27,6 +28,7 @@ class HookSurface:
     available_inputs: tuple[str, ...] = ()
     allowed_outputs: tuple[str, ...] = ()
     allowed_ops: tuple[str, ...] = ()
+    validation_checks: tuple[dict[str, Any], ...] = ()
     method: str = "native"
 
     def __post_init__(self) -> None:
@@ -40,6 +42,7 @@ class HookSurface:
         row["available_inputs"] = list(self.available_inputs)
         row["allowed_outputs"] = list(self.allowed_outputs)
         row["allowed_ops"] = list(self.allowed_ops)
+        row["validation_checks"] = [dict(item) for item in self.validation_checks]
         return row
 
     @classmethod
@@ -50,6 +53,7 @@ class HookSurface:
             available_inputs=tuple(str(item) for item in payload.get("available_inputs", [])),
             allowed_outputs=tuple(str(item) for item in payload.get("allowed_outputs", [])),
             allowed_ops=tuple(str(item) for item in payload.get("allowed_ops", [])),
+            validation_checks=tuple(dict(item) for item in payload.get("validation_checks", []) if isinstance(item, dict)),
             method=str(payload.get("method", "native")),
         )
 
@@ -269,6 +273,15 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                 current_value=None,
                 allowed_ops=tuple(response_ops),
                 description="Draft response before it is returned to the user or evaluator.",
+                value_schema={
+                    "validation_checks": [
+                        spec.to_dict() for spec in validation_checks_for_hook("before_user_response")
+                    ],
+                    "safe_patterns": [
+                        "validate draft response with completion_claims_supported then rewrite_response on failure",
+                        "validate structured output with json_object, actions_array, or required_output_keys",
+                    ],
+                },
             )
         )
     if surface.state.supports_persistent_state:
@@ -342,6 +355,11 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                         current_value=surface.hooks[hook_name].to_dict(),
                         allowed_ops=hook_ops,
                         description=hook_description,
+                        value_schema={
+                            "validation_checks": [
+                                spec.to_dict() for spec in validation_checks_for_hook(hook_name)
+                            ],
+                        },
                     )
                 )
         targets.append(
@@ -365,10 +383,15 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                     "available_refs": ["tools", "tool_call", "tool_schema", "tool_metadata", "message_history", "state"],
                     "safe_patterns": [
                         "rewrite tool descriptions at before_model_call without changing execution semantics",
-                        "validate tool_call with args_schema_valid then replan on failure",
-                        "validate tool_call with not_duplicate_tool_call then replan on failure",
+                        "validate tool_call with {\"type\":\"args_schema_valid\"} then replan on failure",
+                        "validate tool_call with {\"type\":\"not_duplicate_tool_call\"} then replan on failure",
+                        "validate mutating tool_call with {\"type\":\"mutating_tool_requires_confirmation\"} then replan on failure",
+                        "validate referenced ids with {\"type\":\"referenced_args_observed\"} then replan on failure",
                         "normalize tool_call args before execution",
                         "define state on_task_start and append real tool_result observations after_tool_result",
+                    ],
+                    "validation_checks": [
+                        spec.to_dict() for spec in validation_checks_for_hook("before_tool_call")
                     ],
                     "forbidden": [
                         "rewrite_tool_result",
@@ -498,6 +521,7 @@ def surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
             available_inputs=inputs,
             allowed_outputs=("continue", "modified_context", "modified_response", "modified_model_config"),
             allowed_ops=ops,
+            validation_checks=tuple(spec.to_dict() for spec in validation_checks_for_hook(name)),
         )
     return SurfaceSpec(
         agent_id=spec.name,
@@ -629,6 +653,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
             available_inputs=inputs,
             allowed_outputs=outputs,
             allowed_ops=ops,
+            validation_checks=tuple(spec.to_dict() for spec in validation_checks_for_hook(name)),
         )
     context_sections = tuple(_tool_loop_context_sections(spec, probe))
     return SurfaceSpec(

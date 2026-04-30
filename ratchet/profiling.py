@@ -133,7 +133,7 @@ def confirmation_result(
 def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
     progress_rows = _read_jsonl(out_dir / "progress.jsonl")
     optimizer_calls = _optimizer_call_profile(result.optimizer_call_diagnostics)
-    run_cost = _run_cost_profile(result, optimizer_calls)
+    run_cost = _run_cost_profile(result, optimizer_calls, progress_rows)
     return {
         "elapsed_s": max((float(row.get("elapsed_s", 0.0)) for row in progress_rows), default=0.0),
         "phase_durations_s": _phase_durations(progress_rows),
@@ -162,17 +162,25 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
                 for row in progress_rows
                 if row.get("event") == "diagnosis_completed" and row.get("cached")
             ),
-            "task_theory_cache_hits": sum(
+            "research_theory_cache_hits": sum(
                 1
                 for row in progress_rows
-                if row.get("event") == "task_theory_ready" and row.get("cached")
+                if row.get("event") == "research_theory_ready" and row.get("cached")
             ),
         },
         "cache_hit_rate": _cache_hit_rate(progress_rows),
     }
 
 
-def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) -> dict[str, Any]:
+def _run_cost_profile(
+    result: RatchetResult,
+    optimizer_calls: dict[str, Any],
+    progress_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    progress_rows = progress_rows or []
+    completed_rows = [row for row in progress_rows if row.get("event") == "case_completed"]
+    if completed_rows:
+        return _run_cost_profile_from_progress(completed_rows, optimizer_calls)
     seen_evaluations: set[tuple[str, str, int]] = set()
     eval_cost = 0.0
     eval_input_tokens = 0
@@ -218,11 +226,41 @@ def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) ->
     }
 
 
+def _run_cost_profile_from_progress(
+    completed_rows: list[dict[str, Any]],
+    optimizer_calls: dict[str, Any],
+) -> dict[str, Any]:
+    eval_cost = sum(float(row.get("cost_usd") or 0.0) for row in completed_rows)
+    eval_input_tokens = sum(int(row.get("input_tokens") or 0) for row in completed_rows)
+    eval_output_tokens = sum(int(row.get("output_tokens") or 0) for row in completed_rows)
+    eval_total_tokens = sum(int(row.get("total_tokens") or 0) for row in completed_rows)
+    optimizer_totals = optimizer_calls.get("totals") or {}
+    optimizer_cost = float(optimizer_totals.get("cost_usd") or 0.0)
+    optimizer_input_tokens = int(optimizer_totals.get("input_tokens") or 0)
+    optimizer_output_tokens = int(optimizer_totals.get("output_tokens") or 0)
+    optimizer_total_tokens = int(optimizer_totals.get("total_tokens") or 0)
+    return {
+        "eval_cost_usd": eval_cost,
+        "optimizer_cost_usd": optimizer_cost,
+        "total_cost_usd": eval_cost + optimizer_cost,
+        "eval_case_evaluations": len(completed_rows),
+        "eval_input_tokens": eval_input_tokens,
+        "eval_output_tokens": eval_output_tokens,
+        "eval_tokens": eval_total_tokens,
+        "optimizer_input_tokens": optimizer_input_tokens,
+        "optimizer_output_tokens": optimizer_output_tokens,
+        "optimizer_tokens": optimizer_total_tokens,
+        "total_input_tokens": eval_input_tokens + optimizer_input_tokens,
+        "total_output_tokens": eval_output_tokens + optimizer_output_tokens,
+        "total_tokens": eval_total_tokens + optimizer_total_tokens,
+    }
+
+
 def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for row in proposals:
         reason = str(row.get("rejection_reason") or row.get("constraint_warning") or "")
-        if row.get("transform_family") != "surface_model" or "cost constraint rejected" not in reason:
+        if row.get("surface_mechanism") != "surface_model" or "cost constraint rejected" not in reason:
             continue
         rows.append(
             {

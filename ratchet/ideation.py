@@ -7,6 +7,7 @@ from typing import Any
 DISCOVERY_STAGES = {
     "no_intent",
     "no_valid_implementation",
+    "planned_not_attempted",
     "screened_at_smoke",
     "lost_at_small_dev",
     "failed_full_dev",
@@ -55,7 +56,7 @@ def build_ideation_metrics(
         if _proposal_candidate(row).get("experiment_id") or row.get("experiment_id")
     }
     mechanism_counts = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
-    family_counts = Counter(str(row.get("transform_family") or "unknown") for row in valid_rows)
+    family_counts = Counter(str(row.get("surface_mechanism") or "unknown") for row in valid_rows)
     invalid_reasons = Counter(str(row.get("reason") or row.get("invalid_reason") or "unknown") for row in invalid_rows)
     by_intent: dict[str, dict[str, Any]] = {}
     for intent_id in sorted(intent_ids):
@@ -75,7 +76,7 @@ def build_ideation_metrics(
             "plan_count": len(plans),
             "intent_count": len(intents),
             "intent_mechanisms": dict(Counter(str(intent.get("mechanism_class") or "unknown") for intent in intents)),
-            "intent_with_affordance_ids": sum(1 for intent in intents if intent.get("affordance_ids")),
+            "intent_with_surface_opportunity_ids": sum(1 for intent in intents if intent.get("surface_opportunity_ids")),
         },
         "implementer": {
             "raw_candidate_count": len(proposal_rows),
@@ -99,7 +100,7 @@ def build_ideation_metrics(
 def _discovery_stage(row: dict[str, Any]) -> str:
     if row.get("accepted"):
         return "promotable_dev"
-    if row.get("frontier_status") == "screened_out":
+    if row.get("frontier_status") in {"screened_out", "failed"}:
         stages = [stage.get("stage") for stage in row.get("evaluation_stages", []) if isinstance(stage, dict)]
         if "small_dev" in stages:
             return "lost_at_small_dev"
@@ -114,7 +115,7 @@ def _is_candidate_row(row: dict[str, Any]) -> bool:
         return True
     return bool(
         (row.get("proposal_candidate") or row.get("compiled_candidate") or row.get("candidate"))
-        and (row.get("transform_family") or row.get("mechanism_class"))
+        and (row.get("surface_mechanism") or row.get("mechanism_class"))
     )
 
 
@@ -128,7 +129,7 @@ def _proposal_candidate(row: dict[str, Any]) -> dict[str, Any]:
 
 def _best_intent_stage(rows: list[dict[str, Any]]) -> str:
     if not rows:
-        return "no_valid_implementation"
+        return "planned_not_attempted"
     ordered = [
         "validated",
         "directional_holdout",

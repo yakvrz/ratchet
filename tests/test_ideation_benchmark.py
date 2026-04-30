@@ -47,7 +47,7 @@ class IdeationBenchmarkTests(unittest.TestCase):
                     {
                         "candidate": {"experiment_id": "intent-1"},
                         "candidate_id": "patch-1",
-                        "transform_family": "surface_context",
+                        "surface_mechanism": "surface_context",
                         "mechanism_class": "surface_context",
                         "accepted": True,
                         "full_dev_evaluated": True,
@@ -56,10 +56,10 @@ class IdeationBenchmarkTests(unittest.TestCase):
                 )
                 + "\n"
             )
-            (root / "task_theories.jsonl").write_text(
+            (root / "research_theories.jsonl").write_text(
                 json.dumps(
                     {
-                        "task_theory": {
+                        "research_theory": {
                             "experiment_opportunities": [
                                 {"mechanism_class": "surface_context"}
                             ]

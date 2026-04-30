@@ -2,11 +2,12 @@
 
 from ratchet.adapters import AdapterProtocol, load_adapter
 from ratchet.adapter_generation import AdapterGenerator, GeneratedSingleCallAdapter, ModelRequest
-from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
+from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication, Intervention
+from ratchet.surface_opportunities import SurfaceOpportunity, generate_surface_opportunities
 from ratchet.config import RatchetConfigError
 from ratchet.evidence import ProposalExample, ProposalExampleBank, build_behavior_diagnostics, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import CandidateImplementation, ExperimentIntent, ExperimentSpec, MeasurementDecision, ResearchState, TaskTheory, build_task_theory
+from ratchet.experiments import ExperimentIntent, ExperimentSpec, MeasurementDecision, ResearchState
 from ratchet.grading import exact_text_grade, json_field_grade, numeric_tolerance_grade
 from ratchet.ideation_benchmark import IdeationAssessmentSpec, assess_ideation_run
 from ratchet.interactive import InteractionRecorder
@@ -39,6 +40,8 @@ __all__ = [
     "AdapterGenerator",
     "AgentSpec",
     "AgentTool",
+    "CandidateProposal",
+    "CandidateSurfaceApplication",
     "DiagnosticTrace",
     "EvalCase",
     "FailureDiagnosis",
@@ -48,11 +51,12 @@ __all__ = [
     "GeneratedSingleCallAdapter",
     "GeneratedToolLoopAdapter",
     "IdeationAssessmentSpec",
+    "Intervention",
     "InteractionRecorder",
     "ExperimentSpec",
     "ExperimentIntent",
     "OptimizationConstraints",
-    "OptimizationAffordance",
+    "SurfaceOpportunity",
     "OptimizationObjective",
     "OptimizerModelError",
     "OperationalMetrics",
@@ -64,12 +68,10 @@ __all__ = [
     "ResearchState",
     "RunRecord",
     "SurfaceSpec",
-    "TaskTheory",
     "TargetSemantics",
     "ToolCallTrace",
     "ToolLoopModelResponse",
     "ToolLoopRunConfig",
-    "CandidateImplementation",
     "CandidateImplementer",
     "CompiledCandidate",
     "MeasurementDecision",
@@ -78,12 +80,11 @@ __all__ = [
     "TransformProgram",
     "build_behavior_diagnostics",
     "build_proposal_example_bank",
-    "build_task_theory",
     "assess_ideation_run",
     "exact_text_grade",
     "estimate_cost_usd",
     "final_gate_status",
-    "generate_optimization_affordances",
+    "generate_surface_opportunities",
     "json_field_grade",
     "load_adapter",
     "numeric_tolerance_grade",

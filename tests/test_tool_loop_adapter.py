@@ -217,6 +217,96 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
         self.assertTrue(any(item["op"] == "replan" for item in trace))
 
+    def test_tool_loop_validation_accepts_structured_schema_check(self) -> None:
+        env = _FakeEnvironment()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "schema_guard",
+                    "patches": [
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "target": "tool_call",
+                            "checks": [{"type": "args_schema_valid"}],
+                            "on_fail": {
+                                "hook": "before_tool_call",
+                                "op": "replan",
+                                "message": "Repair the tool arguments before continuing.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        self.assertEqual(env.actions[0], ("lookup_order", {"order_id": " A1 "}))
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "passed" for item in trace))
+
+    def test_tool_loop_schema_validation_rejects_wrong_argument_type(self) -> None:
+        class BadArgClient:
+            def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+                return ToolLoopModelResponse(
+                    message={
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_bad",
+                                "type": "function",
+                                "function": {"name": "lookup_order", "arguments": '{"order_id": 123}'},
+                            }
+                        ],
+                    },
+                    input_tokens=10,
+                    output_tokens=5,
+                )
+
+        env = _FakeEnvironment()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=BadArgClient(),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "schema_guard",
+                    "patches": [
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "target": "tool_call",
+                            "checks": [{"type": "args_schema_valid"}],
+                            "on_fail": {
+                                "hook": "before_tool_call",
+                                "op": "terminate",
+                                "message": "Invalid tool arguments.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        self.assertEqual(env.actions, [])
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
+
     def test_tool_description_rewrite_changes_model_presentation_only(self) -> None:
         env = _FakeEnvironment()
         client = _ToolDescriptionClient()
@@ -268,6 +358,10 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("tool_instructions", section_names)
         self.assertIn("recent_messages", section_names)
         self.assertTrue(surface.tools.tools_available)
+        before_tool_call = surface.hooks["before_tool_call"].to_dict()
+        check_names = {item["type"] for item in before_tool_call["validation_checks"]}
+        self.assertIn("args_schema_valid", check_names)
+        self.assertIn("not_duplicate_tool_call", check_names)
         self.assertEqual(surface.tools.tools[0].name, "lookup_order")
         self.assertEqual(surface.tools.tools[0].metadata["side_effect"], "read")
 

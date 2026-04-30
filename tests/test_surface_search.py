@@ -9,15 +9,17 @@ from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
-from ratchet.transforms import (
-    CandidateAffordanceApplication,
-    CandidateProposal,
+from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication
+from ratchet.surface_search import (
     TransformContextKey,
     TransformContextState,
     build_search_hypothesis,
+)
+from ratchet.transform_validation import (
     validate_candidate_transform,
 )
 from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.surface_opportunities import SurfaceOpportunity, validate_candidate_surface_applications
 
 
 def _summary(labels: list[list[str]]) -> CandidateSummary:
@@ -60,8 +62,8 @@ def _context_candidate() -> CandidateProposal:
             }
         ),
         applications=[
-            CandidateAffordanceApplication(
-                affordance_id="surface.surface_context.system_prompt",
+            CandidateSurfaceApplication(
+                surface_opportunity_id="surface.surface_context.system_prompt",
                 rationale="extra_rule",
             )
         ],
@@ -83,7 +85,7 @@ class TransformLibraryTests(unittest.TestCase):
             history=[],
         )
 
-        self.assertIn("surface_context", hypothesis.active_families)
+        self.assertIn("surface_context", hypothesis.active_mechanisms)
         self.assertTrue(hypothesis.context_states)
 
     def test_compiler_rejects_unsupported_hook(self) -> None:
@@ -215,6 +217,80 @@ class TransformLibraryTests(unittest.TestCase):
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "validation_checks_required")
 
+    def test_compiler_accepts_structured_validation_check_from_surface_registry(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "structured-validation",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "validate",
+                        "target": "draft_response",
+                        "checks": [{"type": "json_object"}],
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "compiled")
+
+    def test_candidate_validation_rejects_log_only_control_candidate(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        candidate = CandidateProposal(
+            program=TransformProgram.from_dict(
+                {
+                    "candidate_id": "control",
+                    "patches": [{"hook": "on_task_end", "op": "log_event", "content": "baseline_control"}],
+                }
+            ),
+            applications=[
+                CandidateSurfaceApplication(
+                    surface_opportunity_id="surface.surface_tool_loop.tool_loop",
+                    rationale="baseline comparator",
+                )
+            ],
+            experiment_id="intent-1",
+            candidate_role="control",
+        )
+
+        error = validate_candidate_transform(candidate, surface=surface)
+
+        self.assertEqual(error, "control candidates are measurement infrastructure, not optimizer candidates")
+
+    def test_empty_source_case_ids_do_not_make_surface_application_an_example_selection(self) -> None:
+        error = validate_candidate_surface_applications(
+            applications=[
+                CandidateSurfaceApplication(
+                    surface_opportunity_id="surface.surface_tool_loop.before_tool_call",
+                    selection={"source_case_ids": [], "selection_strategy": "global"},
+                )
+            ],
+            surface_opportunities=[
+                SurfaceOpportunity(
+                    surface_opportunity_id="surface.surface_tool_loop.before_tool_call",
+                    label="before tool call",
+                    family="surface",
+                    mechanism="surface_tool_loop",
+                    target_name="before_tool_call",
+                    target_kind="tool",
+                    target_path="hooks.before_tool_call",
+                    ops=["validate"],
+                    value_schema={},
+                    semantic_role="tool_loop",
+                    behavioral_axes=[],
+                    expected_scope="global",
+                    risk="low",
+                    measurements=[],
+                    description="before tool call",
+                )
+            ],
+        )
+
+        self.assertIsNone(error)
+
     def test_candidate_validation_rejects_inactive_surface_family(self) -> None:
         surface = surface_from_agent_spec(
             AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
@@ -225,11 +301,11 @@ class TransformLibraryTests(unittest.TestCase):
             objective=OptimizationObjective(),
             history=[],
         )
-        family_state = hypothesis.family_states["surface_context"]
+        family_state = hypothesis.mechanism_states["surface_context"]
         paused_hypothesis = replace(
             hypothesis,
-            family_states={
-                **hypothesis.family_states,
+            mechanism_states={
+                **hypothesis.mechanism_states,
                 "surface_context": replace(family_state, state="paused"),
             },
         )

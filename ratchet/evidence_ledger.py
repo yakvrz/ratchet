@@ -40,7 +40,7 @@ class EvidenceSummary:
     baseline_instability_flags: list[str]
     measurement_cost: dict[str, Any]
     mechanism_class: str
-    affordance_ids: list[str]
+    surface_opportunity_ids: list[str]
     comparison_group: str
     candidate_role: str
     rejection_reason: str | None = None
@@ -64,7 +64,7 @@ class EvidenceLedger:
         baseline: CandidateSummary,
         candidate: CandidateSummary,
         mechanism_class: str,
-        affordance_ids: list[str],
+        surface_opportunity_ids: list[str],
         comparison_group: str,
         candidate_role: str,
         rejection_reason: str | None,
@@ -77,7 +77,7 @@ class EvidenceLedger:
             baseline=baseline,
             candidate=candidate,
             mechanism_class=mechanism_class,
-            affordance_ids=affordance_ids,
+            surface_opportunity_ids=surface_opportunity_ids,
             comparison_group=comparison_group,
             candidate_role=candidate_role,
             rejection_reason=rejection_reason,
@@ -120,7 +120,7 @@ def build_evidence_summary(
     baseline: CandidateSummary,
     candidate: CandidateSummary,
     mechanism_class: str,
-    affordance_ids: list[str],
+    surface_opportunity_ids: list[str],
     comparison_group: str,
     candidate_role: str,
     rejection_reason: str | None,
@@ -168,7 +168,7 @@ def build_evidence_summary(
         baseline_instability_flags=flags,
         measurement_cost=_measurement_cost(candidate),
         mechanism_class=mechanism_class,
-        affordance_ids=list(affordance_ids),
+        surface_opportunity_ids=list(surface_opportunity_ids),
         comparison_group=comparison_group,
         candidate_role=candidate_role,
         rejection_reason=rejection_reason,

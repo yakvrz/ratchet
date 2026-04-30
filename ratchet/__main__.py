@@ -231,7 +231,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
                 if part
             ),
         )
-    if event == "task_theory_ready":
+    if event == "research_theory_ready":
         modes = _join_limited(row.get("residual_failure_modes") or [], limit=3)
         cached = " cached" if row.get("cached") else ""
         return (
@@ -246,7 +246,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             "Plan",
             f"choosing experiments for parent #{row.get('parent_rank')} from "
             f"{row.get('opportunity_count')} opportunity signal(s) and "
-            f"{row.get('surface_opportunity_count', row.get('affordance_count'))} surface opportunity(s)",
+            f"{row.get('surface_opportunity_count')} surface opportunity(s)",
         )
     if event == "research_planner_completed":
         diagnostics = row.get("call_diagnostics") or {}
@@ -326,7 +326,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         return (
             "Candidate",
             f"{_humanize_key(status)} candidate={_short_hash(row.get('candidate_id'))} "
-            f"surface={_humanize_key(row.get('transform_family'))} "
+            f"surface={_humanize_key(row.get('surface_mechanism'))} "
             f"score {_format_signed(row.get('score_delta'), digits=3)} "
             f"cost {_format_money_delta(row.get('cost_delta'))} "
             f"latency {_format_seconds_delta(row.get('latency_delta'))} "

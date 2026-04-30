@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ratchet.affordances import generate_optimization_affordances
+from ratchet.surface_opportunities import generate_surface_opportunities
 from ratchet.surfaces import surface_from_agent_spec, tool_loop_surface_from_agent_spec
 from ratchet.types import AgentSpec, AgentTool
 
@@ -20,9 +20,9 @@ class SurfaceOpportunityTests(unittest.TestCase):
             )
         )
 
-        opportunities = generate_optimization_affordances(surface)
+        opportunities = generate_surface_opportunities(surface)
 
-        ids = {item.affordance_id for item in opportunities}
+        ids = {item.surface_opportunity_id for item in opportunities}
         self.assertTrue(any(item.target_name == "system_prompt" for item in opportunities))
         self.assertTrue(any(item.target_name == "output_contract" for item in opportunities))
         self.assertIn("surface.surface_model.model_config", ids)
@@ -39,9 +39,9 @@ class SurfaceOpportunityTests(unittest.TestCase):
             )
         )
 
-        opportunities = generate_optimization_affordances(
+        opportunities = generate_surface_opportunities(
             surface,
-            active_families=["surface_tool_loop"],
+            active_mechanisms=["surface_tool_loop"],
             evidence={"tool_trajectory_defect": True},
         )
 
@@ -49,7 +49,7 @@ class SurfaceOpportunityTests(unittest.TestCase):
         self.assertEqual(tool.family, "surface_program")
         self.assertEqual(tool.mechanism, "surface_tool_loop")
 
-    def test_tool_loop_surface_exposes_generic_tool_affordance_without_static_tools(self) -> None:
+    def test_tool_loop_surface_exposes_generic_tool_surface_opportunity_without_static_tools(self) -> None:
         surface = tool_loop_surface_from_agent_spec(
             AgentSpec(name="interactive", model="base"),
             probe={
@@ -67,9 +67,9 @@ class SurfaceOpportunityTests(unittest.TestCase):
             },
         )
 
-        opportunities = generate_optimization_affordances(
+        opportunities = generate_surface_opportunities(
             surface,
-            active_families=["surface_tool_loop"],
+            active_mechanisms=["surface_tool_loop"],
             evidence={"tool_trajectory_defect": True},
         )
 

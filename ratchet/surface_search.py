@@ -4,10 +4,10 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ratchet.experiments import CANDIDATE_ROLES
-from ratchet.results import Comparison, CandidateSummary
+from ratchet.candidates import CandidateProposal
+from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
-from ratchet.transform_program import TransformPatch, TransformProgram
+from ratchet.transform_program import TransformPatch
 from ratchet.types import FailureDiagnosis, OptimizationObjective
 
 
@@ -18,24 +18,6 @@ TRANSFORM_LIFECYCLE_STATES = {
     "paused",
     "constrained",
 }
-
-
-@dataclass(frozen=True)
-class TransformFamily:
-    name: str
-    category: str
-    purpose: str
-    supported_edit_kinds: list[str]
-    supported_ops: list[str]
-    activation_signals: list[str]
-    expected_effects: dict[str, str]
-    risks: list[str]
-    required_measurements: list[str]
-    complexity_cost: float
-    parameter_contract: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 @dataclass(frozen=True)
@@ -63,7 +45,7 @@ class BehaviorProfile:
 
 
 @dataclass(frozen=True)
-class TransformFamilyState:
+class SurfaceMechanismState:
     family: str
     state: str
     suitability: float
@@ -136,7 +118,7 @@ class TransformContextKey:
     def from_candidate(cls, candidate: "CandidateProposal") -> "TransformContextKey":
         patches = tuple(candidate.program.patches)
         return cls(
-            family=candidate.transform_family,
+            family=candidate.surface_mechanism,
             target_names=tuple(_transform_patch_target(patch) for patch in patches),
             ops=tuple(patch.op.op for patch in patches),
             target_slice=candidate.target_slice,
@@ -152,7 +134,7 @@ class TransformContextKey:
         existing = row.get("transform_context")
         if isinstance(existing, dict):
             return cls(
-                family=str(existing.get("family") or row.get("transform_family") or "unknown"),
+                family=str(existing.get("family") or row.get("surface_mechanism") or "unknown"),
                 target_names=tuple(str(item) for item in existing.get("target_names", [])),
                 ops=tuple(str(item) for item in existing.get("ops", [])),
                 target_slice=str(existing.get("target_slice") or row.get("target_slice") or "global"),
@@ -166,7 +148,7 @@ class TransformContextKey:
         raw_patches = program_payload.get("patches", []) if isinstance(program_payload, dict) else []
         patches = [TransformPatch.from_dict(item) for item in raw_patches if isinstance(item, dict)]
         return cls(
-            family=str(row.get("transform_family") or "unknown"),
+            family=str(row.get("surface_mechanism") or "unknown"),
             target_names=tuple(_transform_patch_target(patch) for patch in patches),
             ops=tuple(patch.op.op for patch in patches),
             target_slice=str(row.get("target_slice") or "global"),
@@ -209,7 +191,7 @@ class TransformContextState:
 
 @dataclass(frozen=True)
 class SearchHypothesis:
-    family_states: dict[str, TransformFamilyState]
+    mechanism_states: dict[str, SurfaceMechanismState]
     context_states: dict[str, TransformContextState]
     target_slices: list[str]
     profile: BehaviorProfile
@@ -217,11 +199,11 @@ class SearchHypothesis:
     rationale: str
 
     @property
-    def active_families(self) -> list[str]:
+    def active_mechanisms(self) -> list[str]:
         return [
             name
             for name, state in sorted(
-                self.family_states.items(),
+                self.mechanism_states.items(),
                 key=lambda item: (-item[1].suitability, item[0]),
             )
             if state.state in {"active", "promotable_dev"}
@@ -242,13 +224,13 @@ class SearchHypothesis:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "family_states": {
-                name: state.to_dict() for name, state in sorted(self.family_states.items())
+            "mechanism_states": {
+                name: state.to_dict() for name, state in sorted(self.mechanism_states.items())
             },
             "context_states": {
                 context_id: state.to_dict() for context_id, state in sorted(self.context_states.items())
             },
-            "active_families": self.active_families,
+            "active_mechanisms": self.active_mechanisms,
             "active_contexts": self.active_contexts,
             "target_slices": list(self.target_slices),
             "profile": self.profile.to_dict(),
@@ -256,19 +238,19 @@ class SearchHypothesis:
             "rationale": self.rationale,
         }
 
-    def to_prompt_dict(self, *, max_contexts_per_family: int = 3, max_constrained_contexts: int = 8) -> dict[str, Any]:
+    def to_prompt_dict(self, *, max_contexts_per_mechanism: int = 3, max_constrained_contexts: int = 8) -> dict[str, Any]:
         ranked_contexts = sorted(
             self.context_states.values(),
             key=lambda state: (-state.suitability, state.key.family, state.key.scope_id, state.key.id),
         )
         active_contexts: list[dict[str, Any]] = []
-        counts_by_family: Counter[str] = Counter()
+        counts_by_mechanism: Counter[str] = Counter()
         for state in ranked_contexts:
             if state.state not in {"active", "promotable_dev"}:
                 continue
-            if counts_by_family[state.key.family] >= max_contexts_per_family:
+            if counts_by_mechanism[state.key.family] >= max_contexts_per_mechanism:
                 continue
-            counts_by_family[state.key.family] += 1
+            counts_by_mechanism[state.key.family] += 1
             active_contexts.append(_context_prompt_row(state))
         constrained_contexts = [
             _context_prompt_row(state)
@@ -276,7 +258,7 @@ class SearchHypothesis:
             if state.state in {"constrained", "paused"} and state.recent_result_count > 0
         ][:max_constrained_contexts]
         return {
-            "family_states": {
+            "mechanism_states": {
                 name: {
                     "state": state.state,
                     "suitability": state.suitability,
@@ -284,9 +266,9 @@ class SearchHypothesis:
                     "reason": state.reason,
                     "constraints": list(state.constraints),
                 }
-                for name, state in sorted(self.family_states.items())
+                for name, state in sorted(self.mechanism_states.items())
             },
-            "active_families": self.active_families,
+            "active_mechanisms": self.active_mechanisms,
             "active_contexts": active_contexts,
             "constrained_or_paused_contexts": constrained_contexts,
             "target_slices": list(self.target_slices[:8]),
@@ -306,317 +288,6 @@ class SearchHypothesis:
             "rationale": self.rationale,
         }
 
-
-@dataclass(frozen=True)
-class Intervention:
-    kind: str
-    payload: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return {"kind": self.kind, "payload": dict(self.payload)}
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "Intervention":
-        return cls(
-            kind=str(payload.get("kind", "")),
-            payload=dict(payload.get("payload", {})),
-        )
-
-
-@dataclass(frozen=True)
-class CandidateAffordanceApplication:
-    affordance_id: str
-    selection: dict[str, Any] = field(default_factory=dict)
-    rationale: str = ""
-
-    @property
-    def family(self) -> str:
-        if self.affordance_id.startswith("surface."):
-            return self.mechanism
-        parts = self.affordance_id.split(".")
-        return parts[0] if parts else ""
-
-    @property
-    def mechanism(self) -> str:
-        if self.affordance_id.startswith("surface."):
-            parts = self.affordance_id.split(".")
-            return parts[1] if len(parts) > 1 else "surface"
-        parts = self.affordance_id.split(".")
-        return parts[1] if len(parts) > 1 else ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "affordance_id": self.affordance_id,
-            "surface_opportunity_id": self.affordance_id,
-            "surface": self.mechanism,
-            "selection": dict(self.selection),
-            "rationale": self.rationale,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CandidateAffordanceApplication":
-        affordance_id = str(payload.get("surface_opportunity_id") or payload.get("affordance_id") or "")
-        if not affordance_id:
-            raise ValueError("application requires surface_opportunity_id")
-        raw_operation = payload.get("operation")
-        raw_selection = payload.get("selection")
-        if isinstance(raw_operation, dict):
-            raise ValueError("applications cite surface affordances; transform edits belong in program.patches")
-        selection = dict(raw_selection) if isinstance(raw_selection, dict) else {}
-        return cls(
-            affordance_id=affordance_id,
-            selection=selection,
-            rationale=str(payload.get("rationale") or ""),
-        )
-
-
-@dataclass(frozen=True)
-class CandidateProposal:
-    program: TransformProgram
-    applications: list[CandidateAffordanceApplication]
-    experiment_id: str = ""
-    candidate_role: str = "atomic"
-    comparison_group: str = ""
-    target_slice: str = "global"
-    hypothesis: str = ""
-    expected_effects: dict[str, Any] = field(default_factory=dict)
-    evaluation_plan: str = "full_dev"
-
-    @property
-    def affordance_ids(self) -> list[str]:
-        return [application.affordance_id for application in self.applications]
-
-    @property
-    def transform_family(self) -> str:
-        return self.applications[0].family if self.applications else ""
-
-    @property
-    def mechanism_class(self) -> str:
-        return self.applications[0].mechanism if self.applications else ""
-
-    @property
-    def transform_instance(self) -> str:
-        return "; ".join(application.rationale for application in self.applications if application.rationale)[:240]
-
-    @property
-    def transform_parameters(self) -> dict[str, Any]:
-        source_ids: list[str] = []
-        strategies: list[str] = []
-        for application in self.applications:
-            raw_ids = application.selection.get("source_case_ids")
-            if isinstance(raw_ids, list):
-                source_ids.extend(str(item) for item in raw_ids if isinstance(item, str) and item)
-            if application.selection.get("selection_strategy"):
-                strategies.append(str(application.selection["selection_strategy"]))
-        row: dict[str, Any] = {}
-        if source_ids:
-            row["source_case_ids"] = source_ids
-        if strategies:
-            row["selection_strategies"] = sorted(set(strategies))
-        if "few_shot_example_count" in self.program.metadata:
-            row["few_shot_example_count"] = self.program.metadata["few_shot_example_count"]
-        return row
-
-    @property
-    def intervention(self) -> Intervention:
-        if self.program.patches:
-            return Intervention(kind="transform_program", payload={"program": self.program.to_dict()})
-        if self.applications and self.applications[0].selection:
-            return Intervention(kind="example_selection", payload=dict(self.applications[0].selection))
-        return Intervention(kind="transform_program", payload={"program": self.program.to_dict()})
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "transform_family": self.transform_family,
-            "intervention": self.intervention.to_dict(),
-            "transform_instance": self.transform_instance,
-            "transform_parameters": dict(self.transform_parameters),
-            "mechanism_class": self.mechanism_class,
-            "experiment_id": self.experiment_id,
-            "candidate_role": self.candidate_role,
-            "comparison_group": self.comparison_group,
-            "affordance_ids": list(self.affordance_ids),
-            "surface_opportunity_ids": list(self.affordance_ids),
-            "target_slice": self.target_slice,
-            "transform_context": TransformContextKey.from_candidate(self).to_dict(),
-            "hypothesis": self.hypothesis,
-            "expected_effects": dict(self.expected_effects),
-            "evaluation_plan": self.evaluation_plan,
-            "applications": [application.to_dict() for application in self.applications],
-            "program": self.program.to_dict(),
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
-        if "patch" in payload:
-            raise ValueError("candidate must emit a typed transform program, not an untyped patch")
-        if payload.get("transform_parameters"):
-            raise ValueError("candidate transform_parameters are derived; put candidate-specific data in applications[]")
-        if payload.get("transform_family") or payload.get("mechanism_class") or payload.get("affordance_ids"):
-            raise ValueError("candidate must cite applications[]; family, mechanism, and affordance_ids are derived")
-        raw_program = payload.get("program") or payload.get("transform_program")
-        if not isinstance(raw_program, dict):
-            raw_patches = payload.get("patches")
-            if isinstance(raw_patches, list):
-                raw_program = {
-                    "id": str(payload.get("candidate_id") or payload.get("experiment_id") or ""),
-                    "hypothesis_id": str(payload.get("hypothesis_id") or ""),
-                    "patches": raw_patches,
-                    "metadata": dict(payload.get("metadata") or {}),
-                }
-        if not isinstance(raw_program, dict):
-            raise ValueError("candidate requires program or patches[]")
-        program_payload = dict(raw_program)
-        if not program_payload.get("id") and not program_payload.get("candidate_id"):
-            program_payload["id"] = str(payload.get("experiment_id") or payload.get("candidate_id") or "")
-        metadata = {
-            **dict(program_payload.get("metadata") or {}),
-            "hypothesis": str(payload.get("hypothesis", "")),
-            "expected_effects": dict(payload.get("expected_effects", {})),
-        }
-        program_payload["metadata"] = metadata
-        program = TransformProgram.from_dict(program_payload)
-        raw_applications = payload.get("applications")
-        if not isinstance(raw_applications, list) or not raw_applications:
-            raise ValueError("candidate requires non-empty applications[]")
-        applications = [
-            CandidateAffordanceApplication.from_dict(application)
-            for application in raw_applications
-            if isinstance(application, dict)
-        ]
-        if len(applications) != len(raw_applications):
-            raise ValueError("candidate applications must be objects")
-        return cls(
-            program=program,
-            applications=applications,
-            experiment_id=str(payload.get("experiment_id", "")),
-            candidate_role=str(payload.get("candidate_role", "atomic") or "atomic"),
-            comparison_group=str(payload.get("comparison_group", "")),
-            target_slice=str(payload.get("target_slice", "global") or "global"),
-            hypothesis=str(payload.get("hypothesis", "")),
-            expected_effects=dict(payload.get("expected_effects", {})),
-            evaluation_plan=str(payload.get("evaluation_plan", "full_dev") or "full_dev"),
-        )
-
-
-@dataclass(frozen=True)
-class TransformResultSummary:
-    family: str
-    proposed_count: int = 0
-    evaluated_count: int = 0
-    accepted_count: int = 0
-    rejected_count: int = 0
-    best_score_delta: float | None = None
-    best_cost_delta: float | None = None
-    best_latency_delta: float | None = None
-    state: str = "available"
-    reason: str = "No candidates evaluated for this surface mechanism."
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
-    "surface_context": TransformFamily(
-        name="surface_context",
-        category="context",
-        purpose="Modify model-visible context graph sections through typed DSL patches.",
-        supported_edit_kinds=["instruction"],
-        supported_ops=["add_context_section", "replace_context_section", "remove_context_section", "move_context_section", "reorder_context_sections"],
-        activation_signals=["branch_failures", "correctness_gap", "weak_slices"],
-        expected_effects={"correctness": "variable", "cost": "token-dependent", "latency": "token-dependent"},
-        risks=["overconstrains behavior", "moves failures between slices"],
-        required_measurements=["score_delta", "regression_cases", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-    ),
-    "surface_tool_loop": TransformFamily(
-        name="surface_tool_loop",
-        category="tool_loop",
-        purpose="Modify tool presentation and tool-loop middleware without changing true tool semantics.",
-        supported_edit_kinds=["tool"],
-        supported_ops=["annotate_tool", "rewrite_tool_description", "validate", "normalize_tool_args", "repair_tool_args", "replan"],
-        activation_signals=["tool_dependent_slice", "correctness_gap"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["tool overuse", "tool underuse", "tool-call regression"],
-        required_measurements=["score_delta", "tool_call_delta", "tool_error_delta", "turn_delta"],
-        complexity_cost=1.25,
-    ),
-    "surface_state": TransformFamily(
-        name="surface_state",
-        category="state",
-        purpose="Add and maintain typed runtime state for context, validation, and response guards.",
-        supported_edit_kinds=["state"],
-        supported_ops=["define_state", "store_state", "append_state", "merge_state", "clear_state", "expose_state"],
-        activation_signals=["branch_failures", "tool_dependent_slice"],
-        expected_effects={"correctness": "variable", "cost": "low", "latency": "low"},
-        risks=["state drift", "extra prompt tokens when exposed"],
-        required_measurements=["score_delta", "runtime_error_delta", "cost_delta"],
-        complexity_cost=1.25,
-    ),
-    "surface_response": TransformFamily(
-        name="surface_response",
-        category="response",
-        purpose="Validate, block, or rewrite draft responses at declared response hooks.",
-        supported_edit_kinds=["response"],
-        supported_ops=["validate", "validate_claims", "rewrite_response", "block_response"],
-        activation_signals=["invalid_output", "runtime_truncation"],
-        expected_effects={"correctness": "variable", "cost": "low", "latency": "low"},
-        risks=["over-suppresses valid responses"],
-        required_measurements=["score_delta", "invalid_output_delta", "cost_delta"],
-        complexity_cost=1.0,
-    ),
-    "surface_output": TransformFamily(
-        name="surface_output",
-        category="output",
-        purpose="Modify explicit output-contract sections and output schemas.",
-        supported_edit_kinds=["output"],
-        supported_ops=["add_context_section", "replace_context_section", "validate"],
-        activation_signals=["invalid_output", "runtime_truncation"],
-        expected_effects={"correctness": "variable", "cost": "token-dependent", "latency": "token-dependent"},
-        risks=["format improves while semantics regress"],
-        required_measurements=["score_delta", "invalid_output_delta", "regression_cases"],
-        complexity_cost=1.0,
-    ),
-    "surface_runtime": TransformFamily(
-        name="surface_runtime",
-        category="runtime",
-        purpose="Tune declared retry, turn, and runtime-control surfaces.",
-        supported_edit_kinds=["runtime"],
-        supported_ops=["set_retry_policy", "set_turn_limit", "set_tool_call_limit", "validate_completion"],
-        activation_signals=["runtime_errors", "runtime_truncation", "cost_objective", "latency_objective"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["hidden correctness tradeoff"],
-        required_measurements=["score_delta", "turn_delta", "latency_delta", "cost_delta"],
-        complexity_cost=1.0,
-    ),
-    "surface_model": TransformFamily(
-        name="surface_model",
-        category="model",
-        purpose="Change declared model invocation settings.",
-        supported_edit_kinds=["model"],
-        supported_ops=["set_model_config"],
-        activation_signals=["correctness_gap", "cost_objective", "latency_objective"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["global behavior change", "cost or latency regression"],
-        required_measurements=["score_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-    ),
-    "surface_examples": TransformFamily(
-        name="surface_examples",
-        category="examples",
-        purpose="Expose proposal-safe examples as typed context sections.",
-        supported_edit_kinds=["few_shot"],
-        supported_ops=["add_context_section"],
-        activation_signals=["weak_slices"],
-        expected_effects={"correctness": "variable", "cost": "increase", "latency": "token-dependent"},
-        risks=["example overfitting", "prompt growth"],
-        required_measurements=["score_delta", "example_token_delta", "regression_cases"],
-        complexity_cost=1.5,
-    ),
-}
-
-def transform_registry() -> dict[str, TransformFamily]:
-    return dict(TRANSFORM_FAMILIES)
 
 
 def build_behavior_profile(summary: CandidateSummary) -> BehaviorProfile:
@@ -736,10 +407,10 @@ def build_search_hypothesis(
             suitability=suitability,
             evidence=evidence,
         )
-    family_states = _aggregate_family_states(context_states)
-    allocation = _budget_allocation(family_states)
-    family_states = {
-        name: TransformFamilyState(
+    mechanism_states = _aggregate_mechanism_states(context_states)
+    allocation = _budget_allocation(mechanism_states)
+    mechanism_states = {
+        name: SurfaceMechanismState(
             family=state.family,
             state=state.state,
             suitability=state.suitability,
@@ -748,72 +419,16 @@ def build_search_hypothesis(
             evidence=list(state.evidence),
             constraints=list(state.constraints),
         )
-        for name, state in family_states.items()
+        for name, state in mechanism_states.items()
     }
     return SearchHypothesis(
-        family_states=family_states,
+        mechanism_states=mechanism_states,
         context_states=context_states,
         target_slices=profile.target_slices,
         profile=profile,
         budget_allocation=allocation,
         rationale="Search hypothesis derived from the inferred optimization surface, current behavior profile, diagnoses, objective, and branch-local surface-program history.",
     )
-
-
-def validate_candidate_transform(
-    candidate: CandidateProposal,
-    *,
-    surface: SurfaceSpec,
-    search_hypothesis: SearchHypothesis | None = None,
-) -> str | None:
-    if not candidate.experiment_id:
-        return "candidate must belong to an experiment"
-    if candidate.candidate_role not in CANDIDATE_ROLES:
-        return f"unknown candidate role {candidate.candidate_role!r}"
-    if not candidate.applications:
-        return "candidate must include at least one surface opportunity application"
-    for application in candidate.applications:
-        if application.affordance_id.startswith("surface."):
-            continue
-        return f"candidate application must cite a surface_opportunity_id, got {application.affordance_id!r}"
-    if search_hypothesis is not None:
-        eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
-        if eligibility_error is not None:
-            return eligibility_error
-    return None
-
-
-def validate_candidate_context(
-    candidate: CandidateProposal,
-    *,
-    search_hypothesis: SearchHypothesis,
-    surface: SurfaceSpec | None = None,
-) -> str | None:
-    for family_name in sorted({application.family for application in candidate.applications}):
-        family_state = search_hypothesis.family_states.get(family_name)
-        if family_state is None or family_name not in search_hypothesis.active_families:
-            return f"inactive surface mechanism {family_name!r}"
-    combined_key = TransformContextKey.from_candidate(candidate)
-    exact_state = search_hypothesis.context_states.get(combined_key.id)
-    if exact_state is not None and exact_state.state in {"paused", "available"}:
-        return f"inactive transform context {combined_key.id!r}"
-    if exact_state is not None and exact_state.state == "constrained":
-        return f"constrained transform context {combined_key.id!r} requires a materially distinct mechanism"
-    for application in candidate.applications:
-        if application.selection:
-            operation_key = TransformContextKey(
-                family=application.family,
-                target_names=("proposal_selected_examples",),
-                ops=("add_context_section",),
-                target_slice=candidate.target_slice,
-                mechanism=(application.mechanism,),
-                transform_instance=application.rationale or candidate.hypothesis or "candidate",
-            )
-            operation_error = _operation_context_error(operation_key, search_hypothesis)
-            if operation_error is not None:
-                return operation_error
-            continue
-    return None
 
 
 def select_branch_history(history: list[dict[str, Any]], parent_candidate_id: str | None) -> list[dict[str, Any]]:
@@ -837,214 +452,6 @@ def select_branch_history(history: list[dict[str, Any]], parent_candidate_id: st
         for row in history
         if row.get("candidate_id") in lineage or row.get("parent_candidate_id") == parent_candidate_id
     ]
-
-
-def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    context_summaries = summarize_transform_context_results(proposals)
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    proposed_counts: Counter[str] = Counter()
-    for row in proposals:
-        family = str(row.get("transform_family") or "unknown")
-        if row.get("type") == "candidate_proposal":
-            proposed_counts[family] += 1
-        else:
-            grouped[family].append(row)
-    summaries: dict[str, dict[str, Any]] = {}
-    for family in sorted(set(grouped) | set(proposed_counts)):
-        rows = grouped.get(family, [])
-        evaluated_count = len(rows)
-        proposed_count = max(proposed_counts.get(family, 0), evaluated_count)
-        accepted_rows = [row for row in rows if row.get("accepted")]
-        comparisons = [row.get("comparison_to_parent") or {} for row in rows]
-        score_deltas = [float(item["score_delta"]) for item in comparisons if "score_delta" in item]
-        cost_deltas = [float(item["cost_delta"]) for item in comparisons if "cost_delta" in item]
-        latency_deltas = [float(item["latency_delta"]) for item in comparisons if "latency_delta" in item]
-        score_regressed = any(delta < 0 for delta in score_deltas)
-        if accepted_rows:
-            state = "promotable_dev"
-            reason = "At least one candidate from this surface mechanism earned finalist eligibility on dev."
-        elif evaluated_count >= 2 or score_regressed:
-            state = "constrained"
-            reason = (
-                "At least one candidate from this surface mechanism regressed score; future attempts should use a distinct target, slice, or instance."
-                if score_regressed
-                else "Multiple evaluated candidates failed the configured objective gate; future attempts should avoid near-duplicate instances."
-            )
-        elif evaluated_count == 1:
-            state = "paused"
-            reason = "The evaluated candidate failed the configured objective gate."
-        else:
-            state = "available"
-            reason = "No candidates evaluated for this surface mechanism."
-        summaries[family] = TransformResultSummary(
-            family=family,
-            proposed_count=proposed_count,
-            evaluated_count=evaluated_count,
-            accepted_count=len(accepted_rows),
-            rejected_count=max(evaluated_count - len(accepted_rows), 0),
-            best_score_delta=max(score_deltas) if score_deltas else None,
-            best_cost_delta=min(cost_deltas) if cost_deltas else None,
-            best_latency_delta=min(latency_deltas) if latency_deltas else None,
-            state=state,
-            reason=reason,
-        ).to_dict()
-        family_contexts = [
-            summary
-            for summary in context_summaries.values()
-            if ((summary.get("key") or {}).get("family") == family)
-        ]
-        if family_contexts:
-            if any(summary.get("state") == "promotable_dev" for summary in family_contexts):
-                summaries[family]["state"] = "promotable_dev"
-            elif any(summary.get("state") == "active" for summary in family_contexts):
-                summaries[family]["state"] = "active"
-            elif any(summary.get("state") == "constrained" for summary in family_contexts):
-                summaries[family]["state"] = "constrained"
-            elif any(summary.get("state") == "paused" for summary in family_contexts):
-                summaries[family]["state"] = "paused"
-    return summaries
-
-
-def summarize_transform_context_results(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in proposals:
-        if "accepted" not in row:
-            continue
-        key = TransformContextKey.from_row(row)
-        grouped[key.id].append(row)
-    summaries: dict[str, dict[str, Any]] = {}
-    for context_id, rows in sorted(grouped.items()):
-        key = TransformContextKey.from_row(rows[-1])
-        comparisons = [row.get("comparison_to_parent") or {} for row in rows]
-        score_deltas = [float(item["score_delta"]) for item in comparisons if "score_delta" in item]
-        cost_deltas = [float(item["cost_delta"]) for item in comparisons if "cost_delta" in item]
-        latency_deltas = [float(item["latency_delta"]) for item in comparisons if "latency_delta" in item]
-        accepted_rows = [row for row in rows if row.get("accepted")]
-        state = _context_lifecycle_state(
-            key=key,
-            rows=rows,
-            suitability=0.0,
-            evidence=[],
-        ).state
-        reason = _context_summary_reason(state)
-        summaries[context_id] = {
-            "key": key.to_dict(),
-            "state": state,
-            "proposed_count": len(rows),
-            "evaluated_count": len(rows),
-            "accepted_count": len(accepted_rows),
-            "rejected_count": max(len(rows) - len(accepted_rows), 0),
-            "best_score_delta": max(score_deltas) if score_deltas else None,
-            "best_cost_delta": min(cost_deltas) if cost_deltas else None,
-            "best_latency_delta": min(latency_deltas) if latency_deltas else None,
-            "reason": reason,
-        }
-    return summaries
-
-
-def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for row in proposals:
-        candidate = row.get("proposal_candidate") if isinstance(row.get("proposal_candidate"), dict) else {}
-        if not candidate:
-            candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
-        applications = row.get("applications") or candidate.get("applications") if isinstance(candidate, dict) else []
-        if not isinstance(applications, list):
-            continue
-        for application in applications:
-            if not isinstance(application, dict):
-                continue
-            affordance_id = str(application.get("affordance_id") or "")
-            if affordance_id:
-                grouped[affordance_id].append(row)
-
-    summaries: dict[str, dict[str, Any]] = {}
-    for affordance_id, rows in sorted(grouped.items()):
-        evaluated_rows = [row for row in rows if "accepted" in row]
-        valid_rows = [row for row in rows if row.get("valid") is not False]
-        accepted_rows = [row for row in evaluated_rows if row.get("accepted")]
-        comparisons = [row.get("comparison_to_parent") or {} for row in evaluated_rows]
-        score_deltas = [float(item["score_delta"]) for item in comparisons if "score_delta" in item]
-        cost_deltas = [float(item["cost_delta"]) for item in comparisons if "cost_delta" in item]
-        latency_deltas = [float(item["latency_delta"]) for item in comparisons if "latency_delta" in item]
-        invalid_reasons = Counter(
-            str(row.get("invalid_reason"))
-            for row in rows
-            if row.get("valid") is False and row.get("invalid_reason")
-        )
-        if accepted_rows:
-            state = "promotable_dev"
-            reason = "At least one application of this surface opportunity earned finalist eligibility on dev."
-        elif score_deltas and any(delta < 0 for delta in score_deltas):
-            state = "constrained"
-            reason = "At least one evaluated application regressed score."
-        elif len(evaluated_rows) >= 2:
-            state = "constrained"
-            reason = "Multiple evaluated applications failed the configured objective gate."
-        elif evaluated_rows:
-            state = "paused"
-            reason = "The evaluated application did not improve the configured objective."
-        elif invalid_reasons:
-            state = "invalid"
-            reason = "No application reached evaluation because implementation validation failed."
-        else:
-            state = "proposed"
-            reason = "Affordance was proposed but not evaluated."
-        summaries[affordance_id] = {
-            "affordance_id": affordance_id,
-            "family": _affordance_id_part(affordance_id, 0),
-            "mechanism": _affordance_id_part(affordance_id, 1),
-            "state": state,
-            "proposed_count": len(rows),
-            "valid_count": len(valid_rows),
-            "evaluated_count": len(evaluated_rows),
-            "accepted_count": len(accepted_rows),
-            "rejected_count": max(len(evaluated_rows) - len(accepted_rows), 0),
-            "invalid_count": max(len(rows) - len(valid_rows), 0),
-            "best_score_delta": max(score_deltas) if score_deltas else None,
-            "best_cost_delta": min(cost_deltas) if cost_deltas else None,
-            "best_latency_delta": min(latency_deltas) if latency_deltas else None,
-            "invalid_reasons": dict(sorted(invalid_reasons.items())),
-            "candidate_ids": [
-                str(row.get("candidate_id"))
-                for row in evaluated_rows
-                if row.get("candidate_id")
-            ][:8],
-            "reason": reason,
-        }
-    return summaries
-
-
-def _affordance_id_part(affordance_id: str, index: int) -> str:
-    parts = affordance_id.split(".")
-    return parts[index] if len(parts) > index else ""
-
-
-def observe_transform_result(
-    *,
-    family: str,
-    context_key: TransformContextKey | None = None,
-    accepted: bool,
-    comparison: Comparison,
-    rejection_reason: str | None,
-) -> dict[str, Any]:
-    if accepted:
-        state = "promotable_dev"
-        reason = "Candidate earned finalist eligibility on dev."
-    elif comparison.score_delta < 0:
-        state = "constrained"
-        reason = rejection_reason or "Candidate regressed score; future attempts should be materially distinct."
-    else:
-        state = "paused"
-        reason = rejection_reason or "Candidate did not improve the configured objective."
-    return {
-        "type": "transform_observation",
-        "transform_family": family,
-        "transform_context": context_key.to_dict() if context_key else None,
-        "state": state,
-        "reason": reason,
-        "comparison_to_parent": comparison.to_dict(),
-    }
 
 
 def _diagnosis_signals(diagnoses: list[FailureDiagnosis]) -> dict[str, set[str]]:
@@ -1204,11 +611,11 @@ def _context_lifecycle_state(
     )
 
 
-def _aggregate_family_states(context_states: dict[str, TransformContextState]) -> dict[str, TransformFamilyState]:
+def _aggregate_mechanism_states(context_states: dict[str, TransformContextState]) -> dict[str, SurfaceMechanismState]:
     grouped: dict[str, list[TransformContextState]] = defaultdict(list)
     for context_state in context_states.values():
         grouped[context_state.key.family].append(context_state)
-    family_states: dict[str, TransformFamilyState] = {}
+    mechanism_states: dict[str, SurfaceMechanismState] = {}
     for family_name in sorted(grouped):
         states = grouped.get(family_name, [])
         if any(state.state == "promotable_dev" for state in states):
@@ -1224,7 +631,7 @@ def _aggregate_family_states(context_states: dict[str, TransformContextState]) -
         suitability = max((state.suitability for state in states), default=0.0)
         evidence = _unique(item for state in states for item in state.evidence)
         constraints = _unique(item for state in states for item in state.constraints)
-        family_states[family_name] = TransformFamilyState(
+        mechanism_states[family_name] = SurfaceMechanismState(
             family=family_name,
             state=state_name,
             suitability=suitability,
@@ -1233,10 +640,10 @@ def _aggregate_family_states(context_states: dict[str, TransformContextState]) -
             evidence=evidence,
             constraints=constraints,
         )
-    return family_states
+    return mechanism_states
 
 
-def _budget_allocation(states: dict[str, TransformFamilyState]) -> dict[str, float]:
+def _budget_allocation(states: dict[str, SurfaceMechanismState]) -> dict[str, float]:
     active = {
         name: state.suitability
         for name, state in states.items()
@@ -1251,11 +658,11 @@ def _budget_allocation(states: dict[str, TransformFamilyState]) -> dict[str, flo
 def _constraints_for_lifecycle_state(state: str) -> list[str]:
     if state == "constrained":
         return [
-            "Do not propose near-duplicates of failed instances from this family.",
-            "Only retry this family with a materially different target, slice, parameterization, or expected mechanism.",
+            "Do not propose near-duplicates of failed instances from this mechanism.",
+            "Only retry this mechanism with a materially different target, slice, parameterization, or expected mechanism.",
         ]
     if state == "paused":
-        return ["Do not retry this family unless later evidence makes it active again."]
+        return ["Do not retry this mechanism unless later evidence makes it active again."]
     return []
 
 
@@ -1332,7 +739,7 @@ def _operation_context_error(
         return None
     if same_scope_states:
         return f"inactive transform context scope {operation_key.scope_id!r}"
-    if operation_key.family in search_hypothesis.active_families:
+    if operation_key.family in search_hypothesis.active_mechanisms:
         return None
     return f"inactive surface mechanism {operation_key.family!r}"
 

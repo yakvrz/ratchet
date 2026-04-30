@@ -175,7 +175,7 @@ class RatchetReporter:
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
         write_json(self.out_dir / "evidence_ledger.json", result.evidence_ledger)
         write_jsonl(self.out_dir / "diagnoses.jsonl", result.diagnoses)
-        write_jsonl(self.out_dir / "task_theories.jsonl", result.task_theories)
+        write_jsonl(self.out_dir / "research_theories.jsonl", result.research_theories)
         write_jsonl(self.out_dir / "proposals.jsonl", result.proposals)
         write_json(
             self.out_dir / "candidate_metrics.json",
@@ -188,12 +188,12 @@ class RatchetReporter:
                 "holdout_candidates": [summary.to_dict() for summary in result.holdout_candidates],
                 "pareto_frontier": result.pareto_frontier,
                 "generated_surface": result.generated_surface,
-                "task_theories": result.task_theories,
+                "research_theories": result.research_theories,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
-                "affordance_summaries": result.affordance_summaries,
+                "surface_opportunity_summaries": result.surface_opportunity_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -221,11 +221,11 @@ class RatchetReporter:
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
-                "task_theories": result.task_theories,
+                "research_theories": result.research_theories,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
-                "affordance_summaries": result.affordance_summaries,
+                "surface_opportunity_summaries": result.surface_opportunity_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -276,7 +276,7 @@ class RatchetReporter:
             "",
             "## Task Theory",
             "",
-            *self._task_theory_rows(result),
+            *self._research_theory_rows(result),
             "",
             "## Frontier Categories",
             "",
@@ -388,7 +388,7 @@ class RatchetReporter:
             "",
             "## Surface Opportunities",
             "",
-            *self._affordance_summary_rows(result),
+            *self._surface_opportunity_summary_rows(result),
             "",
             "## Transform Contexts",
             "",
@@ -623,7 +623,7 @@ class RatchetReporter:
         invalid_reasons = implementer.get("invalid_reason_counts") or {}
         rows = [
             f"- Planner intents: {planner.get('intent_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
-            f"- Intents citing surface opportunities: {planner.get('intent_with_affordance_ids', 0)}.",
+            f"- Intents citing surface opportunities: {planner.get('intent_with_surface_opportunity_ids', 0)}.",
             f"- Implementer candidates: valid={implementer.get('valid_candidate_count', 0)} invalid={implementer.get('invalid_candidate_count', 0)}.",
             f"- Discovery stages: {json.dumps(stage_counts, sort_keys=True)}",
         ]
@@ -635,12 +635,12 @@ class RatchetReporter:
         return rows
 
     @staticmethod
-    def _task_theory_rows(result: RatchetResult) -> list[str]:
-        if not result.task_theories:
-            return ["No task theory snapshots were recorded."]
+    def _research_theory_rows(result: RatchetResult) -> list[str]:
+        if not result.research_theories:
+            return ["No research theory snapshots were recorded."]
         rows = []
-        for item in result.task_theories[-5:]:
-            theory = item.get("research_theory") or item.get("task_theory") or {}
+        for item in result.research_theories[-5:]:
+            theory = item.get("research_theory") or {}
             opportunities = [
                 str(row.get("mechanism_class"))
                 for row in theory.get("experiment_opportunities", [])[:3]
@@ -704,7 +704,7 @@ class RatchetReporter:
                 f"{signal['case_count']} | "
                 f"{signal['score_delta']:+.3f} | "
                 f"{signal['pass_gain']:+d} | "
-                f"`{row.get('mechanism_class') or row.get('transform_family')}` |"
+                f"`{row.get('mechanism_class') or row.get('surface_mechanism')}` |"
             )
         if len(rows) > 12:
             table.append(f"- {len(rows) - 12} additional screened candidates omitted from this table.")
@@ -806,24 +806,24 @@ class RatchetReporter:
         ]
 
     @staticmethod
-    def _affordance_summary_rows(result: RatchetResult) -> list[str]:
-        if not result.affordance_summaries:
+    def _surface_opportunity_summary_rows(result: RatchetResult) -> list[str]:
+        if not result.surface_opportunity_summaries:
             return ["No surface opportunity applications were recorded."]
         rows = [
             "| Surface opportunity | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
             "| --- | --- | ---: | ---: | ---: | ---: | --- |",
         ]
         ranked = sorted(
-            result.affordance_summaries.values(),
+            result.surface_opportunity_summaries.values(),
             key=lambda item: (
                 str(item.get("state") or ""),
-                str(item.get("affordance_id") or ""),
+                str(item.get("surface_opportunity_id") or ""),
             ),
         )
         for item in ranked[:20]:
             rows.append(
                 "| "
-                f"`{item.get('affordance_id')}` | "
+                f"`{item.get('surface_opportunity_id')}` | "
                 f"`{item.get('state')}` | "
                 f"{item.get('proposed_count', 0)} | "
                 f"{item.get('evaluated_count', 0)} | "
@@ -944,7 +944,7 @@ class RatchetReporter:
         rows = [
             row
             for row in result.proposals
-            if row.get("transform_family") == "surface_examples" and row.get("metrics")
+            if row.get("surface_mechanism") == "surface_examples" and row.get("metrics")
         ]
         if not rows:
             return ["No evaluated few-shot example candidates were recorded."]

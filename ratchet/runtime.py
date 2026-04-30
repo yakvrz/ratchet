@@ -5,6 +5,7 @@ import copy
 import json
 from typing import Any
 
+from ratchet.capabilities import run_validation_check
 from ratchet.context_graph import ContextGraph, ContextSection
 from ratchet.transform_program import CompiledCandidate, TransformPatch
 from ratchet.types import EvalCase
@@ -284,57 +285,9 @@ def _validate(params: dict[str, Any], ctx: RuntimeContext) -> bool:
     if not isinstance(checks, list):
         return True
     for check in checks:
-        if check == "json_object" and not isinstance(ctx.draft_response, dict):
-            return False
-        if check == "actions_array":
-            if not isinstance(ctx.draft_response, dict) or not isinstance(ctx.draft_response.get("actions"), list):
-                return False
-        if isinstance(check, dict) and "required_output_keys" in check:
-            keys = check["required_output_keys"]
-            if not isinstance(ctx.draft_response, dict) or any(key not in ctx.draft_response for key in keys):
-                return False
-        if check == "args_schema_valid":
-            if not isinstance(ctx.tool_call, dict) or not isinstance(ctx.tool_call.get("args"), dict):
-                return False
-            schema = ctx.tool_schema if isinstance(ctx.tool_schema, dict) else {}
-            required = schema.get("required") if isinstance(schema.get("required"), list) else []
-            if any(key not in ctx.tool_call["args"] for key in required):
-                return False
-        if check == "not_duplicate_tool_call" and _has_prior_matching_tool_call(ctx):
+        if not run_validation_check(check, ctx):
             return False
     return True
-
-
-def _has_prior_matching_tool_call(ctx: RuntimeContext) -> bool:
-    if not isinstance(ctx.tool_call, dict):
-        return False
-    current_name = str(ctx.tool_call.get("name") or "")
-    current_args = _stable_json(ctx.tool_call.get("args") or {})
-    for message in ctx.message_history:
-        if not isinstance(message, dict):
-            continue
-        for call in message.get("tool_calls") or []:
-            if not isinstance(call, dict):
-                continue
-            function = call.get("function")
-            if not isinstance(function, dict) or str(function.get("name") or "") != current_name:
-                continue
-            if _stable_json(_tool_call_args(function.get("arguments"))) == current_args:
-                return True
-    return False
-
-
-def _tool_call_args(raw_args: Any) -> Any:
-    if isinstance(raw_args, str):
-        try:
-            return json.loads(raw_args)
-        except json.JSONDecodeError:
-            return raw_args
-    return raw_args or {}
-
-
-def _stable_json(value: Any) -> str:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _preview_value(value: Any, limit: int = 500) -> str:

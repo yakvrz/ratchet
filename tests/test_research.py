@@ -55,16 +55,16 @@ class _TheoryClient:
 
 
 class ResearchRoleTests(unittest.TestCase):
-    def test_research_planner_rejects_unknown_affordance_id(self) -> None:
+    def test_research_planner_rejects_unknown_surface_opportunity_id(self) -> None:
         planner = ResearchPlanner(env_path=".env", model="fake", reasoning_effort="low")
         planner._client = _Client()
         state = ResearchState(
             objective={},
             budget={},
             parent={},
-            task_theory={},
+            research_theory={},
             behavior_profile={},
-            affordances=[{"affordance_id": "known"}],
+            surface_opportunities=[{"surface_opportunity_id": "known"}],
             prior_experiment_outcomes=[],
             frontier={},
         )
@@ -80,9 +80,9 @@ class ResearchRoleTests(unittest.TestCase):
             objective={},
             budget={},
             parent={},
-            task_theory={},
+            research_theory={},
             behavior_profile={},
-            affordances=[{"affordance_id": "known"}],
+            surface_opportunities=[{"surface_opportunity_id": "known"}],
             prior_experiment_outcomes=[],
             frontier={},
         )
@@ -97,7 +97,7 @@ class ResearchRoleTests(unittest.TestCase):
         theorist = ResearchTheorist(env_path=".env", model="fake", reasoning_effort="low")
         theorist._client = _TheoryClient()
 
-        theory = theorist.build_theory(state={}, affordance_ids={"tool_loop"})
+        theory = theorist.build_theory(state={}, surface_opportunity_ids={"tool_loop"})
 
         self.assertEqual(theory.theory_id, "T_001")
         self.assertEqual(theory.primary_hypothesis_id, "H_001")

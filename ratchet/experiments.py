@@ -20,11 +20,6 @@ MECHANISM_CLASSES = {
 }
 
 
-MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
-    "surface_program": set(MECHANISM_CLASSES),
-}
-
-
 CANDIDATE_ROLES = {"atomic", "composed", "control", "ablation", "compression"}
 
 
@@ -94,7 +89,7 @@ class ResearchOpportunity:
     disconfirming_result: str = ""
     candidate_roles: list[str] = field(default_factory=list)
     compatible_mechanisms: list[str] = field(default_factory=list)
-    affordance_ids: list[str] = field(default_factory=list)
+    surface_opportunity_ids: list[str] = field(default_factory=list)
     priority: int = 1
 
     def __post_init__(self) -> None:
@@ -127,7 +122,7 @@ class ResearchOpportunity:
             disconfirming_result=str(payload.get("disconfirming_result") or ""),
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
             compatible_mechanisms=[str(item) for item in payload.get("compatible_mechanisms", []) if item],
-            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
+            surface_opportunity_ids=[str(item) for item in payload.get("surface_opportunity_ids", []) if item],
             priority=int(payload.get("priority") or 1),
         )
 
@@ -243,25 +238,6 @@ class ResearchTheory:
 
 
 @dataclass(frozen=True)
-class TaskTheory:
-    bottleneck_class: str
-    residual_failure_modes: list[str]
-    label_confusions: list[dict[str, Any]]
-    weak_slices: list[str]
-    runtime_defects: dict[str, Any]
-    output_defects: dict[str, Any]
-    tool_defects: dict[str, Any]
-    example_coverage: dict[str, Any]
-    cost_latency_profile: dict[str, Any]
-    confidence: str
-    evidence: list[str] = field(default_factory=list)
-    experiment_opportunities: list[dict[str, Any]] = field(default_factory=list)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
 class ExperimentIntent:
     intent_id: str
     mechanism_class: str
@@ -269,7 +245,7 @@ class ExperimentIntent:
     target_slices: list[str] = field(default_factory=list)
     candidate_roles: list[str] = field(default_factory=list)
     measurements: list[str] = field(default_factory=list)
-    affordance_ids: list[str] = field(default_factory=list)
+    surface_opportunity_ids: list[str] = field(default_factory=list)
     success_criteria: str = ""
     disconfirming_result: str = ""
     priority: int = 1
@@ -282,7 +258,7 @@ class ExperimentIntent:
         unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
         if unknown_roles:
             raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
-        if not self.affordance_ids:
+        if not self.surface_opportunity_ids:
             raise ValueError("intent surface opportunity ids must be non-empty")
         if self.priority < 1:
             raise ValueError("intent priority must be positive")
@@ -299,9 +275,9 @@ class ExperimentIntent:
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
-            affordance_ids=[
+            surface_opportunity_ids=[
                 str(item)
-                for item in payload.get("surface_opportunity_ids", payload.get("affordance_ids", []))
+                for item in payload.get("surface_opportunity_ids", [])
                 if item
             ],
             success_criteria=str(payload.get("success_criteria") or ""),
@@ -349,26 +325,11 @@ class ResearchState:
     objective: dict[str, Any]
     budget: dict[str, Any]
     parent: dict[str, Any]
-    task_theory: dict[str, Any]
+    research_theory: dict[str, Any]
     behavior_profile: dict[str, Any]
-    affordances: list[dict[str, Any]]
+    surface_opportunities: list[dict[str, Any]]
     prior_experiment_outcomes: list[dict[str, Any]] = field(default_factory=list)
     frontier: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class CandidateImplementation:
-    intent_id: str
-    candidate_id: str
-    affordance_ids: list[str]
-    transform_family: str
-    mechanism_class: str
-    candidate_role: str
-    hypothesis: str
-    intervention: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -385,65 +346,6 @@ class MeasurementDecision:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def build_task_theory(
-    *,
-    summary: CandidateSummary,
-    diagnoses: list[FailureDiagnosis],
-    objective: OptimizationObjective,
-    proposal_example_bank: ProposalExampleBank | None = None,
-) -> TaskTheory:
-    packet = build_evidence_packet(
-        summary=summary,
-        diagnoses=diagnoses,
-        objective=objective,
-        proposal_example_bank=proposal_example_bank,
-    )
-    diagnostics = packet.behavior_diagnostics
-    runtime = dict(packet.runtime_defects)
-    tool_interaction = dict(packet.tool_defects)
-    invalid_case_ids = list(packet.output_defects.get("invalid_output_case_ids", []))
-    confusions = list(packet.label_confusions)
-    weak_labels = list(packet.weak_slices)
-    evidence = list(packet.evidence)
-    if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
-        bottleneck = "runtime_or_output_defect"
-    elif _has_tool_trajectory_defect(tool_interaction):
-        bottleneck = "tool_trajectory"
-    elif invalid_case_ids:
-        bottleneck = "output_contract"
-    elif confusions or weak_labels:
-        bottleneck = "semantic_boundary_confusion"
-    elif objective.mode in {"cost", "latency"}:
-        bottleneck = "efficiency_tradeoff"
-    elif summary.pass_count < summary.case_count:
-        bottleneck = "general_correctness_gap"
-    else:
-        bottleneck = "no_observed_failures"
-    return TaskTheory(
-        bottleneck_class=bottleneck,
-        residual_failure_modes=list(packet.residual_failure_modes),
-        label_confusions=list(packet.label_confusions),
-        weak_slices=list(packet.weak_slices),
-        runtime_defects=dict(packet.runtime_defects),
-        output_defects=dict(packet.output_defects),
-        tool_defects=dict(packet.tool_defects),
-        example_coverage=dict(packet.example_coverage),
-        cost_latency_profile=dict(packet.cost_latency_profile),
-        confidence=packet.confidence,
-        evidence=evidence,
-        experiment_opportunities=_experiment_opportunities(
-            bottleneck=bottleneck,
-            runtime=runtime,
-            invalid_case_ids=invalid_case_ids,
-            tool_interaction=tool_interaction,
-            confusions=confusions,
-            weak_labels=weak_labels,
-            example_source_ids=_example_source_ids_by_label(proposal_example_bank),
-            objective=objective,
-        ),
-    )
 
 
 def build_evidence_packet(
@@ -533,30 +435,6 @@ def build_evidence_packet(
     )
 
 
-def mechanism_error_for_family(family: str, mechanism: str) -> str | None:
-    if mechanism not in MECHANISM_CLASSES:
-        return f"unknown mechanism class {mechanism!r}"
-    allowed = MECHANISMS_BY_FAMILY.get(family)
-    if allowed is None:
-        return None
-    if mechanism not in allowed:
-        return f"mechanism class {mechanism!r} is incompatible with transform family {family!r}"
-    return None
-
-
-def compatible_families_for_mechanism(
-    mechanism: str,
-    *,
-    active_families: list[str] | None = None,
-) -> list[str]:
-    active = set(active_families or MECHANISMS_BY_FAMILY)
-    return sorted(
-        family
-        for family, mechanisms in MECHANISMS_BY_FAMILY.items()
-        if family in active and mechanism in mechanisms
-    )
-
-
 def _residual_failure_modes(
     *,
     invalid_case_ids: list[str],
@@ -576,138 +454,6 @@ def _residual_failure_modes(
         modes.append("weak_slices")
     modes.extend(category for category in diagnosis_categories if category not in modes)
     return modes[:12]
-
-
-def _experiment_opportunities(
-    *,
-    bottleneck: str,
-    runtime: dict[str, Any],
-    invalid_case_ids: list[str],
-    tool_interaction: dict[str, Any],
-    confusions: list[dict[str, Any]],
-    weak_labels: list[str],
-    example_source_ids: dict[str, list[str]],
-    objective: OptimizationObjective,
-) -> list[dict[str, Any]]:
-    opportunities: list[dict[str, Any]] = []
-    if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
-        opportunities.append(
-            {
-                "mechanism_class": "surface_runtime",
-                "target_slices": _slice_ids("runtime", runtime.get("length_finish_case_ids", []))
-                + _slice_ids("parser_fallback", runtime.get("parser_fallback_case_ids", [])),
-                "candidate_roles": ["atomic", "control"],
-                "measurements": ["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
-                "rationale": "Trace evidence suggests the current branch may be failing before semantic behavior is measurable.",
-                "disconfirming_result": "Output reliability metrics do not improve on affected cases.",
-            }
-        )
-    if invalid_case_ids:
-        opportunities.append(
-            {
-                "mechanism_class": "surface_output",
-                "target_slices": _slice_ids("invalid_output", invalid_case_ids),
-                "candidate_roles": ["atomic", "control"],
-                "measurements": ["invalid_output_delta", "score_delta", "non_target_regression"],
-                "rationale": "Invalid outputs should be tested as contract/format failures before adding semantic complexity.",
-                "disconfirming_result": "Invalid-output cases remain invalid or regress elsewhere.",
-            }
-        )
-    if _has_tool_trajectory_defect(tool_interaction):
-        target_slices = (
-            _slice_ids("invalid_tool", tool_interaction.get("invalid_tool_call_case_ids", []))
-            + _slice_ids("tool_error", tool_interaction.get("tool_error_case_ids", []))
-            + _slice_ids("premature_stop", tool_interaction.get("premature_stop_case_ids", []))
-        )
-        opportunities.append(
-            {
-                "mechanism_class": "surface_tool_loop",
-                "target_slices": target_slices or ["tool_trajectory"],
-                "candidate_roles": ["atomic", "control"],
-                "compatible_mechanisms": [
-                    "surface_state",
-                    "surface_response",
-                    "surface_runtime",
-                ],
-                "measurements": [
-                    "score_delta",
-                    "tool_call_delta",
-                    "tool_error_delta",
-                    "turn_delta",
-                    "non_target_regression",
-                ],
-                "rationale": "Tool/environment traces indicate failure in action selection, arguments, ordering, or stopping.",
-                "disconfirming_result": "Tool trajectory errors persist or success improves only through excessive extra turns.",
-            }
-        )
-    for row in confusions[:4]:
-        if not isinstance(row, dict):
-            continue
-        expected = str(row.get("expected") or "")
-        actual = str(row.get("actual") or "")
-        if not expected or not actual:
-            continue
-        labels = [label for label in (expected, actual) if label]
-        opportunities.append(
-            {
-                "mechanism_class": "surface_context",
-                "target_slices": [f"confusion:{expected}->{actual}", f"label:{expected}"],
-                "candidate_roles": ["control", "atomic", "composed"],
-                "compatible_mechanisms": ["surface_examples", "surface_output"],
-                "source_labels": labels,
-                "source_case_ids_by_label": {
-                    label: example_source_ids.get(label, [])[:3]
-                    for label in labels
-                    if example_source_ids.get(label)
-                },
-                "measurements": ["target_slice_score_delta", "non_target_regression", "cost_delta"],
-                "rationale": "Observed expected-vs-actual label confusion needs a boundary test, not only a generic prompt improvement.",
-                "disconfirming_result": "The confusion persists on target cases or causes non-target regressions.",
-            }
-        )
-    for label in weak_labels[:4]:
-        if any(label == str(row.get("expected") or "") for row in confusions[:4] if isinstance(row, dict)):
-            continue
-        opportunities.append(
-            {
-                "mechanism_class": "surface_examples",
-                "target_slices": [f"label:{label}"],
-                "candidate_roles": ["atomic", "compression"],
-                "compatible_mechanisms": ["surface_context"],
-                "source_labels": [label],
-                "source_case_ids_by_label": {
-                    label: example_source_ids.get(label, [])[:4]
-                }
-                if example_source_ids.get(label)
-                else {},
-                "measurements": ["target_slice_score_delta", "example_token_delta", "non_target_regression"],
-                "rationale": "Weak label evidence with train coverage can test whether example anchoring is the missing signal.",
-                "disconfirming_result": "Few-shot variants do not improve the weak label after compression.",
-            }
-        )
-    if bottleneck in {"efficiency_tradeoff", "no_observed_failures"} or objective.mode in {"cost", "latency"}:
-        opportunities.append(
-            {
-                "mechanism_class": "surface_model",
-                "target_slices": ["global"],
-                "candidate_roles": ["atomic", "ablation"],
-                "measurements": ["score_delta", "cost_delta", "latency_delta"],
-                "rationale": "The current objective can improve through cost or latency reductions if quality is preserved.",
-                "disconfirming_result": "Cost or latency improves only by violating the quality constraint.",
-            }
-        )
-    if not opportunities and bottleneck == "general_correctness_gap":
-        opportunities.append(
-            {
-                "mechanism_class": "surface_context",
-                "target_slices": ["failed_cases"],
-                "candidate_roles": ["atomic", "control"],
-                "measurements": ["score_delta", "non_target_regression", "cost_delta"],
-                "rationale": "Failures exist but are not yet explained by a sharper slice; test a minimal semantic hypothesis.",
-                "disconfirming_result": "No failed-case improvement on the current branch.",
-            }
-        )
-    return opportunities[:8]
 
 
 def _has_tool_trajectory_defect(tool_interaction: dict[str, Any]) -> bool:
@@ -743,9 +489,3 @@ def _example_source_ids_by_label(bank: ProposalExampleBank | None) -> dict[str, 
             continue
         rows.setdefault(example.label, []).append(example.case_id)
     return {label: case_ids[:6] for label, case_ids in sorted(rows.items())}
-
-
-def _slice_ids(prefix: str, case_ids: Any) -> list[str]:
-    if not isinstance(case_ids, list):
-        return []
-    return [f"{prefix}:{case_id}" for case_id in case_ids[:6] if case_id]

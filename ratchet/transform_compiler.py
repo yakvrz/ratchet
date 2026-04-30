@@ -5,6 +5,7 @@ import json
 import re
 from typing import Any
 
+from ratchet.capabilities import normalize_validation_check, validate_check_payload
 from ratchet.surfaces import SurfaceSpec, SUPPORTED_HOOKS
 from ratchet.transform_program import (
     CandidateDiff,
@@ -142,7 +143,7 @@ class TransformCompiler:
         self._validate_model_op(index, patch, surface)
         self._validate_response_op(index, patch, surface)
         self._validate_tool_op(index, patch, surface)
-        self._validate_validation_checks(index, patch)
+        self._validate_validation_checks(index, patch, hook_name)
         self._validate_references(index, patch, hook.available_inputs, state_fields)
 
     def _validate_context_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
@@ -266,7 +267,7 @@ class TransformCompiler:
         if op == "rewrite_tool_result":
             self._reject(index, "tool_result_tampering", "Transform programs may not rewrite tool results.")
 
-    def _validate_validation_checks(self, index: int, patch: TransformPatch) -> None:
+    def _validate_validation_checks(self, index: int, patch: TransformPatch, hook_name: str) -> None:
         if patch.op.op not in {"validate", "validate_claims"}:
             return
         checks = patch.op.params.get("checks")
@@ -277,20 +278,10 @@ class TransformCompiler:
         if not checks:
             self._reject(index, "validation_checks_required", "validate requires at least one implemented check.")
         for check in checks:
-            if isinstance(check, str) and check in {
-                "json_object",
-                "actions_array",
-                "args_schema_valid",
-                "not_duplicate_tool_call",
-            }:
-                continue
-            if isinstance(check, dict) and set(check) == {"required_output_keys"} and isinstance(check.get("required_output_keys"), list):
-                continue
-            self._reject(
-                index,
-                "unsupported_validation_check",
-                f"Validation check {check!r} is not implemented by the runtime.",
-            )
+            error = validate_check_payload(check, hook=hook_name)
+            if error is not None:
+                self._reject(index, "unsupported_validation_check", error)
+        patch.op.params["checks"] = [normalize_validation_check(check) for check in checks]
 
     def _validate_references(
         self,

@@ -47,7 +47,7 @@ class ResearchTheorist:
         self,
         *,
         state: dict[str, Any],
-        affordance_ids: set[str],
+        surface_opportunity_ids: set[str],
     ) -> ResearchTheory:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
@@ -92,17 +92,17 @@ class ResearchTheorist:
                 raise OptimizerModelError(
                     f"Research theorist returned malformed research theory: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
-        unknown_affordances = sorted(
+        unknown_surface_opportunities = sorted(
             {
-                affordance_id
+                surface_opportunity_id
                 for opportunity in theory.experiment_opportunities
-                for affordance_id in opportunity.affordance_ids
-                if affordance_id not in affordance_ids
+                for surface_opportunity_id in opportunity.surface_opportunity_ids
+                if surface_opportunity_id not in surface_opportunity_ids
             }
         )
-        if unknown_affordances:
+        if unknown_surface_opportunities:
             raise OptimizerModelError(
-                f"Research theorist used unknown surface_opportunity_ids: {unknown_affordances}"
+                f"Research theorist used unknown surface_opportunity_ids: {unknown_surface_opportunities}"
             )
         return theory
 
@@ -304,10 +304,10 @@ class ResearchPlanner:
             raw_intents = [raw_intents]
         if not isinstance(raw_intents, list):
             raise OptimizerModelError("Research planner experiment_intents is not an array")
-        affordance_ids = {
-            str(affordance.get("surface_opportunity_id") or affordance.get("affordance_id"))
-            for affordance in state.affordances
-            if affordance.get("surface_opportunity_id") or affordance.get("affordance_id")
+        surface_opportunity_ids = {
+            str(surface_opportunity.get("surface_opportunity_id") or surface_opportunity.get("surface_opportunity_id"))
+            for surface_opportunity in state.surface_opportunities
+            if surface_opportunity.get("surface_opportunity_id") or surface_opportunity.get("surface_opportunity_id")
         }
         intents: list[ExperimentIntent] = []
         for index, raw_intent in enumerate(raw_intents, start=1):
@@ -317,13 +317,13 @@ class ResearchPlanner:
                 intent = ExperimentIntent.from_dict(raw_intent)
             except Exception as exc:
                 raise OptimizerModelError(f"Research planner returned malformed experiment intent: {exc}") from exc
-            unknown_affordances = sorted(set(intent.affordance_ids) - affordance_ids)
-            if unknown_affordances:
-                intent = _ground_unknown_surface_ids(intent, unknown_affordances, state.affordances)
-                unknown_affordances = sorted(set(intent.affordance_ids) - affordance_ids)
-                if unknown_affordances:
+            unknown_surface_opportunities = sorted(set(intent.surface_opportunity_ids) - surface_opportunity_ids)
+            if unknown_surface_opportunities:
+                intent = _ground_unknown_surface_ids(intent, unknown_surface_opportunities, state.surface_opportunities)
+                unknown_surface_opportunities = sorted(set(intent.surface_opportunity_ids) - surface_opportunity_ids)
+                if unknown_surface_opportunities:
                     raise OptimizerModelError(
-                        f"Research planner intent {intent.intent_id!r} used unknown surface_opportunity_ids: {unknown_affordances}"
+                        f"Research planner intent {intent.intent_id!r} used unknown surface_opportunity_ids: {unknown_surface_opportunities}"
                     )
             intents.append(intent)
         return intents
@@ -808,8 +808,8 @@ def _normalize_research_theory_payload(payload: dict[str, Any]) -> dict[str, Any
                 "disconfirming_result": _first_text(item.get("disconfirming_result")),
                 "candidate_roles": _string_list(item.get("candidate_roles")),
                 "compatible_mechanisms": _string_list(item.get("compatible_mechanisms")),
-                "affordance_ids": _string_list(
-                    item.get("surface_opportunity_ids", item.get("affordance_ids"))
+                "surface_opportunity_ids": _string_list(
+                    item.get("surface_opportunity_ids", item.get("surface_opportunity_ids"))
                 ),
                 "priority": int(item.get("priority") or index),
             }
@@ -845,27 +845,27 @@ def _string_list(value: Any) -> list[str]:
 def _ground_unknown_surface_ids(
     intent: ExperimentIntent,
     unknown_ids: list[str],
-    affordances: list[dict[str, Any]],
+    surface_opportunities: list[dict[str, Any]],
 ) -> ExperimentIntent:
     mechanism = intent.mechanism_class
     candidates: list[str] = []
-    for affordance in affordances:
-        surface_id = str(affordance.get("surface_opportunity_id") or affordance.get("affordance_id") or "")
+    for surface_opportunity in surface_opportunities:
+        surface_id = str(surface_opportunity.get("surface_opportunity_id") or surface_opportunity.get("surface_opportunity_id") or "")
         if not surface_id:
             continue
-        surface = str(affordance.get("surface") or affordance.get("mechanism") or "")
+        surface = str(surface_opportunity.get("surface") or surface_opportunity.get("mechanism") or "")
         if not surface and surface_id.startswith("surface."):
             parts = surface_id.split(".")
             surface = parts[1] if len(parts) > 1 else ""
         if surface != mechanism:
             continue
-        target = str(affordance.get("target") or affordance.get("target_name") or "")
+        target = str(surface_opportunity.get("target") or surface_opportunity.get("target_name") or "")
         if any(target and target in unknown_id for unknown_id in unknown_ids):
             candidates.insert(0, surface_id)
         else:
             candidates.append(surface_id)
-    grounded_ids = list(dict.fromkeys([item for item in intent.affordance_ids if item not in unknown_ids] + candidates[:2]))
-    if not grounded_ids or grounded_ids == intent.affordance_ids:
+    grounded_ids = list(dict.fromkeys([item for item in intent.surface_opportunity_ids if item not in unknown_ids] + candidates[:2]))
+    if not grounded_ids or grounded_ids == intent.surface_opportunity_ids:
         return intent
     return ExperimentIntent(
         intent_id=intent.intent_id,
@@ -874,7 +874,7 @@ def _ground_unknown_surface_ids(
         target_slices=list(intent.target_slices),
         candidate_roles=list(intent.candidate_roles),
         measurements=list(intent.measurements),
-        affordance_ids=grounded_ids,
+        surface_opportunity_ids=grounded_ids,
         success_criteria=intent.success_criteria,
         disconfirming_result=intent.disconfirming_result,
         priority=intent.priority,

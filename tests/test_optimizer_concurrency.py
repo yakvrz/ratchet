@@ -16,7 +16,8 @@ from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
-from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal, TransformContextKey
+from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication
+from ratchet.surface_search import TransformContextKey
 from ratchet.types import AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
@@ -92,7 +93,7 @@ def _evaluation_state() -> CandidateEvaluationState:
     )
     proposal = CandidateProposal(
         program=program,
-        applications=[CandidateAffordanceApplication("surface.surface_context.system_prompt")],
+        applications=[CandidateSurfaceApplication("surface.surface_context.system_prompt")],
         experiment_id="intent-1",
         hypothesis="Add context.",
     )
