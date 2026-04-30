@@ -127,7 +127,7 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("append_state", trace_ops)
 
     def test_official_taubench_sample_uses_generic_tool_loop_adapter(self) -> None:
-        from samples.taubench_official_agent.ratchet_adapter import adapter
+        from samples.taubench_agent.ratchet_adapter import adapter
 
         self.assertIsInstance(adapter, GeneratedToolLoopAdapter)
         surface = adapter.surface_spec()

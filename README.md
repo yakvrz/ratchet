@@ -142,7 +142,6 @@ Helper utilities:
 - `numeric_tolerance_grade(...)`
 - `json_field_grade(...)`
 - `estimate_cost_usd(...)` is available in `ratchet.pricing`
-- `TauBenchRunner` and `taubench_result_to_run_record(...)` provide a legacy measurement bridge for original `tau-bench` results when the external benchmark package is installed; optimizer work should prefer the generic tool-loop adapter so transform hooks are actually executable
 
 ## Contract Model
 
@@ -261,12 +260,11 @@ Each run writes:
 ## Samples
 
 - `samples/bfcl_function_calling_agent/`
-- `samples/taubench_official_agent/`
-- `samples/taubench_action_agent/`
+- `samples/taubench_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
 
-The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary single-call function/tool contract benchmark. The official tau-bench sample is the primary interactive tool-loop benchmark. The tau-bench action sample is a cheap static proxy and must not be treated as leaderboard-comparable tau-bench evidence. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
+The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary single-call function/tool contract benchmark. The tau-bench sample is the primary interactive tool-loop benchmark. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
 
 See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, and criteria for adding new benchmarks.
 

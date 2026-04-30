@@ -3,7 +3,6 @@
 from ratchet.adapters import AdapterProtocol, load_adapter
 from ratchet.adapter_generation import AdapterGenerator, GeneratedSingleCallAdapter, ModelRequest
 from ratchet.affordances import OptimizationAffordance, generate_optimization_affordances
-from ratchet.benchmarks import TauBenchRunner, taubench_result_to_run_record
 from ratchet.config import RatchetConfigError
 from ratchet.evidence import ProposalExample, ProposalExampleBank, build_behavior_diagnostics, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
@@ -70,7 +69,6 @@ __all__ = [
     "ToolCallTrace",
     "ToolLoopModelResponse",
     "ToolLoopRunConfig",
-    "TauBenchRunner",
     "CandidateImplementation",
     "CandidateImplementer",
     "CompiledCandidate",
@@ -90,5 +88,4 @@ __all__ = [
     "load_adapter",
     "numeric_tolerance_grade",
     "select_recommended_candidate",
-    "taubench_result_to_run_record",
 ]

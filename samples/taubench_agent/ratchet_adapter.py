@@ -8,7 +8,7 @@ from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 
 BASE_SPEC = AgentSpec(
-    name="official-taubench-tool-loop",
+    name="taubench-tool-loop",
     model="gpt-4o",
     model_options=[
         "gpt-4o",
@@ -28,7 +28,7 @@ BASE_SPEC = AgentSpec(
             "claude-3-5-sonnet-20241022": "anthropic",
         },
     },
-    metadata={"benchmark": "tau-bench", "benchmark_fidelity": "official_tau_bench_simulator"},
+    metadata={"benchmark": "tau-bench", "benchmark_fidelity": "tau_bench_simulator"},
 )
 
 
@@ -69,10 +69,10 @@ def _case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
         provider=str(runtime.get("model_provider", "openai")),
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 30),
-        log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "samples/taubench_official_agent/results/raw"),
+        log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "samples/taubench_agent/results/raw"),
         metadata={
             "benchmark": "tau-bench",
-            "benchmark_fidelity": "official_tau_bench_simulator",
+            "benchmark_fidelity": "tau_bench_simulator",
             "env": str(metadata.get("env") or "retail"),
             "task_id": _task_id(metadata),
             "task_split": str(metadata.get("task_split") or "test"),
@@ -96,7 +96,7 @@ def _grade(case: EvalCase, output: object) -> GradeResult:
 def _task_id(metadata: dict[str, Any]) -> int:
     task_id = metadata.get("task_id")
     if not isinstance(task_id, int):
-        raise ValueError("official tau-bench cases require integer metadata.task_id.")
+        raise ValueError("tau-bench cases require integer metadata.task_id.")
     return task_id
 
 
