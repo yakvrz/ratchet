@@ -50,9 +50,13 @@ def _make_environment(case: EvalCase, config: ToolLoopRunConfig) -> Any:
         ) from exc
     _install_taubench_user_retries(user_module)
     metadata = dict(case.metadata)
+    config_metadata = dict(config.metadata or {})
+    surface_probe = bool(config_metadata.get("surface_probe"))
     return get_env(
         env_name=str(metadata.get("env") or "retail"),
-        user_strategy=str(metadata.get("user_strategy") or BASE_SPEC.runtime.get("user_strategy") or "llm"),
+        user_strategy="human"
+        if surface_probe
+        else str(metadata.get("user_strategy") or BASE_SPEC.runtime.get("user_strategy") or "llm"),
         user_model=str(metadata.get("user_model") or BASE_SPEC.runtime.get("user_model") or BASE_SPEC.model),
         user_provider=str(
             metadata.get("user_model_provider") or BASE_SPEC.runtime.get("user_model_provider") or "gemini"

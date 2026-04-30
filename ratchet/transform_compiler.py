@@ -27,6 +27,12 @@ FORBIDDEN_REFERENCE_ROOTS = {
     "expected",
 }
 CASE_ID_CONDITION_PATTERN = re.compile(r"\b(case|task)[_-]?id\b", re.IGNORECASE)
+FORBIDDEN_TRACE_LITERALS = (
+    "###stop###",
+    "hidden task",
+    "gold answer",
+    "evaluator label",
+)
 
 
 class TransformCompileError(ValueError):
@@ -310,6 +316,14 @@ class TransformCompiler:
         for forbidden in ("hidden_task_goal", "hidden_label", "gold_answer", "evaluator"):
             if forbidden in payload_text:
                 self._reject(index, "immutable_boundary_violation", f"Candidate references immutable boundary {forbidden!r}.")
+        lowered_payload = payload_text.lower()
+        for forbidden in FORBIDDEN_TRACE_LITERALS:
+            if forbidden in lowered_payload:
+                self._reject(
+                    index,
+                    "immutable_boundary_violation",
+                    f"Candidate embeds evaluator or simulator artifact {forbidden!r}.",
+                )
         condition_text = json.dumps({"when": patch.when, "unless": patch.unless}, sort_keys=True, default=str)
         if CASE_ID_CONDITION_PATTERN.search(condition_text):
             self._reject(index, "task_id_overfitting", "Candidate condition appears to branch on case/task id.")

@@ -8,9 +8,9 @@ holdout_budget = 2
 optimizer_model = "gemini-3-flash-preview"
 optimizer_reasoning = "medium"
 samples_per_case = 1
-case_concurrency = 1
-stage_case_concurrency = 1
-case_timeout_s = 600
+case_concurrency = 4
+stage_case_concurrency = 4
+case_timeout_s = 0
 max_dev_measurement_cost_usd = 1.00
 max_holdout_measurement_cost_usd = 1.00
 

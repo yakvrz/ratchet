@@ -257,7 +257,7 @@ class ResearchPlanner:
             "instruction": (
                 "Return experiment_intents only. Do not write patches, candidate IDs, or measurement selections. "
                 "Each intent must choose a surface mechanism_class and cite concrete surface_opportunity_ids "
-                "that a later implementer may use. Treat research_theory/task_theory experiment opportunities and "
+                "that a later implementer may use. Treat research-theory experiment opportunities and "
                 "high-suitability surface opportunities as the research surface. Preserve distinct hook/state/tool/"
                 "context questions when the evidence supports them."
             ),

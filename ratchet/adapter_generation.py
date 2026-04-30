@@ -40,7 +40,9 @@ class SingleCallHarness(Protocol):
 
 
 class AdapterGenerator:
-    def infer_surface(self, harness: SingleCallHarness) -> SurfaceSpec:
+    def infer_surface(self, harness: SingleCallHarness, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
+        if not cases:
+            raise ValueError("single-call surface inference requires at least one proposal-safe case.")
         return surface_from_agent_spec(harness.agent_spec())
 
     def build_runtime_adapter(
@@ -69,9 +71,9 @@ class GeneratedSingleCallAdapter:
     def agent_spec(self) -> AgentSpec:
         return self.harness.agent_spec()
 
-    def surface_spec(self) -> SurfaceSpec:
+    def surface_spec(self, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
         if self._surface is None:
-            self._surface = AdapterGenerator().infer_surface(self.harness)
+            self._surface = AdapterGenerator().infer_surface(self.harness, cases)
         return self._surface
 
     def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
@@ -152,7 +154,9 @@ class GeneratedSingleCallAdapter:
         out_dir.mkdir(parents=True, exist_ok=True)
         if candidate is not None:
             (out_dir / "compiled_candidate.json").write_text(json.dumps(candidate.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "surface_spec.json").write_text(json.dumps(self.surface_spec().to_dict(), indent=2, sort_keys=True))
+        if self._surface is None:
+            raise RuntimeError("surface_spec(cases) must be inferred before exporting a generated adapter.")
+        (out_dir / "surface_spec.json").write_text(json.dumps(self._surface.to_dict(), indent=2, sort_keys=True))
 
     def _client_or_create(self) -> ResponsesModelClient:
         if self._client is None:

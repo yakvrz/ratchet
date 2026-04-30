@@ -15,9 +15,7 @@ from ratchet.experiments import (
     ExperimentIntent,
     ExperimentSpec,
     ResearchTheory,
-    TaskTheory,
     build_evidence_packet,
-    build_task_theory,
 )
 from ratchet.io import extract_json_object, transform_program_hash
 from ratchet.model_client import (
@@ -50,7 +48,7 @@ PROPOSER_INSTRUCTIONS = (
     "controls, and measurements. Treat research_theory as causal context; opportunities are not candidate recipes. "
     "Each candidate must include a typed transform program under candidate.program and applications[] citing "
     "relevant surface_opportunities. "
-    "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy candidate operations. "
+    "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not untyped candidate operations. "
     "For add_context_section or replace_context_section, emit one focused patch with non-empty content containing the actual rendered instruction or context data; prefer a concise string. Do not emit empty content objects, repeated placeholder patches, or context text in value. "
     "Every set_model_config candidate needs field and value; for field=model_name, value must be one of the model values exposed by the cited model surface and should differ from the current model. Every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
     "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family and mechanism "
@@ -62,6 +60,7 @@ PROPOSER_INSTRUCTIONS = (
     "must use implemented checks[] such as args_schema_valid or not_duplicate_tool_call plus an executable on_fail "
     "operation such as replan; prose-only validation content is invalid. Never rewrite tool_result, "
     "modify tool implementations, branch on task/case IDs, or use benchmark-specific domain rules. "
+    "Never mention simulator control tokens, evaluator sentinels, hidden labels, gold answers, or trace-only stop markers in candidate content. "
     "Do not copy diagnostic_only_examples into candidate values; only proposal-safe train examples may be copied, "
     "and only through source_case_id. Prefer minimal, independently evaluable candidates. For cost/latency modes, "
     "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
@@ -132,7 +131,6 @@ class CandidateImplementer:
         search_hypothesis: SearchHypothesis | None = None,
         diagnosis: FailureDiagnosis | None = None,
         diagnoses: list[FailureDiagnosis] | None = None,
-        task_theory: TaskTheory | None = None,
         research_theory: ResearchTheory | None = None,
         evidence_packet: EvidencePacket | None = None,
         proposal_example_bank: ProposalExampleBank | None = None,
@@ -161,15 +159,8 @@ class CandidateImplementer:
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
-        if task_theory is None:
-            task_theory = build_task_theory(
-                summary=summary,
-                diagnoses=diagnosis_context,
-                objective=objective,
-                proposal_example_bank=proposal_example_bank,
-            )
         if research_theory is None:
-            research_theory = _legacy_research_theory_from_task_theory(task_theory)
+            raise ValueError("CandidateImplementer requires a ResearchTheory from the research planner.")
         active_affordances = list(affordances or generate_optimization_affordances(
             surface,
             objective=objective,
@@ -406,8 +397,10 @@ class CandidateImplementer:
                 ),
                 "candidate_portfolio": (
                     "Generate an ordered portfolio of distinct, independently evaluable candidates up to proposal_budget. "
-                    "Do not let prompt edits crowd out other plausible target kinds; rank by expected objective impact "
-                    "and constraint risk."
+                    "Cover distinct requested mechanism_class values before returning multiple candidates for the same mechanism. "
+                    "When proposal_budget is smaller than the number of requested intents, prioritize mechanism diversity first, "
+                    "then expected objective impact and constraint risk. Do not let prompt edits crowd out tool-loop, state, "
+                    "or response mechanisms selected by the planner."
                 ),
                 "context_patch_content": (
                     "For context rewrites, content must be the complete replacement or inserted text. "
@@ -879,38 +872,6 @@ def _compact_context_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_task_theory(task_theory: TaskTheory) -> dict[str, Any]:
-    row = task_theory.to_dict()
-    return {
-        "bottleneck_class": row.get("bottleneck_class"),
-        "residual_failure_modes": list(row.get("residual_failure_modes") or [])[:6],
-        "label_confusions": list(row.get("label_confusions") or [])[:4],
-        "weak_slices": list(row.get("weak_slices") or [])[:6],
-        "runtime_defects": row.get("runtime_defects", {}),
-        "output_defects": row.get("output_defects", {}),
-        "example_coverage": {
-            "example_count": (row.get("example_coverage") or {}).get("example_count"),
-            "weak_labels_without_examples": list(
-                (row.get("example_coverage") or {}).get("weak_labels_without_examples") or []
-            )[:8],
-            "target_label_source_case_ids": {
-                str(label): list(case_ids)[:4]
-                for label, case_ids in ((row.get("example_coverage") or {}).get("target_label_source_case_ids") or {}).items()
-                if isinstance(case_ids, list)
-            },
-            "label_counts": _top_mapping((row.get("example_coverage") or {}).get("label_counts") or {}, limit=8),
-        },
-        "cost_latency_profile": row.get("cost_latency_profile", {}),
-        "confidence": row.get("confidence"),
-        "evidence": list(row.get("evidence") or [])[:4],
-        "experiment_opportunity_mechanisms": [
-            str(item.get("mechanism_class"))
-            for item in list(row.get("experiment_opportunities") or [])[:5]
-            if isinstance(item, dict) and item.get("mechanism_class")
-        ],
-    }
-
-
 def _research_theory_prompt_view(research_theory: ResearchTheory) -> dict[str, Any]:
     row = research_theory.to_dict()
     return {
@@ -1089,8 +1050,11 @@ def _audit_experiment_plan(
         warnings.append("no experiments returned")
     if experiment_count > 0 and not parsed_candidates:
         warnings.append("experiments contained no parseable candidates")
+    distinct_primary_mechanisms = set(primary_mechanisms)
     if parsed_candidates and missing_primary and len(missing_primary) == len(primary_mechanisms):
         warnings.append("no candidate used a primary mechanism from planner guidance")
+    if parsed_candidates and len(distinct_primary_mechanisms) > 1 and missing_primary:
+        warnings.append("candidate portfolio missed requested mechanism diversity")
     missing_opportunities = [
         mechanism for mechanism in opportunity_mechanisms[:2] if mechanism not in candidate_mechanisms
     ]
@@ -1139,77 +1103,6 @@ def _context_opportunity_has_examples(research_theory: ResearchTheory) -> bool:
         if isinstance(source_ids, dict) and any(source_ids.values()):
             return True
     return False
-
-
-def _legacy_research_theory_from_task_theory(task_theory: TaskTheory) -> ResearchTheory:
-    opportunities = []
-    hypothesis_id = "legacy_h1"
-    mechanism = _legacy_mechanism_for_bottleneck(task_theory.bottleneck_class)
-    for index, row in enumerate(task_theory.experiment_opportunities or [], start=1):
-        if not isinstance(row, dict):
-            continue
-        opportunities.append(
-            {
-                "opportunity_id": f"legacy_opp_{index}",
-                "hypothesis_ids": [hypothesis_id],
-                "mechanism_class": str(row.get("mechanism_class") or mechanism),
-                "target_slices": list(row.get("target_slices") or [])[:6],
-                "rationale": str(row.get("rationale") or "Legacy task-theory opportunity."),
-                "measurements": list(row.get("measurements") or [])[:6],
-                "disconfirming_result": str(row.get("disconfirming_result") or ""),
-                "candidate_roles": list(row.get("candidate_roles") or ["atomic"])[:5],
-                "compatible_mechanisms": list(row.get("compatible_mechanisms") or [])[:5],
-                "affordance_ids": list(row.get("affordance_ids") or [])[:10],
-                "priority": index,
-            }
-        )
-    if not opportunities:
-        opportunities.append(
-            {
-                "opportunity_id": "legacy_opp_1",
-                "hypothesis_ids": [hypothesis_id],
-                "mechanism_class": mechanism,
-                "target_slices": ["failed_cases"],
-                "rationale": "Legacy compatibility theory from deterministic task evidence.",
-                "measurements": ["score_delta", "non_target_regression"],
-                "disconfirming_result": "No improvement on staged eval.",
-                "candidate_roles": ["atomic"],
-                "priority": 1,
-            }
-        )
-    return ResearchTheory.from_dict(
-        {
-            "theory_id": "legacy_task_theory",
-            "summary": "Compatibility research theory derived from legacy task-theory evidence.",
-            "primary_hypothesis_id": hypothesis_id,
-            "hypotheses": [
-                {
-                    "hypothesis_id": hypothesis_id,
-                    "statement": "Legacy deterministic task theory identified the active optimization mechanism.",
-                    "mechanism_class": mechanism,
-                    "target_slices": list(task_theory.weak_slices[:6]) or ["failed_cases"],
-                    "supporting_evidence": list(task_theory.evidence[:6]),
-                    "competing_evidence": [],
-                    "disconfirming_result": "No improvement on staged eval.",
-                    "confidence": task_theory.confidence,
-                }
-            ],
-            "experiment_opportunities": opportunities,
-            "confidence": task_theory.confidence,
-        }
-    )
-
-
-def _legacy_mechanism_for_bottleneck(bottleneck: str) -> str:
-    if bottleneck == "runtime_or_output_defect":
-        return "surface_runtime"
-    if bottleneck == "tool_trajectory":
-        return "surface_tool_loop"
-    if bottleneck == "output_contract":
-        return "surface_output"
-    if bottleneck == "efficiency_tradeoff":
-        return "surface_model"
-    return "surface_context"
 
 
 def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:

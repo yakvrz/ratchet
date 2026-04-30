@@ -406,6 +406,8 @@ class RatchetReporter:
             "## Run Health",
             "",
             f"- Cache hits: {self.stats.cache_hits}",
+            f"- Local cache hits: {self.stats.local_cache_hits}",
+            f"- Shared cache hits: {self.stats.shared_cache_hits}",
             f"- Fresh case evaluations: {self.stats.fresh_case_evaluations}",
             f"- Runtime errors: {self.stats.runtime_errors}",
             f"- Grader errors: {self.stats.grader_errors}",
@@ -797,8 +799,10 @@ class RatchetReporter:
             f"- Holdout turn budget used: `{float(result.manifest.get('holdout_measurement_turns_used') or 0.0):.1f}`"
             f" / `{result.manifest.get('max_holdout_measurement_turns')}`",
             f"- Expensive deployed-policy reporting threshold: `{result.manifest.get('expensive_candidate_cost_ratio')}x` baseline cost",
-            f"- Total eval cost: `${float((run_cost.get('eval') or {}).get('cost_usd') or 0.0):.6f}`",
+            f"- Total eval cost: `${float(run_cost.get('eval_cost_usd') or 0.0):.6f}`",
             f"- Fresh case evaluations: {((result.manifest.get('stats') or {}).get('fresh_case_evaluations', 0))}",
+            f"- Local case cache hits: {((result.manifest.get('stats') or {}).get('local_cache_hits', 0))}",
+            f"- Shared case cache hits: {((result.manifest.get('stats') or {}).get('shared_cache_hits', 0))}",
         ]
 
     @staticmethod
@@ -1122,10 +1126,10 @@ class RatchetReporter:
             for name, summary in sorted(result.transform_summaries.items())
             if int(summary.get("evaluated_count") or 0) > 0
         ]
-        promoted = [
+        dev_eligible = [
             name
             for name, summary in sorted(result.transform_summaries.items())
-            if summary.get("state") == "promoted"
+            if summary.get("state") == "promotable_dev"
         ]
         constrained = [
             name
@@ -1140,8 +1144,8 @@ class RatchetReporter:
         if not tested:
             return "Ratchet did not evaluate any surface-program candidates after profiling the current branch."
         parts = [f"Ratchet evaluated surface mechanisms: {', '.join(f'`{name}`' for name in tested)}."]
-        if promoted:
-            parts.append(f"Promoted surface mechanisms: {', '.join(f'`{name}`' for name in promoted)}.")
+        if dev_eligible:
+            parts.append(f"Dev-eligible surface mechanisms: {', '.join(f'`{name}`' for name in dev_eligible)}.")
         if constrained:
             parts.append(f"Constrained surface mechanisms after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
         if paused:

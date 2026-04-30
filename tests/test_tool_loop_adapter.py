@@ -33,8 +33,10 @@ class _FakeEnvironment:
         }
     ]
 
-    def __init__(self) -> None:
+    def __init__(self, tools_info: list[dict[str, object]] | None = None) -> None:
         self.actions: list[tuple[str, dict[str, object]]] = []
+        if tools_info is not None:
+            self.tools_info = tools_info
 
     def reset(self, task_index: int | None = None) -> _Response:
         return _Response("Need status for order A1.")
@@ -127,6 +129,9 @@ class _ToolDescriptionClient:
 
 
 class ToolLoopAdapterTests(unittest.TestCase):
+    def _case(self) -> EvalCase:
+        return EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+
     def test_tool_loop_executes_transform_hooks_around_environment_tools(self) -> None:
         env = _FakeEnvironment()
         adapter = GeneratedToolLoopAdapter(
@@ -159,9 +164,9 @@ class ToolLoopAdapterTests(unittest.TestCase):
                     ],
                 }
             ),
-            adapter.surface_spec(),
+            adapter.surface_spec((self._case(),)),
         )
-        case = EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+        case = self._case()
 
         record = adapter.run_case(case, candidate)
         grade = adapter.grade(case, record.output)
@@ -201,9 +206,9 @@ class ToolLoopAdapterTests(unittest.TestCase):
                     ],
                 }
             ),
-            adapter.surface_spec(),
+            adapter.surface_spec((self._case(),)),
         )
-        case = EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+        case = self._case()
 
         record = adapter.run_case(case, candidate)
 
@@ -235,9 +240,9 @@ class ToolLoopAdapterTests(unittest.TestCase):
                     ],
                 }
             ),
-            adapter.surface_spec(),
+            adapter.surface_spec((self._case(),)),
         )
-        case = EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+        case = self._case()
 
         adapter.run_case(case, candidate)
 
@@ -248,9 +253,55 @@ class ToolLoopAdapterTests(unittest.TestCase):
         from samples.taubench_agent.ratchet_adapter import adapter
 
         self.assertIsInstance(adapter, GeneratedToolLoopAdapter)
-        surface = adapter.surface_spec()
-        self.assertTrue(surface.hooks["before_tool_call"].supported)
-        self.assertTrue(surface.hooks["after_tool_result"].supported)
+
+    def test_tool_loop_surface_probe_infers_context_and_tools(self) -> None:
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: _FakeEnvironment(),
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+        surface = adapter.surface_spec((self._case(),))
+
+        section_names = surface.context.graph.section_names()
+        self.assertIn("domain_policy", section_names)
+        self.assertIn("tool_instructions", section_names)
+        self.assertIn("recent_messages", section_names)
+        self.assertTrue(surface.tools.tools_available)
+        self.assertEqual(surface.tools.tools[0].name, "lookup_order")
+        self.assertEqual(surface.tools.tools[0].metadata["side_effect"], "read")
+
+    def test_tool_metadata_inference_uses_tool_action_not_return_text(self) -> None:
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: _FakeEnvironment(
+                tools_info=[
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "find_user_id_by_email",
+                            "description": "Find user id by email. If the user is not found, the function will return an error message.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "return_delivered_order_items",
+                            "description": "Return some items of a delivered order.",
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    },
+                ]
+            ),
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+
+        tools = {tool.name: tool for tool in adapter.surface_spec((self._case(),)).tools.tools}
+
+        self.assertEqual(tools["find_user_id_by_email"].metadata["side_effect"], "read")
+        self.assertEqual(tools["return_delivered_order_items"].metadata["side_effect"], "mutating")
 
 
 if __name__ == "__main__":

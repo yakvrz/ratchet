@@ -211,7 +211,7 @@ class RatchetOptimizer:
         self.holdout_budget = holdout_budget
         self.objective = objective or OptimizationObjective()
         self.agent_spec = checked_agent_spec(adapter)
-        self.surface_spec = checked_surface_spec(adapter)
+        self.surface_spec: SurfaceSpec | None = None
         self.transform_compiler = TransformCompiler()
         self.optimizer_role_models = {
             "diagnoser": diagnoser_model or optimizer_model,
@@ -302,7 +302,11 @@ class RatchetOptimizer:
             objective=self.objective,
             run_metadata=self.run_metadata,
         )
-        self.store = ResultStore(out_dir, cache_namespace=self.cache_namespace)
+        self.store = ResultStore(
+            out_dir,
+            cache_namespace=self.cache_namespace,
+            shared_cache_path=Path(".ratchet/cache/case_results.jsonl"),
+        )
         self.stats = OptimizerStats()
         self.started_at: datetime | None = None
         self.progress_callback = progress_callback
@@ -312,6 +316,11 @@ class RatchetOptimizer:
         self._store_lock = threading.Lock()
         self._stats_lock = threading.Lock()
         self.optimizer_call_diagnostics: list[dict[str, Any]] = []
+
+    def _surface(self) -> SurfaceSpec:
+        if self.surface_spec is None:
+            raise RuntimeError("surface_spec has not been inferred for this optimizer run.")
+        return self.surface_spec
 
     def run(self, cases: tuple[EvalCase, ...]) -> RatchetResult:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -328,6 +337,8 @@ class RatchetOptimizer:
         self._holdout_measurement_turns = 0.0
         train_cases, dev_cases, holdout_cases = split_train_dev_holdout(cases)
         proposal_example_bank = build_proposal_example_bank(train_cases)
+        surface_cases = train_cases or dev_cases
+        self.surface_spec = checked_surface_spec(self.adapter, cases=surface_cases)
         self._emit_progress(
             "run_started",
             total_cases=len(cases),
@@ -362,7 +373,7 @@ class RatchetOptimizer:
         diagnosis_cache: dict[str, tuple[list[FailureDiagnosis], str]] = {}
         evidence_packet_cache: dict[str, EvidencePacket] = {}
         evaluated_candidate_ids = {baseline_dev.candidate_id}
-        generated_surface_rows: list[dict[str, Any]] = [self.surface_spec.to_dict()]
+        generated_surface_rows: list[dict[str, Any]] = [self._surface().to_dict()]
         dev_evaluations = 0
         iteration = 0
         consecutive_zero_eval_parent_attempts = 0
@@ -418,7 +429,7 @@ class RatchetOptimizer:
                 parent_state.visits += 1
                 parent_state.last_selected_iteration = iteration
                 current_spec = self.agent_spec
-                surface = self.surface_spec
+                surface = self._surface()
                 generated_surface_rows = [surface.to_dict()]
                 self._emit_progress(
                     "parent_started",
@@ -1463,12 +1474,38 @@ class RatchetOptimizer:
         }
         accepted_rows: list[tuple[CandidateProposal, CandidateSummary, Comparison]] = []
         evaluation_states: list[CandidateEvaluationState] = []
+        model_candidate_used = False
+        model_candidates_allowed = _model_candidate_evidence_present(diagnoses, research_theory)
         for proposal in proposals[:proposal_budget]:
+            if proposal.transform_family == "surface_model":
+                if model_candidate_used or not model_candidates_allowed:
+                    proposals_log.append(
+                        {
+                            "type": "candidate_proposal",
+                            "iteration": iteration,
+                            "attempt": attempt,
+                            "proposal_retry": proposal_retry,
+                            "retry_reason": retry_reason,
+                            "parent_rank": parent_index + 1,
+                            "parent_candidate_id": current_dev.candidate_id,
+                            "candidate_id": current_dev.candidate_id,
+                            "valid": True,
+                            "proposal": proposal.program.to_dict(),
+                            "candidate": proposal.to_dict(),
+                            "transform_family": proposal.transform_family,
+                            "mechanism_class": proposal.mechanism_class,
+                            "accepted": False,
+                            "frontier_status": "screened_out",
+                            "rejection_reason": "model candidate skipped because no explicit model-capacity evidence remained in budget",
+                        }
+                    )
+                    continue
+                model_candidate_used = True
             compiled_candidate = compose_transform_candidate(
                 current_dev.candidate,
                 proposal.program,
                 compiler=self.transform_compiler,
-                surface=self.surface_spec,
+                surface=self._surface(),
             )
             digest = compiled_candidate_id(compiled_candidate)
             if digest in evaluated_candidate_ids:
@@ -1663,7 +1700,45 @@ class RatchetOptimizer:
             opportunity_count=len(research_theory.experiment_opportunities),
             surface_opportunity_count=len(affordances),
         )
-        intents = self.research_planner.plan(state)
+        try:
+            intents = self.research_planner.plan(state)
+        except OptimizerModelError as exc:
+            if self.research_planner.last_call_diagnostics is not None:
+                self.optimizer_call_diagnostics.append(
+                    {
+                        "iteration": iteration,
+                        "attempt": attempt,
+                        "parent_rank": parent_index + 1,
+                        "stage": "plan_experiments",
+                        **self.research_planner.last_call_diagnostics,
+                    }
+                )
+            decision_log.append(
+                {
+                    "type": "research_plan",
+                    "iteration": iteration,
+                    "attempt": attempt,
+                    "proposal_retry": proposal_retry,
+                    "parent_rank": parent_index + 1,
+                    "stage": "plan_experiments",
+                    "research_state": state.to_dict(),
+                    "experiment_intents": [],
+                    "error": str(exc),
+                }
+            )
+            self._emit_progress(
+                "research_planner_completed",
+                iteration=iteration,
+                attempt=attempt,
+                parent_rank=parent_index + 1,
+                stage="plan_experiments",
+                intent_count=0,
+                mechanisms=[],
+                experiment_intents=[],
+                error=str(exc),
+                call_diagnostics=self.research_planner.last_call_diagnostics or {},
+            )
+            return []
         if self.research_planner.last_call_diagnostics is not None:
             self.optimizer_call_diagnostics.append(
                 {
@@ -1716,7 +1791,9 @@ class RatchetOptimizer:
         parent_index: int,
     ) -> None:
         active = list(states)
-        for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
+        stages = self._progressive_eval_stages(reference, dev_cases)
+        has_small_dev_stage = any(stage_name == "small_dev" for stage_name, _ in stages)
+        for stage_name, stage_cases in stages:
             if not active:
                 break
             active = self._filter_candidate_stage_by_measurement_budget(
@@ -1729,6 +1806,18 @@ class RatchetOptimizer:
             if not active:
                 break
             if stage_name == "full_dev":
+                if has_small_dev_stage:
+                    next_active = []
+                    for state in active:
+                        if _eligible_for_full_dev_from_small_signal(state):
+                            next_active.append(state)
+                            continue
+                        state.rejection_reason = "full_dev skipped because small-dev evidence did not show objective gain"
+                        state.frontier_status = "screened_out"
+                        state.accepted = False
+                    active = next_active
+                    if not active:
+                        break
                 if _has_evidence_for_selector(evidence_ledger, active):
                     active = self._select_candidate_stage_with_measurement_selector(
                         active,
@@ -1842,7 +1931,7 @@ class RatchetOptimizer:
                 state.constraint_warning = constraint_warning
                 if stage_name == "full_dev":
                     state.full_dev_evaluated = True
-                    _finalize_candidate_state(state, reference)
+                    _finalize_candidate_state(state, reference, self.objective)
                     continue
                 if rejection_reason is None:
                     next_active.append(state)
@@ -2199,9 +2288,10 @@ class RatchetOptimizer:
             if case_passed and case_id in case_by_id
         ]
         smoke_ids = _ordered_unique([*(failed_ids[:1]), *(passed_ids[:1]), dev_cases[0].id])
-        # Keep exploration cheap: the small stage should cover failures and a
-        # representative stability sample without becoming an accidental full run.
-        small_target = min(len(dev_cases), max(6, min(24, len(failed_ids) + len(smoke_ids) + 4)))
+        # Keep exploration cheap: small-dev must stay a triage slice even when
+        # the baseline has many failures, otherwise failure-heavy suites jump
+        # straight from smoke to full-dev.
+        small_target = min(len(dev_cases) - 1, max(6, min(12, (len(dev_cases) + 1) // 2)))
         small_ids = _ordered_unique([*smoke_ids, *failed_ids, *(case.id for case in dev_cases)])[:small_target]
         raw_stages = [
             ("smoke", tuple(case_by_id[case_id] for case_id in smoke_ids)),
@@ -2258,10 +2348,14 @@ class RatchetOptimizer:
             for case in cases:
                 for sample_index in indices:
                     with self._store_lock:
-                        cached = self.store.get(digest, case, sample_index=sample_index)
+                        cached = self.store.get(digest, case, sample_index=sample_index, candidate=candidate)
                     if cached is not None:
                         with self._stats_lock:
                             self.stats.cache_hits += 1
+                            if cached.cache_source == "shared":
+                                self.stats.shared_cache_hits += 1
+                            else:
+                                self.stats.local_cache_hits += 1
                         ordered[order] = cached
                         self._emit_progress(
                             "case_cache_hit",
@@ -2269,6 +2363,7 @@ class RatchetOptimizer:
                             case_id=case.id,
                             split=case.split,
                             sample_index=sample_index,
+                            cache_source=cached.cache_source,
                         )
                     else:
                         fresh_by_digest[digest] += 1
@@ -3361,18 +3456,62 @@ def _states_by_research_group(
     return by_group
 
 
-def _finalize_candidate_state(state: CandidateEvaluationState, reference: CandidateSummary) -> None:
+def _finalize_candidate_state(
+    state: CandidateEvaluationState,
+    reference: CandidateSummary,
+    objective: OptimizationObjective,
+) -> None:
     if state.summary is None:
         return
     if state.rejection_reason is None and state.constraint_warning is None:
-        state.frontier_status = "promotable"
+        state.frontier_status = "promotable_dev"
     elif state.rejection_reason is None and state.constraint_warning is not None:
         state.frontier_status = "quality_frontier"
     elif _efficiency_improved(reference, state.summary):
         state.frontier_status = "efficiency_frontier"
     else:
         state.frontier_status = "failed"
-    state.accepted = state.frontier_status in {"promotable", "quality_frontier", "efficiency_frontier"}
+    state.accepted = state.frontier_status == "promotable_dev"
+
+
+def _eligible_for_full_dev_from_small_signal(state: CandidateEvaluationState) -> bool:
+    small_stage = next(
+        (
+            row
+            for row in reversed(state.stage_rows)
+            if isinstance(row, dict) and row.get("stage") == "small_dev"
+        ),
+        None,
+    )
+    if small_stage is None:
+        return True
+    comparison = small_stage.get("comparison_to_parent") or {}
+    behavior = small_stage.get("behavior_flip_summary") or {}
+    if float(comparison.get("score_delta") or 0.0) > 0:
+        return True
+    if int(behavior.get("fixed_count") or 0) > int(behavior.get("regressed_count") or 0):
+        return True
+    labels = ((small_stage.get("metrics") or {}).get("behavioral") or {}).get("failure_labels") or {}
+    if isinstance(labels, dict) and int(labels.get("invalid_output") or 0) == 0 and int(behavior.get("regressed_count") or 0) == 0:
+        return True
+    return False
+
+
+def _model_candidate_evidence_present(
+    diagnoses: list[FailureDiagnosis],
+    research_theory: ResearchTheory,
+) -> bool:
+    for hypothesis in research_theory.hypotheses:
+        if hypothesis.mechanism_class == "surface_model":
+            return True
+        text = " ".join([hypothesis.hypothesis_id, hypothesis.statement, *hypothesis.supporting_evidence]).lower()
+        if "model" in text and any(token in text for token in ("capacity", "reasoning", "capability")):
+            return True
+    for diagnosis in diagnoses:
+        text = json.dumps(diagnosis.to_dict(), sort_keys=True, default=str).lower()
+        if "model" in text and any(token in text for token in ("capacity", "reasoning", "capability")):
+            return True
+    return False
 
 
 def _efficiency_improved(reference: CandidateSummary, candidate: CandidateSummary) -> bool:

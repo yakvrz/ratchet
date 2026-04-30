@@ -56,6 +56,52 @@ CaseConfigFactory = Callable[[AgentSpec, EvalCase], ToolLoopRunConfig]
 GradeFactory = Callable[[EvalCase, object], GradeResult]
 
 
+def _probe_tool_loop_surface(
+    *,
+    cases: tuple[EvalCase, ...],
+    agent_spec: AgentSpec,
+    environment_factory: EnvironmentFactory,
+    case_config: CaseConfigFactory,
+) -> dict[str, Any]:
+    if not cases:
+        raise ValueError("tool-loop surface inference requires at least one proposal-safe case.")
+    errors: list[str] = []
+    domain_policy = ""
+    tools: list[dict[str, Any]] = []
+    for case in cases[:3]:
+        try:
+            config = case_config(agent_spec, case)
+            config = ToolLoopRunConfig(
+                provider=config.provider,
+                temperature=config.temperature,
+                max_steps=config.max_steps,
+                request_timeout_s=config.request_timeout_s,
+                log_dir=config.log_dir,
+                metadata={**dict(config.metadata or {}), "surface_probe": True},
+            )
+            env = environment_factory(case, config)
+        except Exception as exc:
+            errors.append(f"{case.id}: {type(exc).__name__}: {exc}")
+            continue
+        if not domain_policy:
+            domain_policy = str(getattr(env, "wiki", "") or getattr(env, "policy", "") or "").strip()
+        raw_tools = getattr(env, "tools_info", None)
+        if isinstance(raw_tools, list) and raw_tools:
+            tools = [dict(item) for item in raw_tools if isinstance(item, dict)]
+            break
+    if not domain_policy:
+        raise RuntimeError(
+            "tool-loop surface inference requires a pre-trajectory domain policy/wiki exposed by the environment."
+        )
+    if not tools:
+        detail = f" Probe errors: {'; '.join(errors)}" if errors else ""
+        raise RuntimeError(
+            "tool-loop surface inference requires pre-trajectory tool schemas exposed as env.tools_info."
+            + detail
+        )
+    return {"domain_policy": domain_policy, "tools": tools}
+
+
 class LiteLLMToolLoopClient:
     def __init__(self, *, max_retries: int = 0, retry_delay_s: float = 2.0) -> None:
         self.max_retries = max_retries
@@ -139,9 +185,18 @@ class GeneratedToolLoopAdapter:
     def agent_spec(self) -> AgentSpec:
         return self._agent_spec
 
-    def surface_spec(self) -> SurfaceSpec:
+    def surface_spec(self, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
         if self._surface is None:
-            self._surface = tool_loop_surface_from_agent_spec(self._agent_spec)
+            _load_env_file(self.env_path)
+            self._surface = tool_loop_surface_from_agent_spec(
+                self._agent_spec,
+                probe=_probe_tool_loop_surface(
+                    cases=cases,
+                    agent_spec=self._agent_spec,
+                    environment_factory=self._environment_factory,
+                    case_config=self._case_config,
+                ),
+            )
         return self._surface
 
     def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
@@ -320,7 +375,9 @@ class GeneratedToolLoopAdapter:
         out_dir.mkdir(parents=True, exist_ok=True)
         if candidate is not None:
             (out_dir / "compiled_candidate.json").write_text(json.dumps(candidate.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "surface_spec.json").write_text(json.dumps(self.surface_spec().to_dict(), indent=2, sort_keys=True))
+        if self._surface is None:
+            raise RuntimeError("surface_spec(cases) must be inferred before exporting a tool-loop adapter.")
+        (out_dir / "surface_spec.json").write_text(json.dumps(self._surface.to_dict(), indent=2, sort_keys=True))
 
 
 def _default_case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:

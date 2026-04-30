@@ -149,6 +149,29 @@ class TransformLibraryTests(unittest.TestCase):
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "context_content_required")
 
+    def test_compiler_rejects_simulator_stop_marker_in_candidate_content(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
+        )
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-boundary",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "add_context_section",
+                        "section": "bad_rule",
+                        "content": "Never emit ###STOP### until the task is complete.",
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "immutable_boundary_violation")
+
     def test_compiler_rejects_model_name_outside_surface_options(self) -> None:
         surface = surface_from_agent_spec(
             AgentSpec(name="sample", model="base", model_options=["base", "larger"])

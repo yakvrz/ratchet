@@ -5,13 +5,19 @@ import tempfile
 import unittest
 
 from ratchet.evidence_ledger import EvidenceLedger
-from ratchet.optimizer import CandidateEvaluationState, RatchetOptimizer, _candidate_batch_concurrency_limit
+from ratchet.optimizer import (
+    CandidateEvaluationState,
+    RatchetOptimizer,
+    _candidate_batch_concurrency_limit,
+    _eligible_for_full_dev_from_small_signal,
+    _finalize_candidate_state,
+)
 from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
 from ratchet.transforms import CandidateAffordanceApplication, CandidateProposal, TransformContextKey
-from ratchet.types import AgentSpec, EvalCase, GradeResult, OperationalMetrics, RunRecord
+from ratchet.types import AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 class FakeAdapter:
@@ -37,10 +43,17 @@ class FakeAdapter:
         out_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _summary() -> CandidateSummary:
+def _summary(
+    *,
+    candidate_id: str = "baseline",
+    score: float = 1.0,
+    passed: bool = True,
+    cost_usd: float = 0.01,
+    latency_s: float = 1.0,
+) -> CandidateSummary:
     case = EvalCase(id="case-1", split="dev", input="x")
     return CandidateSummary(
-        candidate_id="baseline",
+        candidate_id=candidate_id,
         candidate=None,
         split="dev",
         evaluations=[
@@ -49,14 +62,14 @@ def _summary() -> CandidateSummary:
                 record=RunRecord(
                     output="ok",
                     metrics=OperationalMetrics(
-                        latency_s=1.0,
+                        latency_s=latency_s,
                         input_tokens=10,
                         output_tokens=5,
                         total_tokens=15,
-                        cost_usd=0.01,
+                        cost_usd=cost_usd,
                     ),
                 ),
-                grade=GradeResult(score=1.0, passed=True),
+                grade=GradeResult(score=score, passed=passed),
             )
         ],
     )
@@ -176,6 +189,84 @@ class OptimizerConcurrencyTests(unittest.TestCase):
         )
 
         self.assertEqual(_candidate_batch_concurrency_limit([None, candidate]), 10_000)
+
+    def test_flat_correctness_with_lower_cost_is_efficiency_frontier_only(self) -> None:
+        state = _evaluation_state()
+        state.summary = _summary(candidate_id="candidate-1", score=1.0, cost_usd=0.005)
+        state.rejection_reason = "no positive correctness gain"
+
+        _finalize_candidate_state(state, _summary(score=1.0, cost_usd=0.01), OptimizationObjective())
+
+        self.assertEqual(state.frontier_status, "efficiency_frontier")
+        self.assertFalse(state.accepted)
+
+    def test_positive_correctness_gain_is_promotable_dev(self) -> None:
+        state = _evaluation_state()
+        state.summary = _summary(candidate_id="candidate-1", score=1.0)
+
+        _finalize_candidate_state(state, _summary(score=0.0), OptimizationObjective())
+
+        self.assertEqual(state.frontier_status, "promotable_dev")
+        self.assertTrue(state.accepted)
+
+    def test_small_dev_flat_candidate_does_not_reach_full_dev(self) -> None:
+        state = _evaluation_state()
+        state.stage_rows.append(
+            {
+                "stage": "small_dev",
+                "comparison_to_parent": {"score_delta": 0.0},
+                "behavior_flip_summary": {"fixed_count": 0, "regressed_count": 0},
+                "metrics": {"behavioral": {"failure_labels": {"invalid_output": 1}}},
+            }
+        )
+
+        self.assertFalse(_eligible_for_full_dev_from_small_signal(state))
+
+    def test_small_dev_targeted_failure_reduction_reaches_full_dev(self) -> None:
+        state = _evaluation_state()
+        state.stage_rows.append(
+            {
+                "stage": "small_dev",
+                "comparison_to_parent": {"score_delta": 0.0},
+                "behavior_flip_summary": {"fixed_count": 2, "regressed_count": 0},
+                "metrics": {"behavioral": {"failure_labels": {"invalid_output": 1}}},
+            }
+        )
+
+        self.assertTrue(_eligible_for_full_dev_from_small_signal(state))
+
+    def test_small_dev_stage_does_not_expand_to_full_dev_on_many_failures(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            optimizer = RatchetOptimizer(FakeAdapter(), Path(tmp), case_timeout_s=0)
+            reference = CandidateSummary(
+                candidate_id="baseline",
+                candidate=None,
+                split="dev",
+                evaluations=[
+                    CaseEvaluation(
+                        case=EvalCase(id=f"case-{index}", split="dev", input="x"),
+                        record=RunRecord(
+                            output="ok",
+                            metrics=OperationalMetrics(
+                                latency_s=1.0,
+                                input_tokens=10,
+                                output_tokens=5,
+                                total_tokens=15,
+                                cost_usd=0.01,
+                            ),
+                        ),
+                        grade=GradeResult(score=1.0 if index % 4 == 0 else 0.0, passed=index % 4 == 0),
+                    )
+                    for index in range(16)
+                ],
+            )
+            dev_cases = tuple(evaluation.case for evaluation in reference.evaluations)
+
+            stages = optimizer._progressive_eval_stages(reference, dev_cases)
+
+        self.assertEqual([name for name, _ in stages], ["smoke", "small_dev", "full_dev"])
+        small_cases = next(cases for name, cases in stages if name == "small_dev")
+        self.assertLess(len(small_cases), len(dev_cases))
 
 
 if __name__ == "__main__":

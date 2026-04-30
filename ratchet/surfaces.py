@@ -316,6 +316,34 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
         tool_ops.append("rewrite_tool_description")
     if surface.tools.tool_call_interception_allowed:
         tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
+        for hook_name, hook_description, hook_ops in [
+            (
+                "before_tool_call",
+                "Validate, normalize, block, or replan proposed tool calls before environment execution.",
+                ("validate", "normalize_tool_args", "block", "allow", "replan"),
+            ),
+            (
+                "after_tool_result",
+                "Update state from real tool observations after environment execution.",
+                ("set_state", "append_state", "merge_state"),
+            ),
+            (
+                "on_tool_error",
+                "Route real tool errors into bounded retry or replan behavior.",
+                ("set_state", "append_state", "retry", "replan"),
+            ),
+        ]:
+            if surface.hooks[hook_name].supported:
+                targets.append(
+                    SurfaceTarget(
+                        name=hook_name,
+                        kind="tool",
+                        path=f"hooks.{hook_name}",
+                        current_value=surface.hooks[hook_name].to_dict(),
+                        allowed_ops=hook_ops,
+                        description=hook_description,
+                    )
+                )
         targets.append(
             SurfaceTarget(
                 name="tool_loop",
@@ -509,7 +537,7 @@ def surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
     )
 
 
-def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
+def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any]) -> SurfaceSpec:
     surface = surface_from_agent_spec(spec)
     hooks = unsupported_hooks()
     hook_specs = [
@@ -602,13 +630,20 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
             allowed_outputs=outputs,
             allowed_ops=ops,
         )
+    context_sections = tuple(_tool_loop_context_sections(spec, probe))
     return SurfaceSpec(
         agent_id=surface.agent_id,
-        context=surface.context,
+        context=ContextSurface(
+            graph=ContextGraph(context_sections),
+            editable_sections=tuple(section.name for section in context_sections),
+            generated_sections_allowed=True,
+            removable_sections_allowed=True,
+            reorderable_sections_allowed=True,
+        ),
         hooks=hooks,
         state=surface.state,
         tools=ToolSurface(
-            tools=surface.tools.tools,
+            tools=tuple(_tool_loop_tool_specs(spec, probe)),
             tool_schema_rewrite_allowed=False,
             tool_description_rewrite_allowed=True,
             tool_call_interception_allowed=True,
@@ -632,3 +667,165 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
         safety_constraints=surface.safety_constraints,
         metadata={"source": "tool_loop_agent_spec"},
     )
+
+
+def _tool_loop_context_sections(spec: AgentSpec, probe: dict[str, Any]) -> list[ContextSection]:
+    sections: list[ContextSection] = []
+    domain_policy = str(probe.get("domain_policy") or "").strip()
+    if domain_policy:
+        sections.append(
+            ContextSection(
+                name="domain_policy",
+                role="system",
+                content=domain_policy,
+                required=True,
+                metadata={"source": "environment"},
+            )
+        )
+    for name, text in spec.instructions.items():
+        if text:
+            sections.append(
+                ContextSection(
+                    name=name,
+                    role="system",
+                    content=text,
+                    required=True,
+                    metadata={"source": "agent_spec.instructions"},
+                )
+            )
+    tool_summary = _tool_instruction_text(probe.get("tools") or [])
+    if tool_summary:
+        sections.append(
+            ContextSection(
+                name="tool_instructions",
+                role="system",
+                content=tool_summary,
+                required=True,
+                metadata={"source": "environment.tools_info"},
+            )
+        )
+    if spec.output_contract:
+        sections.append(
+            ContextSection(
+                name="output_contract",
+                role="system",
+                content=spec.output_contract,
+                required=True,
+                metadata={"source": "agent_spec.output_contract"},
+            )
+        )
+    sections.append(
+        ContextSection(
+            name="recent_messages",
+            role="system",
+            content="Runtime conversation history supplied as messages after the system prompt.",
+            required=True,
+            metadata={"dynamic": True, "source": "runtime.message_history"},
+        )
+    )
+    return sections
+
+
+def _tool_loop_tool_specs(spec: AgentSpec, probe: dict[str, Any]) -> list[ToolSpec]:
+    specs: list[ToolSpec] = []
+    static_tools = dict(spec.tools)
+    for raw_tool in probe.get("tools") or []:
+        if not isinstance(raw_tool, dict):
+            continue
+        function = raw_tool.get("function") if isinstance(raw_tool.get("function"), dict) else raw_tool
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        static_tool = static_tools.get(name)
+        description = str(function.get("description") or (static_tool.description if static_tool is not None else ""))
+        schema = dict(function.get("parameters") or function.get("schema") or {})
+        metadata = _inferred_tool_metadata(name, description, schema)
+        if static_tool is not None:
+            metadata.update(static_tool.metadata)
+        specs.append(ToolSpec(name=name, description=description, schema=schema, metadata=metadata))
+    return sorted(specs, key=lambda item: item.name)
+
+
+def _tool_instruction_text(raw_tools: list[Any]) -> str:
+    rows: list[str] = []
+    for raw_tool in raw_tools:
+        if not isinstance(raw_tool, dict):
+            continue
+        function = raw_tool.get("function") if isinstance(raw_tool.get("function"), dict) else raw_tool
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        description = str(function.get("description") or "").strip()
+        rows.append(f"- {name}: {description}" if description else f"- {name}")
+    return "\n".join(rows)
+
+
+def _inferred_tool_metadata(name: str, description: str, schema: dict[str, Any]) -> dict[str, Any]:
+    name_tokens = _identifier_tokens(name)
+    description_head = description.split(".", 1)[0]
+    description_tokens = _identifier_tokens(description_head)
+    action_token = name_tokens[0] if name_tokens else ""
+    mutating_tokens = {
+        "create",
+        "update",
+        "delete",
+        "cancel",
+        "change",
+        "modify",
+        "submit",
+        "send",
+        "book",
+        "refund",
+        "return",
+        "transfer",
+        "purchase",
+        "pay",
+        "exchange",
+    }
+    destructive_tokens = {"delete", "cancel", "remove", "close"}
+    read_tokens = {"get", "list", "search", "find", "lookup", "check", "retrieve", "view", "calculate"}
+    internal_tokens = {"think", "reason", "log"}
+    if action_token in destructive_tokens:
+        side_effect = "destructive"
+        risk = "high"
+    elif action_token in read_tokens:
+        side_effect = "read"
+        risk = "low"
+    elif action_token in internal_tokens:
+        side_effect = "internal"
+        risk = "low"
+    elif action_token in mutating_tokens:
+        side_effect = "mutating"
+        risk = "medium"
+    elif set(description_tokens) & destructive_tokens:
+        side_effect = "destructive"
+        risk = "high"
+    elif set(description_tokens) & read_tokens:
+        side_effect = "read"
+        risk = "low"
+    elif set(description_tokens) & mutating_tokens:
+        side_effect = "mutating"
+        risk = "medium"
+    else:
+        side_effect = "unknown"
+        risk = "unknown"
+    return {
+        "side_effect": side_effect,
+        "risk": risk,
+        "schema_keys": sorted(str(key) for key in schema.keys()),
+        "source": "surface_probe",
+    }
+
+
+def _identifier_tokens(value: str) -> list[str]:
+    tokens: list[str] = []
+    current: list[str] = []
+    for char in value:
+        if char.isalnum():
+            current.append(char.lower())
+        elif current:
+            tokens.append("".join(current))
+            current = []
+    if current:
+        tokens.append("".join(current))
+    return tokens

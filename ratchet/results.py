@@ -21,6 +21,8 @@ from ratchet.types import (
 @dataclass
 class OptimizerStats:
     cache_hits: int = 0
+    local_cache_hits: int = 0
+    shared_cache_hits: int = 0
     fresh_case_evaluations: int = 0
     retries: int = 0
     runtime_errors: int = 0
@@ -37,6 +39,7 @@ class CaseEvaluation:
     record: RunRecord
     grade: GradeResult
     cached: bool = False
+    cache_source: str = "fresh"
     sample_index: int = 0
 
     def to_record(
@@ -50,6 +53,8 @@ class CaseEvaluation:
             "cache_namespace": cache_namespace,
             "candidate_id": candidate_id_value,
             "sample_index": self.sample_index,
+            "cached": self.cached,
+            "cache_source": self.cache_source,
             "candidate": candidate.to_dict() if candidate is not None else None,
             "case_digest": case_digest(self.case),
             "case": self.case.to_dict(),
@@ -64,6 +69,7 @@ class CaseEvaluation:
             record=RunRecord.from_dict(payload["record"]),
             grade=GradeResult.from_dict(payload["grade"]),
             cached=True,
+            cache_source=str(payload.get("cache_source") or "local"),
             sample_index=int(payload.get("sample_index", 0)),
         )
 
@@ -283,6 +289,7 @@ class CandidateSummary:
                     "record": evaluation.record.to_dict(),
                     "grade": evaluation.grade.to_dict(),
                     "cached": evaluation.cached,
+                    "cache_source": evaluation.cache_source,
                 }
                 for evaluation in self.evaluations
             ],
@@ -395,12 +402,16 @@ class RatchetResult:
 
 
 class ResultStore:
-    def __init__(self, out_dir: Path, *, cache_namespace: str) -> None:
+    def __init__(self, out_dir: Path, *, cache_namespace: str, shared_cache_path: Path | None = None) -> None:
         self.out_dir = out_dir
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.case_results_path = out_dir / "case_results.jsonl"
+        self.shared_cache_path = shared_cache_path
         self.cache_namespace = cache_namespace
         self.records: dict[tuple[str, str, int], CaseEvaluation] = {}
+        self.shared_records: dict[tuple[str, str, int], CaseEvaluation] = {}
         self._load_existing()
+        self._load_shared()
 
     def _load_existing(self) -> None:
         if not self.case_results_path.exists():
@@ -411,8 +422,12 @@ class ResultStore:
                 continue
             payload = json.loads(line)
             if payload.get("cache_namespace") != self.cache_namespace:
-                continue
+                raise ValueError(
+                    f"Run-local cache namespace mismatch in {self.case_results_path}: "
+                    f"{payload.get('cache_namespace')!r} != {self.cache_namespace!r}."
+                )
             evaluation = CaseEvaluation.from_record(payload)
+            evaluation.cache_source = "local"
             if evaluation.record.metrics.error:
                 continue
             stored_digest = payload.get("case_digest")
@@ -420,10 +435,52 @@ class ResultStore:
                 continue
             self.records[(payload["candidate_id"], stored_digest, evaluation.sample_index)] = evaluation
 
-    def get(self, candidate_id_value: str, case: EvalCase, sample_index: int = 0) -> CaseEvaluation | None:
-        return self.records.get((candidate_id_value, case_digest(case), sample_index))
+    def _load_shared(self) -> None:
+        if self.shared_cache_path is None or not self.shared_cache_path.exists():
+            return
+        for raw_line in self.shared_cache_path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if payload.get("cache_namespace") != self.cache_namespace:
+                continue
+            evaluation = CaseEvaluation.from_record(payload)
+            evaluation.cache_source = "shared"
+            if evaluation.record.metrics.error:
+                continue
+            stored_digest = payload.get("case_digest")
+            if stored_digest != case_digest(evaluation.case):
+                continue
+            self.shared_records[(payload["candidate_id"], stored_digest, evaluation.sample_index)] = evaluation
+
+    def get(
+        self,
+        candidate_id_value: str,
+        case: EvalCase,
+        sample_index: int = 0,
+        candidate: CompiledCandidate | None = None,
+    ) -> CaseEvaluation | None:
+        key = (candidate_id_value, case_digest(case), sample_index)
+        local = self.records.get(key)
+        if local is not None:
+            local.cached = True
+            local.cache_source = "local"
+            return local
+        shared = self.shared_records.get(key)
+        if shared is not None:
+            shared.cached = True
+            shared.cache_source = "shared"
+            self._put_local(candidate_id_value, candidate, shared)
+            return shared
+        return None
 
     def put(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        evaluation.cache_source = "fresh"
+        self._put_local(candidate_id_value, candidate, evaluation)
+        self._put_shared(candidate_id_value, candidate, evaluation)
+
+    def _put_local(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
         key = (candidate_id_value, case_digest(evaluation.case), evaluation.sample_index)
         if key in self.records:
             return
@@ -431,6 +488,21 @@ class ResultStore:
             self.records[key] = evaluation
         append_jsonl(
             self.case_results_path,
+            evaluation.to_record(candidate_id_value, candidate, cache_namespace=self.cache_namespace),
+        )
+
+    def _put_shared(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        if self.shared_cache_path is None:
+            return
+        key = (candidate_id_value, case_digest(evaluation.case), evaluation.sample_index)
+        if key in self.shared_records:
+            return
+        if evaluation.record.metrics.error:
+            return
+        self.shared_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.shared_records[key] = evaluation
+        append_jsonl(
+            self.shared_cache_path,
             evaluation.to_record(candidate_id_value, candidate, cache_namespace=self.cache_namespace),
         )
 

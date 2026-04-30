@@ -50,7 +50,22 @@ class SurfaceOpportunityTests(unittest.TestCase):
         self.assertEqual(tool.mechanism, "surface_tool_loop")
 
     def test_tool_loop_surface_exposes_generic_tool_affordance_without_static_tools(self) -> None:
-        surface = tool_loop_surface_from_agent_spec(AgentSpec(name="interactive", model="base"))
+        surface = tool_loop_surface_from_agent_spec(
+            AgentSpec(name="interactive", model="base"),
+            probe={
+                "domain_policy": "Use tools before responding.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "lookup",
+                            "description": "Look up records.",
+                            "parameters": {"type": "object"},
+                        },
+                    }
+                ],
+            },
+        )
 
         opportunities = generate_optimization_affordances(
             surface,

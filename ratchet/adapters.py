@@ -41,7 +41,7 @@ class AdapterProtocol(Protocol):
     def agent_spec(self) -> AgentSpec:
         ...
 
-    def surface_spec(self) -> SurfaceSpec:
+    def surface_spec(self, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
         ...
 
     def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
@@ -89,11 +89,18 @@ def checked_agent_spec(adapter: AdapterProtocol, *, adapter_spec: str = "adapter
     return spec
 
 
-def checked_surface_spec(adapter: AdapterProtocol, *, adapter_spec: str = "adapter") -> SurfaceSpec:
+def checked_surface_spec(
+    adapter: AdapterProtocol,
+    *,
+    adapter_spec: str = "adapter",
+    cases: tuple[EvalCase, ...],
+) -> SurfaceSpec:
+    if not cases:
+        raise ValueError(f"Adapter {adapter_spec} surface inference requires at least one proposal-safe case.")
     method = getattr(adapter, "surface_spec", None)
     if callable(method):
         try:
-            surface = method()
+            surface = method(cases)
         except Exception as exc:
             raise TypeError(f"Adapter {adapter_spec} surface_spec() failed: {exc}") from exc
         if not isinstance(surface, SurfaceSpec):

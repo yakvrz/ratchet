@@ -10,11 +10,17 @@ Install the upstream benchmark before running:
 pip install "git+https://github.com/sierra-research/tau-bench.git"
 ```
 
-Then run a small smoke assessment:
+Generate a representative non-full-scale assessment from installed tau-bench tasks:
+
+```bash
+python samples/taubench_agent/generate_evals.py
+```
+
+Then run the assessment:
 
 ```bash
 python -m ratchet check --config samples/taubench_agent/ratchet.assessment.toml
 python -m ratchet optimize --config samples/taubench_agent/ratchet.assessment.toml
 ```
 
-Keep `case_concurrency = 1` unless provider limits are known. tau-bench is multi-turn and substantially more expensive than single-call samples.
+The default config uses conservative per-case parallelism. tau-bench is multi-turn and substantially more expensive than single-call samples.

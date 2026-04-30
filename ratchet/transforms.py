@@ -14,7 +14,7 @@ from ratchet.types import FailureDiagnosis, OptimizationObjective
 TRANSFORM_LIFECYCLE_STATES = {
     "available",
     "active",
-    "promoted",
+    "promotable_dev",
     "paused",
     "constrained",
 }
@@ -224,7 +224,7 @@ class SearchHypothesis:
                 self.family_states.items(),
                 key=lambda item: (-item[1].suitability, item[0]),
             )
-            if state.state in {"active", "promoted"}
+            if state.state in {"active", "promotable_dev"}
             or (state.state == "constrained" and state.suitability > 0)
         ]
 
@@ -236,7 +236,7 @@ class SearchHypothesis:
                 self.context_states.items(),
                 key=lambda item: (-item[1].suitability, item[0]),
             )
-            if state.state in {"active", "promoted"}
+            if state.state in {"active", "promotable_dev"}
             or (state.state == "constrained" and state.suitability > 0)
         ]
 
@@ -264,7 +264,7 @@ class SearchHypothesis:
         active_contexts: list[dict[str, Any]] = []
         counts_by_family: Counter[str] = Counter()
         for state in ranked_contexts:
-            if state.state not in {"active", "promoted"}:
+            if state.state not in {"active", "promotable_dev"}:
                 continue
             if counts_by_family[state.key.family] >= max_contexts_per_family:
                 continue
@@ -449,7 +449,7 @@ class CandidateProposal:
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateProposal":
         if "patch" in payload:
-            raise ValueError("candidate must emit a typed transform program, not a legacy patch")
+            raise ValueError("candidate must emit a typed transform program, not an untyped patch")
         if payload.get("transform_parameters"):
             raise ValueError("candidate transform_parameters are derived; put candidate-specific data in applications[]")
         if payload.get("transform_family") or payload.get("mechanism_class") or payload.get("affordance_ids"):
@@ -861,8 +861,8 @@ def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, di
         latency_deltas = [float(item["latency_delta"]) for item in comparisons if "latency_delta" in item]
         score_regressed = any(delta < 0 for delta in score_deltas)
         if accepted_rows:
-            state = "promoted"
-            reason = "At least one candidate from this surface mechanism improved the configured objective on dev."
+            state = "promotable_dev"
+            reason = "At least one candidate from this surface mechanism earned finalist eligibility on dev."
         elif evaluated_count >= 2 or score_regressed:
             state = "constrained"
             reason = (
@@ -894,8 +894,8 @@ def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, di
             if ((summary.get("key") or {}).get("family") == family)
         ]
         if family_contexts:
-            if any(summary.get("state") == "promoted" for summary in family_contexts):
-                summaries[family]["state"] = "promoted"
+            if any(summary.get("state") == "promotable_dev" for summary in family_contexts):
+                summaries[family]["state"] = "promotable_dev"
             elif any(summary.get("state") == "active" for summary in family_contexts):
                 summaries[family]["state"] = "active"
             elif any(summary.get("state") == "constrained" for summary in family_contexts):
@@ -973,8 +973,8 @@ def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, d
             if row.get("valid") is False and row.get("invalid_reason")
         )
         if accepted_rows:
-            state = "promoted"
-            reason = "At least one application of this surface opportunity improved the configured objective on dev."
+            state = "promotable_dev"
+            reason = "At least one application of this surface opportunity earned finalist eligibility on dev."
         elif score_deltas and any(delta < 0 for delta in score_deltas):
             state = "constrained"
             reason = "At least one evaluated application regressed score."
@@ -1029,8 +1029,8 @@ def observe_transform_result(
     rejection_reason: str | None,
 ) -> dict[str, Any]:
     if accepted:
-        state = "promoted"
-        reason = "Candidate improved the configured objective on dev."
+        state = "promotable_dev"
+        reason = "Candidate earned finalist eligibility on dev."
     elif comparison.score_delta < 0:
         state = "constrained"
         reason = rejection_reason or "Candidate regressed score; future attempts should be materially distinct."
@@ -1169,9 +1169,9 @@ def _context_lifecycle_state(
         reason = "Latest same-context candidate regressed score; require a materially distinct context before retrying."
         suitability = adjusted
     elif accepted and accepted_weight >= rejected_weight:
-        state = "promoted"
-        suitability = round(max(suitability * 1.35, suitability + 0.15), 4)
-        reason = "Recent same-context evidence improved the dev objective."
+            state = "promotable_dev"
+            suitability = round(max(suitability * 1.35, suitability + 0.15), 4)
+            reason = "Recent same-context evidence earned finalist eligibility on dev."
     elif len(rejected) >= 2:
         state = "constrained"
         suitability = min(round(max(suitability * 0.35, 0.05), 4), suitability)
@@ -1211,8 +1211,8 @@ def _aggregate_family_states(context_states: dict[str, TransformContextState]) -
     family_states: dict[str, TransformFamilyState] = {}
     for family_name in sorted(grouped):
         states = grouped.get(family_name, [])
-        if any(state.state == "promoted" for state in states):
-            state_name = "promoted"
+        if any(state.state == "promotable_dev" for state in states):
+            state_name = "promotable_dev"
         elif any(state.state == "active" for state in states):
             state_name = "active"
         elif any(state.state == "constrained" and state.suitability > 0 for state in states):
@@ -1240,7 +1240,7 @@ def _budget_allocation(states: dict[str, TransformFamilyState]) -> dict[str, flo
     active = {
         name: state.suitability
         for name, state in states.items()
-        if state.state in {"active", "promoted", "constrained"} and state.suitability > 0
+        if state.state in {"active", "promotable_dev", "constrained"} and state.suitability > 0
     }
     total = sum(active.values())
     if total <= 0:
@@ -1265,8 +1265,8 @@ def _family_state_reason(
     states: list[TransformContextState],
 ) -> str:
     counts = Counter(state.state for state in states)
-    if state == "promoted":
-        return f"{family_name} has at least one promoted branch-local transform context."
+    if state == "promotable_dev":
+        return f"{family_name} has at least one dev-eligible branch-local transform context."
     if state == "active":
         return f"{family_name} has viable branch-local transform contexts."
     if state == "constrained":
@@ -1277,8 +1277,8 @@ def _family_state_reason(
 
 
 def _context_summary_reason(state: str) -> str:
-    if state == "promoted":
-        return "Recent same-context evidence improved the dev objective."
+    if state == "promotable_dev":
+        return "Recent same-context evidence earned finalist eligibility on dev."
     if state == "constrained":
         return "Same-context evidence regressed or repeatedly failed."
     if state == "paused":
@@ -1313,7 +1313,7 @@ def _operation_context_error(
 ) -> str | None:
     exact_state = search_hypothesis.context_states.get(operation_key.id)
     if exact_state is not None:
-        if exact_state.state in {"active", "promoted"}:
+        if exact_state.state in {"active", "promotable_dev"}:
             return None
         if exact_state.state == "constrained":
             return f"constrained transform context {operation_key.id!r} requires a materially distinct mechanism"
@@ -1323,7 +1323,7 @@ def _operation_context_error(
         for state in search_hypothesis.context_states.values()
         if _context_scope_covers(state.key, operation_key)
     ]
-    if any(state.state in {"active", "promoted"} for state in same_scope_states):
+    if any(state.state in {"active", "promotable_dev"} for state in same_scope_states):
         return None
     if any(
         state.state in {"constrained", "paused"} and state.key.mechanism != operation_key.mechanism

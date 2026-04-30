@@ -185,7 +185,7 @@ class TransformRuntime:
         if op == "rewrite_response":
             ctx.draft_response = _rewrite_response(params, ctx)
             ctx.output = ctx.draft_response
-            ctx.annotate(hook=hook, op=op)
+            ctx.annotate(hook=hook, op=op, fields={"response_preview": _preview_value(ctx.draft_response)})
             return
         if op == "block_response":
             ctx.output = {"blocked": True, "message": str(params.get("message", "Response blocked by transform."))}
@@ -335,6 +335,14 @@ def _tool_call_args(raw_args: Any) -> Any:
 
 def _stable_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _preview_value(value: Any, limit: int = 500) -> str:
+    if isinstance(value, str):
+        text = value
+    else:
+        text = json.dumps(value, sort_keys=True, default=str)
+    return text if len(text) <= limit else f"{text[:limit]}..."
 
 
 def _rewrite_response(params: dict[str, Any], ctx: RuntimeContext) -> Any:

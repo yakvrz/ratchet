@@ -91,7 +91,7 @@ python3 -m ratchet optimize \
 
 An adapter object must implement:
 
-- `surface_spec() -> SurfaceSpec`
+- `surface_spec(cases: tuple[EvalCase, ...]) -> SurfaceSpec`
 - `agent_spec() -> AgentSpec`
 - `run_case(case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord`
 - `grade(case: EvalCase, output: object) -> GradeResult`

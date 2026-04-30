@@ -100,7 +100,7 @@ class GeneratedSampleAdapterTests(unittest.TestCase):
                 ],
             }
         )
-        candidate = TransformCompiler().compile_or_raise(program, adapter.surface_spec())
+        candidate = TransformCompiler().compile_or_raise(program, adapter.surface_spec((case,)))
         patched = adapter.run_case(case, candidate)
         self.assertIn("Use concise labels.", str(client.calls[-1]["instructions"]))
         self.assertEqual(
