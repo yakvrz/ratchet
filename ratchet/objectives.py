@@ -226,12 +226,12 @@ class GatePredicate:
         candidate: CandidateSummary,
     ) -> str | None:
         if self.mode == "correctness":
+            if candidate.mean_score > reference.mean_score + NON_INFERIORITY_MARGIN:
+                return None
             if candidate.pass_count > reference.pass_count:
                 return None
             if candidate.pass_count < reference.pass_count:
-                return "correctness objective rejected pass count regression"
-            if candidate.mean_score > reference.mean_score + NON_INFERIORITY_MARGIN:
-                return None
+                return "correctness objective rejected pass count regression without material score gain"
             return "correctness objective did not improve pass count or mean score"
         if self.mode == "cost":
             if candidate.mean_score < reference.mean_score - NON_INFERIORITY_MARGIN:
@@ -334,8 +334,8 @@ class GatePredicate:
     def sort_key(self, summary: CandidateSummary) -> tuple[Any, ...]:
         if self.mode == "correctness":
             return (
-                -summary.pass_count,
                 -summary.mean_score,
+                -summary.pass_count,
                 summary.mean_cost_usd,
                 summary.median_latency_s,
                 summary.operation_count,
@@ -381,6 +381,7 @@ class GatePredicate:
         """Tiebreak ordering applied within an equivalence band on the primary axis."""
         if self.mode == "correctness":
             return (
+                -summary.pass_count,
                 summary.mean_cost_usd,
                 summary.median_latency_s,
                 summary.operation_count,

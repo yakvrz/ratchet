@@ -148,11 +148,17 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(gate.status, "failed")
         self.assertIn("cost constraint", gate.reason or "")
 
-    def test_correctness_dev_acceptance_rejects_pass_count_regression_despite_score_gain(self) -> None:
+    def test_correctness_dev_acceptance_allows_material_score_gain_despite_pass_count_regression(self) -> None:
         baseline = make_summary("baseline", [1.0, 0.0, 0.0], [0.002] * 3, [100] * 3, [1.0] * 3)
         candidate_summary = make_summary("candidate_summary", [0.9, 0.9, 0.9], [0.002] * 3, [100] * 3, [1.0] * 3)
         reason = objective_rejection_reason(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
-        self.assertEqual(reason, "correctness objective rejected pass count regression")
+        self.assertIsNone(reason)
+
+    def test_correctness_dev_acceptance_rejects_pass_count_regression_without_score_gain(self) -> None:
+        baseline = make_summary("baseline", [1.0, 0.0, 0.0], [0.002] * 3, [100] * 3, [1.0] * 3)
+        candidate_summary = make_summary("candidate_summary", [0.9, 0.05, 0.05], [0.002] * 3, [100] * 3, [1.0] * 3)
+        reason = objective_rejection_reason(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(reason, "correctness objective rejected pass count regression without material score gain")
 
     def test_correctness_dev_acceptance_allows_equal_pass_count_score_gain(self) -> None:
         baseline = make_summary("baseline", [1.0, 0.2, 0.2], [0.002] * 3, [100] * 3, [1.0] * 3)
@@ -193,6 +199,13 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(gate.validated)
         self.assertEqual(gate.comparison.pass_significance.fixed_count, 0)
         self.assertEqual(gate.comparison.pass_significance.regressed_count, 0)
+
+    def test_score_gain_with_pass_regression_is_directional_not_failed(self) -> None:
+        baseline = make_summary("baseline", [1.0, 0.0, 0.0, 0.0], [0.002] * 4, [100] * 4, [1.0] * 4)
+        candidate_summary = make_summary("candidate_summary", [0.9, 0.9, 0.9, 0.9], [0.002] * 4, [100] * 4, [1.0] * 4)
+        gate = final_gate_status(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
+        self.assertEqual(gate.status, "directional")
+        self.assertIn("paired pass-flip p-value", gate.reason or "")
 
     def test_repeated_sample_pass_flip_significance_uses_case_majorities(self) -> None:
         baseline = make_repeated_summary("baseline", [[0.0, 0.0, 1.0]] * 4)
