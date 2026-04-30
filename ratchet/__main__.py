@@ -240,13 +240,13 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             f"residual={modes or 'none'}",
         )
     if event == "search_hypothesis_ready":
-        families = _join_limited(row.get("active_families") or [], limit=5)
-        return "Hypothesis", f"active families={families or 'none'} contexts={row.get('active_context_count')}"
+        return "Hypothesis", f"surface contexts={row.get('active_context_count')}"
     if event == "research_planner_started":
         return (
             "Plan",
             f"choosing experiments for parent #{row.get('parent_rank')} from "
-            f"{row.get('opportunity_count')} opportunity signal(s) and {row.get('affordance_count')} affordance(s)",
+            f"{row.get('opportunity_count')} opportunity signal(s) and "
+            f"{row.get('surface_opportunity_count', row.get('affordance_count'))} surface opportunity(s)",
         )
     if event == "research_planner_completed":
         diagnostics = row.get("call_diagnostics") or {}
@@ -284,12 +284,11 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             ),
         )
     if event == "proposal_started":
-        families = _join_limited(row.get("active_families") or [], limit=5)
         retry = " retry" if row.get("proposal_retry") else ""
         return (
             "Implement",
             f"building candidates{retry} for parent #{row.get('parent_rank')} "
-            f"budget={row.get('proposal_budget')} families={families or 'none'}",
+            f"budget={row.get('proposal_budget')} from surface spec",
         )
     if event == "proposal_completed":
         diagnostics = row.get("call_diagnostics") or {}
@@ -327,7 +326,7 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         return (
             "Candidate",
             f"{_humanize_key(status)} candidate={_short_hash(row.get('candidate_id'))} "
-            f"family={_humanize_key(row.get('transform_family'))} "
+            f"surface={_humanize_key(row.get('transform_family'))} "
             f"score {_format_signed(row.get('score_delta'), digits=3)} "
             f"cost {_format_money_delta(row.get('cost_delta'))} "
             f"latency {_format_seconds_delta(row.get('latency_delta'))} "
@@ -814,7 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     check_parser = subparsers.add_parser("check", help="Validate adapter/eval/spec wiring before optimization.")
     add_run_arguments(check_parser)
-    check_parser.add_argument("--sample-limit", type=int, default=2, help="How many cases to probe during preflight")
+    check_parser.add_argument("--sample-limit", type=int, default=1, help="How many cases to probe during preflight")
 
     eval_health_parser = subparsers.add_parser("eval-health", help="Check eval-set and grader health before optimization.")
     add_eval_health_arguments(eval_health_parser)

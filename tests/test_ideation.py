@@ -14,8 +14,8 @@ class IdeationMetricsTests(unittest.TestCase):
                     "experiment_intents": [
                         {
                             "intent_id": "intent_1",
-                            "mechanism_class": "semantic_boundary_rewrite",
-                            "affordance_ids": ["aff_prompt"],
+                            "mechanism_class": "surface_context",
+                            "surface_opportunity_ids": ["surface.surface_context.system_prompt"],
                         }
                     ],
                 }
@@ -23,15 +23,15 @@ class IdeationMetricsTests(unittest.TestCase):
             proposals=[
                 {
                     "candidate": {"experiment_id": "intent_1"},
-                    "transform_family": "prompt_rewrite",
-                    "mechanism_class": "semantic_boundary_rewrite",
+                    "transform_family": "surface_context",
+                    "mechanism_class": "surface_context",
                     "accepted": True,
                     "frontier_status": "promotable",
                 },
                 {
                     "type": "candidate_proposal",
                     "valid": False,
-                    "invalid_reason": "unknown affordance_id",
+                    "invalid_reason": "unknown surface_opportunity_id",
                 },
             ],
             finalist_statuses=[],

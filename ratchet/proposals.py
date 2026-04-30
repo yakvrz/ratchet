@@ -45,18 +45,18 @@ from ratchet.types import EvalCase
 MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
-    "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[] and optional "
-    "affordance_considerations[]. Keep text concise. Implement experiment_intents exactly: they define the "
-    "research questions, mechanisms, target slices, controls, and measurements. Treat research_theory "
-    "as the causal context for implementation; opportunities are not candidate recipes. Each candidate must include "
-    "a typed transform program under candidate.program and applications[] citing relevant optimization_affordances. "
+    "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[]. "
+    "Keep text concise. Implement experiment_intents exactly: they define the research questions, target slices, "
+    "controls, and measurements. Treat research_theory as causal context; opportunities are not candidate recipes. "
+    "Each candidate must include a typed transform program under candidate.program and applications[] citing "
+    "relevant surface_opportunities. "
     "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy candidate operations. "
     "For add_context_section or replace_context_section, emit one focused patch with non-empty content containing the actual rendered instruction or context data; prefer a concise string. Do not emit empty content objects, repeated placeholder patches, or context text in value. "
-    "Every set_model_config candidate needs field and value; for field=model_name, value must be one of the model values exposed by the cited model_config affordance and should differ from the current model. Every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
-    "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family, mechanism, "
-    "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
+    "Every set_model_config candidate needs field and value; for field=model_name, value must be one of the model values exposed by the cited model surface and should differ from the current model. Every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
+    "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family and mechanism "
+    "labels are derived from cited surface_opportunities; do not emit candidate-level transform_family, "
     "mechanism_class, affordance_ids, patch, or intervention fields. "
-    "For interactive tool-loop affordances, prefer general middleware programs: define state on_task_start, "
+    "For interactive tool-loop surfaces, prefer general middleware programs: define state on_task_start, "
     "normalize or validate tool_call at before_tool_call, replan on validation failure, append real tool_result "
     "observations at after_tool_result, rewrite model-facing tool descriptions at before_model_call, and guard final responses at before_user_response. Every validate patch "
     "must use implemented checks[] such as args_schema_valid or not_duplicate_tool_call plus an executable on_fail "
@@ -285,11 +285,6 @@ class CandidateImplementer:
         group_count = 0
         group_indices: dict[str, int] = {}
         for raw_candidate in proposals:
-            reference_error = _targeted_few_shot_reference_error(raw_candidate)
-            if reference_error is not None:
-                invalid_reasons[reference_error] += 1
-                invalid_candidate_rows.append(_invalid_candidate_row(raw_candidate, reference_error))
-                continue
             materialized_candidate, materialization = _materialize_candidate_references(raw_candidate, proposal_example_bank)
             materialization_error = materialization.get("error")
             if materialization_error:
@@ -384,36 +379,30 @@ class CandidateImplementer:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
         self._last_plan_audit = {}
-        registry = transform_registry()
-        active_family_rows = [
-            _compact_transform_family(registry[name].to_dict())
-            for name in search_hypothesis.active_families
-            if name in registry
-        ]
         behavior_diagnostics = build_behavior_diagnostics(summary)
         compact_diagnostics = _compact_behavior_diagnostics(behavior_diagnostics)
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
-            "transform_library": active_family_rows,
+            "transform_library": {"language": "typed hook DSL", "ops_are_validated_by": "transform_compiler"},
             "surface_spec": _compact_surface_spec(surface),
             "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
             "research_theory": _research_theory_prompt_view(research_theory),
             "task_theory": _research_theory_prompt_view(research_theory),
             "evidence_packet": _compact_evidence_packet(evidence_packet),
             "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
-            "optimization_affordances": [_compact_affordance(affordance) for affordance in affordances],
+            "surface_opportunities": [_compact_affordance(affordance) for affordance in affordances],
             "proposal_policy": {
                 "experiment_intents": (
                     "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
-                    "intent_id. Each candidate must cite affordance_ids from that intent and from optimization_affordances."
+                    "intent_id. Each candidate must cite surface_opportunity_ids from that intent and from surface_opportunities."
                 ),
                 "empty_patches_allowed": (
-                    "Only when no listed optimization affordance can plausibly improve the objective without violating constraints."
+                    "Only when no listed surface opportunity can plausibly improve the objective without violating constraints."
                 ),
                 "cost_or_latency_without_failures": (
                     "If correctness is currently saturated and the objective is cost or latency, still propose minimal "
-                    "efficiency candidates from the affordance surface so the eval loop can validate the tradeoff."
+                    "efficiency candidates from the inferred surface so the eval loop can validate the tradeoff."
                 ),
                 "candidate_portfolio": (
                     "Generate an ordered portfolio of distinct, independently evaluable candidates up to proposal_budget. "
@@ -490,17 +479,17 @@ class CandidateImplementer:
                         "schema": {
                             "type": "object",
                             "properties": {
-                                "affordance_considerations": {
+                                "surface_opportunity_considerations": {
                                     "type": "array",
                                     "maxItems": max(len(affordances), 1),
                                     "items": {
                                         "type": "object",
                                         "properties": {
-                                            "affordance_id": {"type": "string", "maxLength": 180},
+                                            "surface_opportunity_id": {"type": "string", "maxLength": 180},
                                             "decision": {"type": "string", "maxLength": 40},
                                             "rationale": {"type": "string", "maxLength": 280},
                                         },
-                                        "required": ["affordance_id", "decision", "rationale"],
+                                        "required": ["surface_opportunity_id", "decision", "rationale"],
                                     },
                                 },
                                 "experiments": {
@@ -602,7 +591,7 @@ class CandidateImplementer:
                             "schema": {
                                 "type": "object",
                                 "properties": {
-                                    "affordance_considerations": {"type": "array"},
+                                    "surface_opportunity_considerations": {"type": "array"},
                                     "experiments": {"type": "array"},
                                 },
                                 "required": ["experiments"],
@@ -611,7 +600,7 @@ class CandidateImplementer:
                     },
                     input=(
                         "The previous candidate-implementer response was invalid JSON. "
-                        "Return only a valid JSON object with affordance_considerations and experiments. "
+                        "Return only a valid JSON object with surface_opportunity_considerations and experiments. "
                         "Preserve the intended experiment groups and candidate programs where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
                     ),
@@ -712,7 +701,7 @@ class CandidateImplementer:
                     unknown_for_intent = sorted(set(candidate.affordance_ids) - set(intent.affordance_ids))
                     if unknown_for_intent:
                         reason = (
-                            f"candidate affordance_ids {unknown_for_intent} are not allowed by experiment intent "
+                            f"candidate surface_opportunity_ids {unknown_for_intent} are not allowed by experiment intent "
                             f"{intent.intent_id!r}"
                         )
                         self._last_parse_invalid_reasons[reason] += 1
@@ -731,10 +720,11 @@ class CandidateImplementer:
         considerations = [
             {
                 "affordance_id": str(item.get("affordance_id", "")),
+                "surface_opportunity_id": str(item.get("surface_opportunity_id") or item.get("affordance_id") or ""),
                 "decision": str(item.get("decision", "")),
                 "rationale": str(item.get("rationale", "")),
             }
-            for item in payload.get("affordance_considerations", [])
+            for item in payload.get("surface_opportunity_considerations", payload.get("affordance_considerations", []))
             if isinstance(item, dict)
         ]
         return candidates, considerations
@@ -744,7 +734,7 @@ def _application_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "affordance_id": {"type": "string", "maxLength": 180},
+            "surface_opportunity_id": {"type": "string", "maxLength": 180},
             "selection": {
                 "type": "object",
                 "properties": {
@@ -763,7 +753,7 @@ def _application_schema() -> dict[str, Any]:
             },
             "rationale": {"type": "string", "maxLength": 240},
         },
-        "required": ["affordance_id"],
+        "required": ["surface_opportunity_id"],
     }
 
 
@@ -952,7 +942,9 @@ def _research_theory_prompt_view(research_theory: ResearchTheory) -> dict[str, A
                 "disconfirming_result": str(item.get("disconfirming_result") or "")[:320],
                 "candidate_roles": list(item.get("candidate_roles") or [])[:5],
                 "compatible_mechanisms": list(item.get("compatible_mechanisms") or [])[:5],
-                "affordance_ids": list(item.get("affordance_ids") or [])[:10],
+                "surface_opportunity_ids": list(
+                    item.get("surface_opportunity_ids", item.get("affordance_ids") or [])
+                )[:10],
                 "priority": item.get("priority"),
             }
             for item in list(row.get("experiment_opportunities") or [])[:6]
@@ -1007,7 +999,7 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
         "target_slices": list(intent.target_slices)[:5],
         "candidate_roles": list(intent.candidate_roles)[:5],
         "measurements": list(intent.measurements)[:5],
-        "affordance_ids": list(intent.affordance_ids)[:8],
+        "surface_opportunity_ids": list(intent.affordance_ids)[:8],
         "success_criteria": intent.success_criteria[:240],
         "disconfirming_result": intent.disconfirming_result[:240],
         "priority": intent.priority,
@@ -1016,13 +1008,11 @@ def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
 
 def _compact_affordance(affordance: OptimizationAffordance) -> dict[str, Any]:
     return {
-        "affordance_id": affordance.affordance_id,
+        "surface_opportunity_id": affordance.affordance_id,
         "label": affordance.label,
         "target_name": affordance.target_name,
         "target_kind": affordance.target_kind,
         "target_path": affordance.target_path,
-        "family": affordance.family,
-        "mechanism": affordance.mechanism,
         "ops": list(affordance.ops),
         "value_schema": affordance.value_schema,
         "semantic_role": affordance.semantic_role,
@@ -1111,13 +1101,13 @@ def _audit_experiment_plan(
         warnings.append("candidate implementer did not return any requested experiment intent IDs")
     if mechanism_mismatch_ids:
         warnings.append("returned experiment mechanism differed from requested intent mechanism")
-    if research_theory.bottleneck_class == "semantic_boundary_rewrite":
-        has_examples = bool(candidate_mechanisms.intersection({"representative_examples", "contrastive_examples"}))
-        has_rewrite = "semantic_boundary_rewrite" in candidate_mechanisms
-        if has_examples and not has_rewrite:
-            warnings.append("example experiment lacks a semantic-boundary rewrite control")
-        if _semantic_opportunity_has_examples(research_theory) and has_rewrite and not has_examples:
-            warnings.append("semantic-boundary plan did not test available example anchoring")
+    if research_theory.bottleneck_class == "surface_context":
+        has_examples = "surface_examples" in candidate_mechanisms
+        has_context = "surface_context" in candidate_mechanisms
+        if has_examples and not has_context:
+            warnings.append("example-surface experiment lacks a context-surface control")
+        if _context_opportunity_has_examples(research_theory) and has_context and not has_examples:
+            warnings.append("context-surface plan did not test available example anchoring")
     if role_counts.get("composed", 0) and not (role_counts.get("control", 0) or role_counts.get("ablation", 0)):
         warnings.append("composed candidate lacks a control or ablation in the returned plan")
     return {
@@ -1141,9 +1131,9 @@ def _audit_experiment_plan(
     }
 
 
-def _semantic_opportunity_has_examples(research_theory: ResearchTheory) -> bool:
+def _context_opportunity_has_examples(research_theory: ResearchTheory) -> bool:
     for row in research_theory.to_dict().get("experiment_opportunities", []):
-        if row.get("mechanism_class") != "semantic_boundary_rewrite":
+        if row.get("mechanism_class") != "surface_context":
             continue
         source_ids = row.get("source_case_ids_by_label")
         if isinstance(source_ids, dict) and any(source_ids.values()):
@@ -1212,14 +1202,14 @@ def _legacy_research_theory_from_task_theory(task_theory: TaskTheory) -> Researc
 
 def _legacy_mechanism_for_bottleneck(bottleneck: str) -> str:
     if bottleneck == "runtime_or_output_defect":
-        return "runtime_defect_fix"
+        return "surface_runtime"
     if bottleneck == "tool_trajectory":
-        return "tool_selection_policy"
+        return "surface_tool_loop"
     if bottleneck == "output_contract":
-        return "output_contract_fix"
+        return "surface_output"
     if bottleneck == "efficiency_tradeoff":
-        return "efficiency_probe"
-    return "semantic_boundary_rewrite"
+        return "surface_model"
+    return "surface_context"
 
 
 def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -1372,7 +1362,7 @@ def _compact_proposal_example_bank(
             break
     return {
         "usage": (
-            "proposal-safe train examples. For targeted_few_shot, select source_case_ids only; "
+            "proposal-safe train examples. Surface-example candidates may cite source_case_ids; "
             "Ratchet materializes inputs and expected outputs."
         ),
         "label_field": bank.label_field,
@@ -1465,8 +1455,8 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
 def _proposal_prompt_input(prompt: dict[str, Any], *, proposal_budget: int) -> str:
     return (
         f"{PROPOSER_INSTRUCTIONS} proposal_budget={proposal_budget}. "
-        "Allowed mechanisms: runtime_defect_fix, output_contract_fix, semantic_boundary_rewrite, "
-        "representative_examples, contrastive_examples, model_capability_probe, efficiency_probe, ablation.\n\n"
+        "Allowed mechanisms: surface_context, surface_tool_loop, surface_state, surface_response, "
+        "surface_output, surface_runtime, surface_model, surface_examples.\n\n"
         f"{json.dumps(prompt, separators=(',', ':'), default=str)}"
     )
 
@@ -1575,38 +1565,30 @@ def _candidate_budget_group(candidate: CandidateProposal) -> str:
     )
 
 
-def _targeted_few_shot_reference_error(candidate: CandidateProposal) -> str | None:
-    for application in candidate.applications:
-        if application.family != "targeted_few_shot":
-            continue
-        if not application.selection:
-            return "targeted_few_shot affordance applications must use selection, not inline add_few_shot values"
-    return None
-
-
 def _materialize_candidate_references(
     candidate: CandidateProposal,
     proposal_example_bank: ProposalExampleBank | None,
 ) -> tuple[CandidateProposal, dict[str, Any]]:
-    if proposal_example_bank is None:
-        if any(application.family == "targeted_few_shot" for application in candidate.applications):
-            return (
-                candidate,
-                {
-                    "type": "few_shot_reference_expansion",
-                    "materialized": False,
-                    "error": "targeted_few_shot requires a proposal example bank",
-                },
-            )
-        return candidate, {}
-    example_by_id = {example.case_id: example for example in proposal_example_bank.examples}
-    materialized_rows: list[dict[str, Any]] = []
     raw_parameter_source_ids = _example_selection_source_ids(candidate)
     parameter_source_ids = (
         [str(item) for item in raw_parameter_source_ids if isinstance(item, str) and item]
         if isinstance(raw_parameter_source_ids, list)
         else []
     )
+    if proposal_example_bank is None:
+        if parameter_source_ids:
+            return (
+                candidate,
+                {
+                    "type": "few_shot_reference_expansion",
+                    "materialized": False,
+                    "source_case_ids": parameter_source_ids,
+                    "error": "surface-example source_case_ids require a proposal example bank",
+                },
+            )
+        return candidate, {}
+    example_by_id = {example.case_id: example for example in proposal_example_bank.examples}
+    materialized_rows: list[dict[str, Any]] = []
     if parameter_source_ids:
         unknown_source_ids = [source_id for source_id in parameter_source_ids if source_id not in example_by_id]
         if unknown_source_ids:

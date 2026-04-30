@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import threading
 import time
 from typing import Any
 
@@ -10,7 +12,7 @@ from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 BASE_SPEC = AgentSpec(
     name="taubench-tool-loop",
-    model="gemini-2.5-flash-lite",
+    model="gemini-2.5-flash",
     model_options=[
         "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
@@ -20,11 +22,12 @@ BASE_SPEC = AgentSpec(
     ],
     runtime={
         "model_provider": "gemini",
-        "user_model": "gemini-2.5-flash-lite",
+        "user_model": "gemini-2.5-flash",
         "user_model_provider": "gemini",
         "user_strategy": "llm",
         "temperature": 0.0,
         "max_steps": 30,
+        "request_timeout_s": 45.0,
         "model_provider_by_name": {
             "gemini-2.5-flash-lite": "gemini",
             "gemini-2.5-flash": "gemini",
@@ -76,6 +79,7 @@ def _case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
         provider=str(runtime.get("model_provider", "gemini")),
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 30),
+        request_timeout_s=float(metadata.get("request_timeout_s") or runtime.get("request_timeout_s") or 45.0),
         log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "samples/taubench_agent/results/raw"),
         metadata={
             "benchmark": "tau-bench",
@@ -113,21 +117,32 @@ def _install_taubench_user_retries(user_module: Any) -> None:
     raw_completion = user_module.completion
 
     def completion_with_retries(*args: Any, **kwargs: Any) -> Any:
-        for attempt in range(4):
-            try:
-                return raw_completion(*args, **kwargs)
-            except Exception as exc:
-                if attempt >= 3 or not _is_transient_provider_error(exc):
-                    raise
-                time.sleep(2.0 * (attempt + 1))
+        timeout_s = float(os.environ.get("RATCHET_TAUBENCH_USER_TIMEOUT_S", "45"))
+        kwargs.setdefault("timeout", timeout_s)
+        return _with_hard_timeout(lambda: raw_completion(*args, **kwargs), timeout_s=timeout_s)
 
     completion_with_retries._ratchet_retry_wrapped = True  # type: ignore[attr-defined]
     user_module.completion = completion_with_retries
 
 
-def _is_transient_provider_error(exc: Exception) -> bool:
-    text = f"{type(exc).__name__}: {exc}".lower()
-    return any(marker in text for marker in ("503", "serviceunavailable", "unavailable", "rate limit", "429"))
+def _with_hard_timeout(call: Any, *, timeout_s: float) -> Any:
+    if timeout_s <= 0 or threading.current_thread() is not threading.main_thread():
+        return call()
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(signum: int, frame: object) -> None:
+        raise TimeoutError(f"tau-bench user model request exceeded {timeout_s:.1f}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return call()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 adapter = GeneratedToolLoopAdapter(

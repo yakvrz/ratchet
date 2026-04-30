@@ -38,7 +38,7 @@ class IdeationBenchmarkTests(unittest.TestCase):
                             "raw_candidate_count": 1,
                             "valid_candidate_count": 1,
                         },
-                        "planner": {"intent_mechanisms": {"semantic_boundary_rewrite": 1}},
+                        "planner": {"intent_mechanisms": {"surface_context": 1}},
                     }
                 )
             )
@@ -47,8 +47,8 @@ class IdeationBenchmarkTests(unittest.TestCase):
                     {
                         "candidate": {"experiment_id": "intent-1"},
                         "candidate_id": "patch-1",
-                        "transform_family": "prompt_rewrite",
-                        "mechanism_class": "semantic_boundary_rewrite",
+                        "transform_family": "surface_context",
+                        "mechanism_class": "surface_context",
                         "accepted": True,
                         "full_dev_evaluated": True,
                         "comparison_to_parent": {"score_delta": 0.25},
@@ -61,7 +61,7 @@ class IdeationBenchmarkTests(unittest.TestCase):
                     {
                         "task_theory": {
                             "experiment_opportunities": [
-                                {"mechanism_class": "semantic_boundary_rewrite"}
+                                {"mechanism_class": "surface_context"}
                             ]
                         }
                     }
@@ -73,8 +73,8 @@ class IdeationBenchmarkTests(unittest.TestCase):
                 root,
                 spec=IdeationAssessmentSpec(
                     task_id="fake",
-                    mechanisms_of_interest=["semantic_boundary_rewrite"],
-                    pivotal_mechanisms=["semantic_boundary_rewrite"],
+                    mechanisms_of_interest=["surface_context"],
+                    pivotal_mechanisms=["surface_context"],
                     min_valid_implementation_rate=0.9,
                     min_holdout_score_delta=0.1,
                 ),

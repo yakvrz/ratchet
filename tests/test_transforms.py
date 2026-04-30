@@ -47,7 +47,7 @@ class TransformLibraryTests(unittest.TestCase):
             history=[],
         )
 
-        self.assertIn("prompt_rewrite", hypothesis.active_families)
+        self.assertIn("surface_context", hypothesis.active_families)
         self.assertTrue(hypothesis.context_states)
 
     def test_compiler_rejects_unsupported_hook(self) -> None:

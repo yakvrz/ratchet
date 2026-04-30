@@ -1,11 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
-from ratchet.experiments import MECHANISMS_BY_FAMILY, mechanism_error_for_family
 from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
-from ratchet.transforms import TransformFamily, transform_registry
 from ratchet.types import OptimizationObjective
 
 
@@ -92,19 +90,6 @@ class OptimizationAffordance:
         }
 
 
-class AffordanceProvider(Protocol):
-    def generate(
-        self,
-        target: SurfaceTarget,
-        *,
-        family: TransformFamily,
-        objective: OptimizationObjective,
-        active_families: set[str],
-        evidence: dict[str, Any],
-    ) -> list[OptimizationAffordance]:
-        ...
-
-
 def generate_optimization_affordances(
     surface: SurfaceSpec,
     *,
@@ -130,75 +115,103 @@ def _generate_surface_affordances(
     active_families: list[str] | None,
     evidence: dict[str, Any],
 ) -> list[OptimizationAffordance]:
-    registry = transform_registry()
-    active = set(active_families or registry)
     affordances: list[OptimizationAffordance] = []
     for target in surface_targets(surface):
-        for family_name in sorted(active):
-            family = registry.get(family_name)
-            if family is None or target.kind not in family.supported_edit_kinds:
-                continue
-            ops = sorted(set(target.allowed_ops) & set(family.supported_ops))
-            if not ops:
-                continue
-            mechanism = _surface_mechanism(family_name, target.kind, evidence=evidence, objective=objective)
-            affordances.append(
-                OptimizationAffordance(
-                    affordance_id=_affordance_id(family_name, mechanism, target),
-                    label=f"{family.purpose} ({target.name})",
-                    family=family_name,
+        ops = sorted(target.allowed_ops)
+        if not ops:
+            continue
+        mechanism = _surface_mechanism(target)
+        affordances.append(
+            OptimizationAffordance(
+                affordance_id=_surface_opportunity_id(mechanism, target),
+                label=f"{target.kind} surface: {target.name}",
+                family="surface_program",
+                mechanism=mechanism,
+                target_name=target.name,
+                target_kind=target.kind,
+                target_path=target.path,
+                ops=ops,
+                value_schema=target.value_schema,
+                semantic_role=target.semantics.role,
+                behavioral_axes=_axes_for_target(mechanism, target),
+                expected_scope=target.semantics.scope,
+                risk=_risk_for_target(target, "medium"),
+                measurements=_surface_measurements(target),
+                suitability=_suitability(
                     mechanism=mechanism,
-                    target_name=target.name,
-                    target_kind=target.kind,
-                    target_path=target.path,
-                    ops=ops,
-                    value_schema=target.value_schema,
-                    semantic_role=target.semantics.role,
-                    behavioral_axes=_axes_for_target(mechanism, target),
-                    expected_scope=target.semantics.scope,
-                    risk=_risk_for_target(target, "medium"),
-                    measurements=list(family.required_measurements),
-                    suitability=_suitability(
-                        mechanism=mechanism,
-                        target=target,
-                        objective=objective,
-                        evidence=evidence,
-                    ),
-                    evidence=_evidence_for(mechanism, target, evidence),
-                    budget_hint=family.complexity_cost,
-                    expected_cost_impact=str(family.expected_effects.get("cost", "unknown")),
-                    expected_latency_impact=str(family.expected_effects.get("latency", "unknown")),
-                    description=target.description,
-                )
+                    target=target,
+                    objective=objective,
+                    evidence=evidence,
+                ),
+                evidence=_evidence_for(mechanism, target, evidence),
+                budget_hint=_surface_budget_hint(target),
+                expected_cost_impact=_surface_cost_impact(target),
+                expected_latency_impact=_surface_latency_impact(target),
+                description=target.description,
             )
+        )
     return sorted(
         _dedupe_affordances(affordances),
         key=lambda item: (-item.suitability, item.affordance_id),
     )
 
 
-def _surface_mechanism(
-    family_name: str,
-    target_kind: str,
-    *,
-    evidence: dict[str, Any],
-    objective: OptimizationObjective,
-) -> str:
-    if family_name == "model_substitution":
-        return "efficiency_probe" if objective.mode in {"cost", "latency"} else "model_capability_probe"
-    if family_name == "runtime_tuning":
-        return "efficiency_probe" if objective.mode in {"cost", "latency"} else "runtime_defect_fix"
-    if family_name == "tool_policy_revision":
-        if evidence.get("tool_trajectory_defect"):
-            return "tool_selection_policy"
-        return "tool_precondition_policy"
-    if family_name == "output_contract_tightening":
-        return "output_contract_fix"
-    if family_name == "targeted_few_shot":
-        return "representative_examples"
-    if family_name == "verifier_retry":
-        return "output_contract_fix" if target_kind == "response" else "runtime_defect_fix"
-    return "semantic_boundary_rewrite"
+def _surface_mechanism(target: SurfaceTarget) -> str:
+    if target.kind == "instruction":
+        return "surface_context"
+    if target.kind == "output":
+        return "surface_output"
+    if target.kind == "state":
+        return "surface_state"
+    if target.kind == "tool":
+        return "surface_tool_loop"
+    if target.kind == "model":
+        return "surface_model"
+    if target.kind == "response":
+        return "surface_response"
+    if target.kind == "few_shot":
+        return "surface_examples"
+    if target.kind == "runtime":
+        return "surface_runtime"
+    return f"surface_{target.kind}"
+
+
+def _surface_opportunity_id(mechanism: str, target: SurfaceTarget) -> str:
+    safe_name = _canonical_segment(target.name)
+    return f"surface.{mechanism}.{safe_name}"
+
+
+def _surface_measurements(target: SurfaceTarget) -> list[str]:
+    base = ["score_delta", "regression_cases", "cost_delta", "latency_delta"]
+    if target.kind == "tool":
+        return [*base, "tool_call_delta", "tool_error_delta", "turn_delta"]
+    if target.kind in {"state", "response"}:
+        return [*base, "runtime_error_delta"]
+    return base
+
+
+def _surface_budget_hint(target: SurfaceTarget) -> float:
+    if target.kind in {"model", "tool"}:
+        return 0.8
+    if target.kind in {"state", "response", "runtime"}:
+        return 0.7
+    return 0.5
+
+
+def _surface_cost_impact(target: SurfaceTarget) -> str:
+    if target.kind == "model":
+        return "model-dependent"
+    if target.kind in {"instruction", "output", "few_shot"}:
+        return "token_overhead"
+    return "low"
+
+
+def _surface_latency_impact(target: SurfaceTarget) -> str:
+    if target.kind == "model":
+        return "model-dependent"
+    if target.kind in {"tool", "state", "response"}:
+        return "low"
+    return "token-dependent"
 
 
 def validate_candidate_applications(
@@ -207,22 +220,22 @@ def validate_candidate_applications(
     affordances: list[OptimizationAffordance],
 ) -> str | None:
     if not applications:
-        return "candidate must include at least one affordance application"
+        return "candidate must include at least one surface opportunity application"
     by_id = {affordance.affordance_id: affordance for affordance in affordances}
     selection_count = 0
     for application in applications:
         affordance_id = str(getattr(application, "affordance_id", ""))
         affordance = by_id.get(affordance_id)
         if affordance is None:
-            return f"unknown affordance_id {affordance_id!r}"
+            return f"unknown surface_opportunity_id {affordance_id!r}"
         selection = getattr(application, "selection", None)
-        if selection:
+        source_ids = selection.get("source_case_ids") if isinstance(selection, dict) else None
+        if source_ids is not None:
             selection_count += 1
-            if affordance.family != "targeted_few_shot":
-                return f"affordance {affordance_id!r} does not support example selection"
-            source_ids = selection.get("source_case_ids")
+            if affordance.target_kind != "few_shot":
+                return f"surface opportunity {affordance_id!r} does not support example selection"
             if not isinstance(source_ids, list) or not all(isinstance(item, str) and item for item in source_ids):
-                return f"affordance {affordance_id!r} example selection requires non-empty source_case_ids"
+                return f"surface opportunity {affordance_id!r} example selection requires non-empty source_case_ids"
         else:
             continue
     return None
@@ -237,249 +250,8 @@ def affordance_mechanism(affordance_id: str) -> str:
     return parts[1] if len(parts) > 1 else ""
 
 
-class PromptAffordanceProvider:
-    def generate(
-        self,
-        target: SurfaceTarget,
-        *,
-        family: TransformFamily,
-        objective: OptimizationObjective,
-        active_families: set[str],
-        evidence: dict[str, Any],
-    ) -> list[OptimizationAffordance]:
-        if family.name != "prompt_rewrite" or target.kind != "instruction":
-            return []
-        role = target.semantics.role
-        mechanisms = ["semantic_boundary_rewrite", "output_contract_fix"]
-        if evidence.get("runtime_defect"):
-            mechanisms.append("runtime_defect_fix")
-        return [
-            _make_affordance(
-                target=target,
-                family=family,
-                mechanism=mechanism,
-                label=_label("Rewrite", role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(
-                    target,
-                    "neighbor_label_regression" if mechanism == "semantic_boundary_rewrite" else "contract_regression",
-                ),
-                composition=AffordanceComposition(
-                    can_pair_with=["targeted_few_shot.contrastive_examples.*", "targeted_few_shot.representative_examples.*"],
-                    should_not_pair_with=[],
-                ),
-                suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
-                evidence=_evidence_for(mechanism, target, evidence),
-            )
-            for mechanism in mechanisms
-            if _supports(family, target, mechanism)
-        ]
-
-
-class OutputContractAffordanceProvider:
-    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name != "output_contract_tightening" or target.kind != "output":
-            return []
-        return [
-            _make_affordance(
-                target=target,
-                family=family,
-                mechanism="output_contract_fix",
-                label="Tighten output contract",
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target("output_contract_fix", target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "contract_regression"),
-                composition=AffordanceComposition(can_pair_with=["runtime_tuning.output_contract_fix.*"]),
-                suitability=_suitability(mechanism="output_contract_fix", target=target, objective=objective, evidence=evidence),
-                evidence=_evidence_for("output_contract_fix", target, evidence),
-            )
-        ]
-
-
-class FewShotAffordanceProvider:
-    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name != "targeted_few_shot" or target.kind != "few_shot":
-            return []
-        rows = []
-        for mechanism in ("representative_examples", "contrastive_examples"):
-            rows.append(
-                _make_affordance(
-                    target=target,
-                    family=family,
-                    mechanism=mechanism,
-                    label=("Select contrastive examples" if mechanism == "contrastive_examples" else "Select representative examples"),
-                    semantic_role=target.semantics.role,
-                    behavioral_axes=_axes_for_target(mechanism, target),
-                    expected_scope=target.semantics.scope,
-                    risk=_risk_for_target(target, "neighbor_label_regression"),
-                    composition=AffordanceComposition(
-                        can_pair_with=["prompt_rewrite.semantic_boundary_rewrite.*"],
-                        should_not_pair_with=[],
-                    ),
-                    suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
-                    evidence=_evidence_for(mechanism, target, evidence),
-                )
-            )
-        return rows
-
-
-class ModelAffordanceProvider:
-    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name != "model_substitution" or target.kind != "model":
-            return []
-        mechanisms = ["model_capability_probe", "efficiency_probe"]
-        return [
-            _make_affordance(
-                target=target,
-                family=family,
-                mechanism=mechanism,
-                label="Probe model capability" if mechanism == "model_capability_probe" else "Probe model efficiency",
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(
-                    target,
-                    "cost_latency_regression" if mechanism == "model_capability_probe" else "quality_regression",
-                ),
-                composition=AffordanceComposition(should_not_pair_with=["prompt_rewrite.semantic_boundary_rewrite.*"]),
-                suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
-                evidence=_evidence_for(mechanism, target, evidence),
-            )
-            for mechanism in mechanisms
-        ]
-
-
-class RuntimeAffordanceProvider:
-    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name != "runtime_tuning" or target.kind != "runtime":
-            return []
-        mechanisms = ["runtime_defect_fix", "efficiency_probe"]
-        if "output" in target.name:
-            mechanisms.append("output_contract_fix")
-        return [
-            _make_affordance(
-                target=target,
-                family=family,
-                mechanism=mechanism,
-                label=_label("Tune", target.semantics.role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "cost_latency_regression"),
-                composition=AffordanceComposition(can_pair_with=["output_contract_tightening.output_contract_fix.*"]),
-                suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
-                evidence=_evidence_for(mechanism, target, evidence),
-            )
-            for mechanism in mechanisms
-            if _supports(family, target, mechanism)
-        ]
-
-
-class PassthroughAffordanceProvider:
-    def generate(self, target: SurfaceTarget, *, family: TransformFamily, objective: OptimizationObjective, active_families: set[str], evidence: dict[str, Any]) -> list[OptimizationAffordance]:
-        if family.name not in {"tool_policy_revision", "verifier_retry"}:
-            return []
-        if family.name == "tool_policy_revision":
-            mechanisms = _tool_mechanisms_for_target(target)
-        else:
-            mechanisms = sorted(MECHANISMS_BY_FAMILY.get(family.name, set()) - {"ablation"})
-        return [
-            _make_affordance(
-                target=target,
-                family=family,
-                mechanism=mechanism,
-                label=_label("Revise", target.semantics.role),
-                semantic_role=target.semantics.role,
-                behavioral_axes=_axes_for_target(mechanism, target),
-                expected_scope=target.semantics.scope,
-                risk=_risk_for_target(target, "quality_regression"),
-                suitability=_suitability(mechanism=mechanism, target=target, objective=objective, evidence=evidence),
-                evidence=_evidence_for(mechanism, target, evidence),
-            )
-            for mechanism in mechanisms
-            if _supports(family, target, mechanism)
-        ]
-
-
-def _providers() -> list[AffordanceProvider]:
-    return [
-        PromptAffordanceProvider(),
-        OutputContractAffordanceProvider(),
-        FewShotAffordanceProvider(),
-        ModelAffordanceProvider(),
-        RuntimeAffordanceProvider(),
-        PassthroughAffordanceProvider(),
-    ]
-
-
-def _make_affordance(
-    *,
-    target: SurfaceTarget,
-    family: TransformFamily,
-    mechanism: str,
-    label: str,
-    semantic_role: str,
-    behavioral_axes: list[str],
-    expected_scope: str,
-    risk: str,
-    suitability: float,
-    evidence: list[str],
-    composition: AffordanceComposition | None = None,
-) -> OptimizationAffordance:
-    ops = [op for op in target.allowed_ops if op in family.supported_ops]
-    return OptimizationAffordance(
-        affordance_id=_affordance_id(family.name, mechanism, target),
-        label=label,
-        family=family.name,
-        mechanism=mechanism,
-        target_name=target.name,
-        target_kind=target.kind,
-        target_path=target.path,
-        ops=ops,
-        value_schema=dict(target.value_schema),
-        semantic_role=semantic_role,
-        behavioral_axes=behavioral_axes,
-        expected_scope=expected_scope,
-        risk=risk,
-        measurements=_merge_unique(_measurements_for(mechanism, family), target.semantics.measurement_hints),
-        composition=composition or AffordanceComposition(),
-        suitability=suitability,
-        evidence=evidence,
-        budget_hint=max(0.05, round(suitability / 4.0, 3)),
-        expected_cost_impact=_impact(family.expected_effects, "cost"),
-        expected_latency_impact=_impact(family.expected_effects, "latency"),
-        description=target.description,
-    )
-
-
-def _supports(family: TransformFamily, target: SurfaceTarget, mechanism: str) -> bool:
-    return (
-        target.kind in family.supported_edit_kinds
-        and bool(set(target.allowed_ops) & set(family.supported_ops))
-        and mechanism_error_for_family(family.name, mechanism) is None
-    )
-
-
-def _affordance_id(family: str, mechanism: str, target: SurfaceTarget) -> str:
-    return ".".join(
-        [
-            family,
-            mechanism,
-            _canonical_segment(target.semantics.role),
-            _canonical_segment(target.name),
-        ]
-    )
-
-
 def _canonical_segment(value: str) -> str:
     return value.replace(".", "_").replace("/", "_").replace(" ", "_").lower()
-
-
-def _label(verb: str, role: str) -> str:
-    return f"{verb} {role.replace('_', ' ')}"
 
 
 def _axes_for_target(mechanism: str, target: SurfaceTarget) -> list[str]:
@@ -492,63 +264,45 @@ def _risk_for_target(target: SurfaceTarget, default: str) -> str:
 
 def _axes_for_mechanism(mechanism: str, role: str) -> list[str]:
     axes_by_mechanism = {
-        "semantic_boundary_rewrite": ["classification_boundary", "confusion_resolution"],
-        "output_contract_fix": ["format_validity", "contract_preservation"],
-        "runtime_defect_fix": ["runtime_reliability", "completion_integrity"],
-        "representative_examples": ["example_anchoring", "target_slice_recall"],
-        "contrastive_examples": ["classification_boundary", "neighbor_label_regression"],
-        "model_capability_probe": ["model_capability", "global_correctness"],
-        "efficiency_probe": ["cost_latency_tradeoff", "correctness_preservation"],
-        "tool_selection_policy": ["tool_choice", "tool_relevance_boundary", "action_ordering"],
-        "tool_argument_grounding": ["argument_grounding", "schema_adherence", "state_grounding"],
-        "tool_precondition_policy": ["precondition_checking", "irreversible_action_safety"],
-        "interaction_completion_policy": ["stop_continue_boundary", "terminal_state_recognition"],
+        "surface_context": ["context_graph", "instruction_ordering", "policy_visibility"],
+        "surface_output": ["format_validity", "external_contract"],
+        "surface_state": ["typed_state", "fact_memory", "state_visibility"],
+        "surface_tool_loop": ["tool_choice", "argument_grounding", "precondition_checking", "completion_integrity"],
+        "surface_model": ["model_config", "cost_latency_tradeoff", "capability_limit"],
+        "surface_response": ["claim_support", "final_response_guarding"],
+        "surface_examples": ["example_anchoring", "target_slice_recall"],
+        "surface_runtime": ["runtime_control", "retry_limits", "loop_termination"],
     }
     return axes_by_mechanism.get(mechanism, [role])
-
-
-def _measurements_for(mechanism: str, family: TransformFamily) -> list[str]:
-    measurements_by_mechanism = {
-        "semantic_boundary_rewrite": ["target_slice_score_delta", "confusion_delta", "non_target_regression"],
-        "output_contract_fix": ["invalid_output_delta", "score_delta", "non_target_regression"],
-        "runtime_defect_fix": ["finish_reason_delta", "invalid_output_delta", "score_delta", "latency_delta"],
-        "representative_examples": ["target_slice_score_delta", "example_token_delta", "non_target_regression"],
-        "contrastive_examples": ["target_label_score_delta", "neighbor_label_regression", "example_token_delta"],
-        "model_capability_probe": ["score_delta", "cost_delta", "latency_delta"],
-        "efficiency_probe": ["cost_delta", "latency_delta", "correctness_guard"],
-        "tool_selection_policy": ["score_delta", "tool_call_delta", "wrong_tool_delta", "non_target_regression"],
-        "tool_argument_grounding": ["score_delta", "invalid_tool_call_delta", "tool_error_delta"],
-        "tool_precondition_policy": ["score_delta", "policy_violation_delta", "state_mutation_error_delta"],
-        "interaction_completion_policy": ["score_delta", "turn_delta", "premature_stop_delta"],
-        "ablation": ["score_delta", "complexity_delta", "cost_delta"],
-    }
-    return measurements_by_mechanism.get(mechanism, list(family.required_measurements))
 
 
 def _suitability(*, mechanism: str, target: SurfaceTarget, objective: OptimizationObjective, evidence: dict[str, Any]) -> float:
     score = 0.25
     role = target.semantics.role
     bottleneck = str(evidence.get("bottleneck_class") or "")
-    if mechanism == "semantic_boundary_rewrite" and bottleneck == "semantic_boundary_confusion":
+    residual_modes = {str(item) for item in evidence.get("residual_failure_modes", []) if item}
+    if mechanism == "surface_context" and (
+        bottleneck in {"semantic_boundary_confusion", "general_correctness_gap"}
+        or {"label_confusion", "weak_slices", "general_correctness_gap"} & residual_modes
+    ):
+        score += 0.35
+    if mechanism in {"surface_output", "surface_response"} and (
+        bottleneck == "output_contract" or evidence.get("invalid_output") or "invalid_output" in residual_modes
+    ):
         score += 0.45
-    if mechanism == "output_contract_fix" and (bottleneck == "output_contract" or evidence.get("invalid_output")):
+    if mechanism == "surface_runtime" and evidence.get("runtime_defect"):
         score += 0.45
-    if mechanism == "runtime_defect_fix" and evidence.get("runtime_defect"):
+    if mechanism == "surface_tool_loop" and (
+        evidence.get("tool_trajectory_defect") or "tool_trajectory" in residual_modes
+    ):
         score += 0.45
-    if mechanism in {
-        "tool_selection_policy",
-        "tool_argument_grounding",
-        "tool_precondition_policy",
-        "interaction_completion_policy",
-    } and evidence.get("tool_trajectory_defect"):
-        score += 0.45
-    if mechanism in {"representative_examples", "contrastive_examples"} and evidence.get("example_coverage"):
+    if mechanism == "surface_examples" and evidence.get("example_coverage"):
         score += 0.30
-    if mechanism == "model_capability_probe" and objective.mode == "correctness":
+    if mechanism == "surface_model" and objective.mode == "correctness":
         score += 0.15
-    if mechanism == "efficiency_probe" and objective.mode in {"cost", "latency"}:
+    if mechanism == "surface_model" and objective.mode in {"cost", "latency"}:
         score += 0.45
-    if mechanism == "semantic_boundary_rewrite" and role in {
+    if mechanism == "surface_context" and role in {
         "argument_extraction_policy",
         "confusable_label_policy",
         "decision_policy",
@@ -560,33 +314,31 @@ def _suitability(*, mechanism: str, target: SurfaceTarget, objective: Optimizati
         "tool_policy",
     }:
         score += 0.10
-    if mechanism == "output_contract_fix" and role in {
+    if mechanism in {"surface_output", "surface_response"} and role in {
         "external_output_contract",
         "output_budget_control",
         "output_format_rule",
         "schema_adherence_policy",
     }:
         score += 0.10
-    if mechanism == "runtime_defect_fix" and role in {
+    if mechanism == "surface_runtime" and role in {
         "output_budget_control",
         "runtime_control",
         "verifier_retry_policy",
     }:
         score += 0.10
-    if mechanism == "efficiency_probe" and role in {
+    if mechanism == "surface_model" and role in {
         "model_choice",
         "reasoning_effort_control",
         "output_budget_control",
         "runtime_control",
     }:
         score += 0.10
-    if mechanism in {"tool_selection_policy", "tool_argument_grounding", "tool_precondition_policy"} and role in {
+    if mechanism == "surface_tool_loop" and role in {
         "tool_description",
         "tool_policy",
         "tool_relevance_boundary",
     }:
-        score += 0.15
-    if mechanism == "interaction_completion_policy" and role in {"tool_policy", "no_call_policy", "decision_policy"}:
         score += 0.15
     score += min(target.semantics.confidence, 1.0) * 0.05
     if target.name in set(evidence.get("diagnosis_target_names") or []):
@@ -605,40 +357,15 @@ def _evidence_for(mechanism: str, target: SurfaceTarget, evidence: dict[str, Any
             f"target semantics: {target.semantics.role} ({target.semantics.source}, "
             f"confidence={target.semantics.confidence:.2f})"
         )
-    if mechanism in {"representative_examples", "contrastive_examples"} and evidence.get("example_coverage"):
+    if mechanism == "surface_examples" and evidence.get("example_coverage"):
         rows.append("proposal-safe train examples cover relevant labels")
-    if mechanism == "runtime_defect_fix" and evidence.get("runtime_defect"):
+    if mechanism == "surface_runtime" and evidence.get("runtime_defect"):
         rows.append("runtime finish/parser defects observed")
-    if mechanism == "output_contract_fix" and evidence.get("invalid_output"):
+    if mechanism in {"surface_output", "surface_response"} and evidence.get("invalid_output"):
         rows.append("invalid-output failures observed")
-    if mechanism in {
-        "tool_selection_policy",
-        "tool_argument_grounding",
-        "tool_precondition_policy",
-        "interaction_completion_policy",
-    } and evidence.get("tool_trajectory_defect"):
+    if mechanism == "surface_tool_loop" and evidence.get("tool_trajectory_defect"):
         rows.append("tool/environment trajectory defects observed")
     return rows
-
-
-def _tool_mechanisms_for_target(target: SurfaceTarget) -> list[str]:
-    if target.kind != "tool":
-        return []
-    role = target.semantics.role
-    if role == "tool_description":
-        return ["tool_selection_policy", "tool_argument_grounding", "efficiency_probe"]
-    if role == "tool_policy":
-        return [
-            "tool_precondition_policy",
-            "tool_selection_policy",
-            "interaction_completion_policy",
-            "efficiency_probe",
-        ]
-    return ["tool_selection_policy", "tool_argument_grounding", "efficiency_probe"]
-
-
-def _impact(effects: dict[str, str], key: str) -> str:
-    return effects.get(key, "unknown")
 
 
 def _merge_unique(left: list[str], right: list[str]) -> list[str]:

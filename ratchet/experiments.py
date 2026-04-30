@@ -9,37 +9,19 @@ from ratchet.types import FailureDiagnosis, OptimizationObjective
 
 
 MECHANISM_CLASSES = {
-    "runtime_defect_fix",
-    "output_contract_fix",
-    "semantic_boundary_rewrite",
-    "representative_examples",
-    "contrastive_examples",
-    "model_capability_probe",
-    "efficiency_probe",
-    "tool_selection_policy",
-    "tool_argument_grounding",
-    "tool_precondition_policy",
-    "interaction_completion_policy",
-    "ablation",
+    "surface_context",
+    "surface_examples",
+    "surface_model",
+    "surface_output",
+    "surface_response",
+    "surface_runtime",
+    "surface_state",
+    "surface_tool_loop",
 }
 
 
 MECHANISMS_BY_FAMILY: dict[str, set[str]] = {
-    "prompt_rewrite": {"runtime_defect_fix", "semantic_boundary_rewrite", "output_contract_fix", "ablation"},
-    "output_contract_tightening": {"output_contract_fix", "runtime_defect_fix", "ablation"},
-    "targeted_few_shot": {"representative_examples", "contrastive_examples", "semantic_boundary_rewrite", "ablation"},
-    "model_substitution": {"runtime_defect_fix", "model_capability_probe", "efficiency_probe", "ablation"},
-    "runtime_tuning": {"runtime_defect_fix", "efficiency_probe", "output_contract_fix", "ablation"},
-    "tool_policy_revision": {
-        "efficiency_probe",
-        "semantic_boundary_rewrite",
-        "tool_selection_policy",
-        "tool_argument_grounding",
-        "tool_precondition_policy",
-        "interaction_completion_policy",
-        "ablation",
-    },
-    "verifier_retry": {"runtime_defect_fix", "output_contract_fix", "semantic_boundary_rewrite", "ablation"},
+    "surface_program": set(MECHANISM_CLASSES),
 }
 
 
@@ -295,13 +277,13 @@ class ExperimentIntent:
     def __post_init__(self) -> None:
         if not self.intent_id:
             raise ValueError("intent_id must be non-empty")
-        if self.mechanism_class not in MECHANISM_CLASSES:
-            raise ValueError(f"unknown intent mechanism_class {self.mechanism_class!r}")
+        if not self.mechanism_class:
+            raise ValueError("intent mechanism_class must be non-empty")
         unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
         if unknown_roles:
             raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
         if not self.affordance_ids:
-            raise ValueError("intent affordance_ids must be non-empty")
+            raise ValueError("intent surface opportunity ids must be non-empty")
         if self.priority < 1:
             raise ValueError("intent priority must be positive")
 
@@ -317,7 +299,11 @@ class ExperimentIntent:
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
-            affordance_ids=[str(item) for item in payload.get("affordance_ids", []) if item],
+            affordance_ids=[
+                str(item)
+                for item in payload.get("surface_opportunity_ids", payload.get("affordance_ids", []))
+                if item
+            ],
             success_criteria=str(payload.get("success_criteria") or ""),
             disconfirming_result=str(payload.get("disconfirming_result") or ""),
             priority=int(payload.get("priority") or 1),
@@ -335,8 +321,8 @@ class ExperimentSpec:
     candidate_roles: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
-        if self.mechanism not in MECHANISM_CLASSES:
-            raise ValueError(f"unknown experiment mechanism {self.mechanism!r}")
+        if not self.mechanism:
+            raise ValueError("experiment mechanism must be non-empty")
         if not self.experiment_id:
             raise ValueError("experiment_id must be non-empty")
 
@@ -607,7 +593,7 @@ def _experiment_opportunities(
     if runtime.get("length_finish_case_ids") or runtime.get("parser_fallback_case_ids"):
         opportunities.append(
             {
-                "mechanism_class": "runtime_defect_fix",
+                "mechanism_class": "surface_runtime",
                 "target_slices": _slice_ids("runtime", runtime.get("length_finish_case_ids", []))
                 + _slice_ids("parser_fallback", runtime.get("parser_fallback_case_ids", [])),
                 "candidate_roles": ["atomic", "control"],
@@ -619,7 +605,7 @@ def _experiment_opportunities(
     if invalid_case_ids:
         opportunities.append(
             {
-                "mechanism_class": "output_contract_fix",
+                "mechanism_class": "surface_output",
                 "target_slices": _slice_ids("invalid_output", invalid_case_ids),
                 "candidate_roles": ["atomic", "control"],
                 "measurements": ["invalid_output_delta", "score_delta", "non_target_regression"],
@@ -635,13 +621,13 @@ def _experiment_opportunities(
         )
         opportunities.append(
             {
-                "mechanism_class": "tool_selection_policy",
+                "mechanism_class": "surface_tool_loop",
                 "target_slices": target_slices or ["tool_trajectory"],
                 "candidate_roles": ["atomic", "control"],
                 "compatible_mechanisms": [
-                    "tool_argument_grounding",
-                    "tool_precondition_policy",
-                    "interaction_completion_policy",
+                    "surface_state",
+                    "surface_response",
+                    "surface_runtime",
                 ],
                 "measurements": [
                     "score_delta",
@@ -664,10 +650,10 @@ def _experiment_opportunities(
         labels = [label for label in (expected, actual) if label]
         opportunities.append(
             {
-                "mechanism_class": "semantic_boundary_rewrite",
+                "mechanism_class": "surface_context",
                 "target_slices": [f"confusion:{expected}->{actual}", f"label:{expected}"],
                 "candidate_roles": ["control", "atomic", "composed"],
-                "compatible_mechanisms": ["representative_examples", "contrastive_examples"],
+                "compatible_mechanisms": ["surface_examples", "surface_output"],
                 "source_labels": labels,
                 "source_case_ids_by_label": {
                     label: example_source_ids.get(label, [])[:3]
@@ -684,10 +670,10 @@ def _experiment_opportunities(
             continue
         opportunities.append(
             {
-                "mechanism_class": "representative_examples",
+                "mechanism_class": "surface_examples",
                 "target_slices": [f"label:{label}"],
                 "candidate_roles": ["atomic", "compression"],
-                "compatible_mechanisms": ["semantic_boundary_rewrite", "contrastive_examples"],
+                "compatible_mechanisms": ["surface_context"],
                 "source_labels": [label],
                 "source_case_ids_by_label": {
                     label: example_source_ids.get(label, [])[:4]
@@ -702,7 +688,7 @@ def _experiment_opportunities(
     if bottleneck in {"efficiency_tradeoff", "no_observed_failures"} or objective.mode in {"cost", "latency"}:
         opportunities.append(
             {
-                "mechanism_class": "efficiency_probe",
+                "mechanism_class": "surface_model",
                 "target_slices": ["global"],
                 "candidate_roles": ["atomic", "ablation"],
                 "measurements": ["score_delta", "cost_delta", "latency_delta"],
@@ -713,7 +699,7 @@ def _experiment_opportunities(
     if not opportunities and bottleneck == "general_correctness_gap":
         opportunities.append(
             {
-                "mechanism_class": "semantic_boundary_rewrite",
+                "mechanism_class": "surface_context",
                 "target_slices": ["failed_cases"],
                 "candidate_roles": ["atomic", "control"],
                 "measurements": ["score_delta", "non_target_regression", "cost_delta"],

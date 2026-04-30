@@ -16,8 +16,8 @@ class _Client:
     def create_response(self, **_: object) -> _Response:
         return _Response(
             '{"experiment_intents":[{"intent_id":"intent_1",'
-            '"mechanism_class":"semantic_boundary_rewrite",'
-            '"hypothesis":"test","affordance_ids":["missing"]}]}'
+            '"mechanism_class":"surface_context",'
+            '"hypothesis":"test","surface_opportunity_ids":["missing"]}]}'
         )
 
 
@@ -31,8 +31,8 @@ class _RepairClient:
             return _Response('{"experiment_intents":{"intent_id":"bad_shape"}}')
         return _Response(
             '{"experiment_intents":[{"intent_id":"intent_1",'
-            '"mechanism_class":"semantic_boundary_rewrite",'
-            '"hypothesis":"test","affordance_ids":["known"]}]}'
+            '"mechanism_class":"surface_context",'
+            '"hypothesis":"test","surface_opportunity_ids":["known"]}]}'
         )
 
 
@@ -43,12 +43,12 @@ class _TheoryClient:
               "summary":"The baseline is failing before using the available tool-loop surface.",
               "hypotheses":[{
                 "hypothesis":"The agent is not validating tool calls against observations.",
-                "mechanism":"tool_precondition_policy",
+                "mechanism":"surface_tool_loop",
                 "target_slices":["tool tasks"]
               }],
               "opportunities":[{
                 "description":"Measure whether a before-tool-call validator improves reliability.",
-                "affordance_ids":["tool_loop"]
+                "surface_opportunity_ids":["tool_loop"]
               }]
             }"""
         )
@@ -102,7 +102,7 @@ class ResearchRoleTests(unittest.TestCase):
         self.assertEqual(theory.theory_id, "T_001")
         self.assertEqual(theory.primary_hypothesis_id, "H_001")
         self.assertEqual(theory.hypotheses[0].statement, "The agent is not validating tool calls against observations.")
-        self.assertEqual(theory.hypotheses[0].mechanism_class, "tool_precondition_policy")
+        self.assertEqual(theory.hypotheses[0].mechanism_class, "surface_tool_loop")
         self.assertEqual(theory.experiment_opportunities[0].opportunity_id, "O_001")
         self.assertEqual(theory.experiment_opportunities[0].hypothesis_ids, ["H_001"])
 

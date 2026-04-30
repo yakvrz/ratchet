@@ -65,18 +65,19 @@ def _run_checked_case(
 def _stability_summary(
     adapter: AdapterProtocol,
     sample_cases: tuple[EvalCase, ...],
+    first_pass: list[tuple[RunRecord, GradeResult]] | None = None,
 ) -> dict[str, Any]:
-    first_pass: list[tuple[RunRecord, GradeResult]] = []
+    first_pass_rows: list[tuple[RunRecord, GradeResult]] = list(first_pass or [])
     second_pass: list[tuple[RunRecord, GradeResult]] = []
-    for case in sample_cases:
-        first_pass.append(_run_checked_case(adapter, case))
+    for case in sample_cases[len(first_pass_rows):]:
+        first_pass_rows.append(_run_checked_case(adapter, case))
     for case in sample_cases:
         second_pass.append(_run_checked_case(adapter, case))
 
     pass_flips: list[str] = []
     output_drift: list[str] = []
     score_deltas: list[float] = []
-    for case, (first_record, first_grade), (second_record, second_grade) in zip(sample_cases, first_pass, second_pass):
+    for case, (first_record, first_grade), (second_record, second_grade) in zip(sample_cases, first_pass_rows, second_pass):
         if first_grade.passed != second_grade.passed:
             pass_flips.append(case.id)
         if first_record.output != second_record.output:
@@ -111,8 +112,10 @@ def run_preflight_check(
     surface = checked_surface_spec(adapter, adapter_spec=adapter_spec)
     sample_cases = select_check_cases(cases, sample_limit=sample_limit)
     sample_rows: list[dict[str, Any]] = []
+    first_pass: list[tuple[RunRecord, GradeResult]] = []
     for case in sample_cases:
         record, grade = _run_checked_case(adapter, case)
+        first_pass.append((record, grade))
         sample_rows.append(
             {
                 "case_id": case.id,
@@ -124,7 +127,7 @@ def run_preflight_check(
             }
         )
 
-    stability = _stability_summary(adapter, sample_cases)
+    stability = _stability_summary(adapter, sample_cases, first_pass=first_pass)
     materialization = _materialization_audit(adapter, surface)
     optimizer_model_access = (
         validate_optimizer_model_access(

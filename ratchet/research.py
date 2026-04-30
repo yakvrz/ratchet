@@ -57,7 +57,7 @@ class ResearchTheorist:
                 "Build the causal research theory for this branch. Interpret evidence, preserve competing "
                 "explanations, name what would disconfirm each hypothesis, and propose measurement-worthy "
                 "experiment opportunities. Do not write patches. Do not choose measurements. Every opportunity "
-                "must use known mechanism classes and cite only affordance_ids from the supplied affordances."
+                "must cite only surface_opportunity_ids from the supplied inferred optimization surface."
             ),
             "state": state,
         }
@@ -102,7 +102,7 @@ class ResearchTheorist:
         )
         if unknown_affordances:
             raise OptimizerModelError(
-                f"Research theorist used unknown affordance_ids: {unknown_affordances}"
+                f"Research theorist used unknown surface_opportunity_ids: {unknown_affordances}"
             )
         return theory
 
@@ -126,7 +126,7 @@ class ResearchTheorist:
                 "The previous research-theorist response was valid JSON but failed schema validation. "
                 "Return only a valid research theory JSON object. Every hypothesis needs a non-empty "
                 "hypothesis_id; every experiment opportunity needs a non-empty opportunity_id, at least "
-                "one known hypothesis_id, a known mechanism_class, rationale, and only supplied affordance_ids. "
+                "one known hypothesis_id, a surface mechanism_class, rationale, and only supplied surface_opportunity_ids. "
                 "Do not write patches or prose.\n\n"
                 f"Validation error: {validation_error}\n"
                 f"Invalid JSON object:\n{json.dumps(payload, separators=(',', ':'), default=str)[:12000]}"
@@ -256,12 +256,10 @@ class ResearchPlanner:
             "role": "Ratchet Research Planner",
             "instruction": (
                 "Return experiment_intents only. Do not write patches, candidate IDs, or measurement selections. "
-                "Each intent must choose mechanism_class from the listed affordances and cite concrete affordance_ids "
-                "that a later implementer may use. Treat research_theory/task_theory experiment opportunities and high-suitability "
-                "affordances as the research surface; preserve mechanism-distinct questions when residual failures "
-                "could plausibly be instruction/example-limited or model-capability-limited. When budget permits and "
-                "a model_capability_probe opportunity exists for residual correctness failures, include it unless prior "
-                "evidence already disconfirms model substitution."
+                "Each intent must choose a surface mechanism_class and cite concrete surface_opportunity_ids "
+                "that a later implementer may use. Treat research_theory/task_theory experiment opportunities and "
+                "high-suitability surface opportunities as the research surface. Preserve distinct hook/state/tool/"
+                "context questions when the evidence supports them."
             ),
             "state": state.to_dict(),
         }
@@ -302,12 +300,14 @@ class ResearchPlanner:
 
     def _parse_intents(self, payload: dict[str, Any], state: ResearchState) -> list[ExperimentIntent]:
         raw_intents = payload.get("experiment_intents")
+        if isinstance(raw_intents, dict):
+            raw_intents = [raw_intents]
         if not isinstance(raw_intents, list):
             raise OptimizerModelError("Research planner experiment_intents is not an array")
         affordance_ids = {
-            str(affordance.get("affordance_id"))
+            str(affordance.get("surface_opportunity_id") or affordance.get("affordance_id"))
             for affordance in state.affordances
-            if affordance.get("affordance_id")
+            if affordance.get("surface_opportunity_id") or affordance.get("affordance_id")
         }
         intents: list[ExperimentIntent] = []
         for index, raw_intent in enumerate(raw_intents, start=1):
@@ -319,9 +319,12 @@ class ResearchPlanner:
                 raise OptimizerModelError(f"Research planner returned malformed experiment intent: {exc}") from exc
             unknown_affordances = sorted(set(intent.affordance_ids) - affordance_ids)
             if unknown_affordances:
-                raise OptimizerModelError(
-                    f"Research planner intent {intent.intent_id!r} used unknown affordance_ids: {unknown_affordances}"
-                )
+                intent = _ground_unknown_surface_ids(intent, unknown_affordances, state.affordances)
+                unknown_affordances = sorted(set(intent.affordance_ids) - affordance_ids)
+                if unknown_affordances:
+                    raise OptimizerModelError(
+                        f"Research planner intent {intent.intent_id!r} used unknown surface_opportunity_ids: {unknown_affordances}"
+                    )
             intents.append(intent)
         return intents
 
@@ -640,12 +643,12 @@ def _experiment_intent_schema() -> dict[str, Any]:
                 "items": {"type": "string", "enum": sorted(CANDIDATE_ROLES)},
             },
             "measurements": {"type": "array", "items": {"type": "string", "maxLength": 120}},
-            "affordance_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 180}},
+            "surface_opportunity_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "maxLength": 180}},
             "success_criteria": {"type": "string", "maxLength": 300},
             "disconfirming_result": {"type": "string", "maxLength": 300},
             "priority": {"type": "integer"},
         },
-        "required": ["intent_id", "mechanism_class", "hypothesis", "affordance_ids"],
+        "required": ["intent_id", "mechanism_class", "hypothesis", "surface_opportunity_ids"],
     }
 
 
@@ -696,7 +699,7 @@ def _research_theory_schema() -> dict[str, Any]:
                             "type": "array",
                             "items": {"type": "string", "enum": sorted(MECHANISM_CLASSES)},
                         },
-                        "affordance_ids": {"type": "array", "items": {"type": "string", "maxLength": 180}},
+                        "surface_opportunity_ids": {"type": "array", "items": {"type": "string", "maxLength": 180}},
                         "priority": {"type": "integer"},
                     },
                     "required": ["opportunity_id", "hypothesis_ids", "mechanism_class", "rationale"],
@@ -805,7 +808,9 @@ def _normalize_research_theory_payload(payload: dict[str, Any]) -> dict[str, Any
                 "disconfirming_result": _first_text(item.get("disconfirming_result")),
                 "candidate_roles": _string_list(item.get("candidate_roles")),
                 "compatible_mechanisms": _string_list(item.get("compatible_mechanisms")),
-                "affordance_ids": _string_list(item.get("affordance_ids")),
+                "affordance_ids": _string_list(
+                    item.get("surface_opportunity_ids", item.get("affordance_ids"))
+                ),
                 "priority": int(item.get("priority") or index),
             }
         )
@@ -835,6 +840,45 @@ def _string_list(value: Any) -> list[str]:
         return [str(item).strip() for item in value if str(item).strip()]
     text = str(value).strip()
     return [text] if text else []
+
+
+def _ground_unknown_surface_ids(
+    intent: ExperimentIntent,
+    unknown_ids: list[str],
+    affordances: list[dict[str, Any]],
+) -> ExperimentIntent:
+    mechanism = intent.mechanism_class
+    candidates: list[str] = []
+    for affordance in affordances:
+        surface_id = str(affordance.get("surface_opportunity_id") or affordance.get("affordance_id") or "")
+        if not surface_id:
+            continue
+        surface = str(affordance.get("surface") or affordance.get("mechanism") or "")
+        if not surface and surface_id.startswith("surface."):
+            parts = surface_id.split(".")
+            surface = parts[1] if len(parts) > 1 else ""
+        if surface != mechanism:
+            continue
+        target = str(affordance.get("target") or affordance.get("target_name") or "")
+        if any(target and target in unknown_id for unknown_id in unknown_ids):
+            candidates.insert(0, surface_id)
+        else:
+            candidates.append(surface_id)
+    grounded_ids = list(dict.fromkeys([item for item in intent.affordance_ids if item not in unknown_ids] + candidates[:2]))
+    if not grounded_ids or grounded_ids == intent.affordance_ids:
+        return intent
+    return ExperimentIntent(
+        intent_id=intent.intent_id,
+        mechanism_class=intent.mechanism_class,
+        hypothesis=intent.hypothesis,
+        target_slices=list(intent.target_slices),
+        candidate_roles=list(intent.candidate_roles),
+        measurements=list(intent.measurements),
+        affordance_ids=grounded_ids,
+        success_criteria=intent.success_criteria,
+        disconfirming_result=intent.disconfirming_result,
+        priority=intent.priority,
+    )
 
 
 def _measurement_decision_from_payload(*, stage: str, payload: dict[str, Any]) -> MeasurementDecision:

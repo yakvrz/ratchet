@@ -111,7 +111,7 @@ class EvidenceTests(unittest.TestCase):
             {"alpha": ["train-alpha-1"], "beta": ["train-beta-1", "train-beta-2"]},
         )
         opportunity = theory.experiment_opportunities[0]
-        self.assertEqual(opportunity["mechanism_class"], "semantic_boundary_rewrite")
+        self.assertEqual(opportunity["mechanism_class"], "surface_context")
         self.assertIn("confusion:beta->alpha", opportunity["target_slices"])
         self.assertEqual(
             opportunity["source_case_ids_by_label"],

@@ -5,6 +5,8 @@ import copy
 import json
 import os
 from pathlib import Path
+import signal
+import threading
 import time
 from typing import Any, Callable, Protocol
 
@@ -25,6 +27,7 @@ class ToolLoopModelClient(Protocol):
         provider: str,
         tools: list[dict[str, Any]],
         temperature: float,
+        timeout_s: float | None = None,
     ) -> "ToolLoopModelResponse":
         ...
 
@@ -42,6 +45,7 @@ class ToolLoopRunConfig:
     provider: str
     temperature: float = 0.0
     max_steps: int = 30
+    request_timeout_s: float | None = None
     log_dir: str = "results"
     metadata: dict[str, Any] | None = None
 
@@ -53,7 +57,7 @@ GradeFactory = Callable[[EvalCase, object], GradeResult]
 
 
 class LiteLLMToolLoopClient:
-    def __init__(self, *, max_retries: int = 3, retry_delay_s: float = 2.0) -> None:
+    def __init__(self, *, max_retries: int = 0, retry_delay_s: float = 2.0) -> None:
         self.max_retries = max_retries
         self.retry_delay_s = retry_delay_s
 
@@ -65,6 +69,7 @@ class LiteLLMToolLoopClient:
         provider: str,
         tools: list[dict[str, Any]],
         temperature: float,
+        timeout_s: float | None = None,
     ) -> ToolLoopModelResponse:
         try:
             from litellm import completion
@@ -77,9 +82,11 @@ class LiteLLMToolLoopClient:
                 custom_llm_provider=provider,
                 tools=tools,
                 temperature=temperature,
+                timeout=timeout_s,
             ),
             max_retries=self.max_retries,
             retry_delay_s=self.retry_delay_s,
+            timeout_s=timeout_s,
         )
         message = response.choices[0].message
         if hasattr(message, "model_dump"):
@@ -183,6 +190,7 @@ class GeneratedToolLoopAdapter:
                 provider=_provider_for_model(str(ctx.model_config["model_name"]), self._agent_spec, config),
                 tools=ctx.tools,
                 temperature=float(ctx.model_config.get("temperature", config.temperature)),
+                timeout_s=config.request_timeout_s,
             )
             model_calls += 1
             input_tokens += response.input_tokens
@@ -323,6 +331,7 @@ def _default_case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
         provider=provider,
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 30),
+        request_timeout_s=_optional_float(metadata.get("request_timeout_s", runtime.get("request_timeout_s"))),
         log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "results"),
         metadata=dict(metadata),
     )
@@ -372,6 +381,12 @@ def _provider_for_model(model: str, spec: AgentSpec, config: ToolLoopRunConfig) 
     if model.startswith("gemini"):
         return "gemini"
     return config.provider
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None or value == "":
+        return None
+    return float(value)
 
 
 def _system_message(env: Any, context: Any) -> dict[str, Any]:
@@ -434,16 +449,42 @@ def _info_dict(value: Any) -> dict[str, Any]:
     return {"value": str(value)}
 
 
-def _with_retries(call: Callable[[], Any], *, max_retries: int, retry_delay_s: float) -> Any:
+def _with_retries(
+    call: Callable[[], Any],
+    *,
+    max_retries: int,
+    retry_delay_s: float,
+    timeout_s: float | None = None,
+) -> Any:
     attempt = 0
     while True:
         try:
-            return call()
+            return _with_hard_timeout(call, timeout_s=timeout_s)
         except Exception as exc:
             attempt += 1
             if attempt > max_retries or not _is_transient_provider_error(exc):
                 raise
             time.sleep(retry_delay_s * attempt)
+
+
+def _with_hard_timeout(call: Callable[[], Any], *, timeout_s: float | None) -> Any:
+    if timeout_s is None or timeout_s <= 0 or threading.current_thread() is not threading.main_thread():
+        return call()
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    previous_timer = signal.setitimer(signal.ITIMER_REAL, 0)
+
+    def _raise_timeout(signum: int, frame: object) -> None:
+        raise TimeoutError(f"tool-loop model request exceeded {timeout_s:.1f}s")
+
+    signal.signal(signal.SIGALRM, _raise_timeout)
+    signal.setitimer(signal.ITIMER_REAL, timeout_s)
+    try:
+        return call()
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+        if previous_timer[0] > 0:
+            signal.setitimer(signal.ITIMER_REAL, previous_timer[0], previous_timer[1])
 
 
 def _is_transient_provider_error(exc: Exception) -> bool:

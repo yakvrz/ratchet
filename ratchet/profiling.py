@@ -212,7 +212,7 @@ def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, An
     rows = []
     for row in proposals:
         reason = str(row.get("rejection_reason") or row.get("constraint_warning") or "")
-        if row.get("transform_family") != "model_substitution" or "cost constraint rejected" not in reason:
+        if row.get("transform_family") != "surface_model" or "cost constraint rejected" not in reason:
             continue
         rows.append(
             {

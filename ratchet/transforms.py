@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from ratchet.experiments import CANDIDATE_ROLES, mechanism_error_for_family
+from ratchet.experiments import CANDIDATE_ROLES
 from ratchet.results import Comparison, CandidateSummary
 from ratchet.surfaces import SurfaceSpec, SurfaceTarget, surface_targets
 from ratchet.transform_program import TransformPatch, TransformProgram
@@ -135,20 +135,6 @@ class TransformContextKey:
     @classmethod
     def from_candidate(cls, candidate: "CandidateProposal") -> "TransformContextKey":
         patches = tuple(candidate.program.patches)
-        if candidate.transform_family == "targeted_few_shot" and not patches:
-            selection_payload = candidate.intervention.payload if candidate.intervention.kind == "example_selection" else {}
-            source_ids = selection_payload.get("source_case_ids")
-            mechanism = _parameter_mechanism_signature(selection_payload)
-            if isinstance(source_ids, list):
-                mechanism = (f"few_shot:count={len(source_ids)}", *mechanism)
-            return cls(
-                family=candidate.transform_family,
-                target_names=("proposal_selected_examples",),
-                ops=("add_context_section",),
-                target_slice=candidate.target_slice,
-                mechanism=mechanism,
-                transform_instance=candidate.transform_instance or candidate.hypothesis or "candidate",
-            )
         return cls(
             family=candidate.transform_family,
             target_names=tuple(_transform_patch_target(patch) for patch in patches),
@@ -343,26 +329,33 @@ class CandidateAffordanceApplication:
 
     @property
     def family(self) -> str:
+        if self.affordance_id.startswith("surface."):
+            return self.mechanism
         parts = self.affordance_id.split(".")
         return parts[0] if parts else ""
 
     @property
     def mechanism(self) -> str:
+        if self.affordance_id.startswith("surface."):
+            parts = self.affordance_id.split(".")
+            return parts[1] if len(parts) > 1 else "surface"
         parts = self.affordance_id.split(".")
         return parts[1] if len(parts) > 1 else ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "affordance_id": self.affordance_id,
+            "surface_opportunity_id": self.affordance_id,
+            "surface": self.mechanism,
             "selection": dict(self.selection),
             "rationale": self.rationale,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "CandidateAffordanceApplication":
-        affordance_id = str(payload.get("affordance_id") or "")
+        affordance_id = str(payload.get("surface_opportunity_id") or payload.get("affordance_id") or "")
         if not affordance_id:
-            raise ValueError("application requires affordance_id")
+            raise ValueError("application requires surface_opportunity_id")
         raw_operation = payload.get("operation")
         raw_selection = payload.get("selection")
         if isinstance(raw_operation, dict):
@@ -441,6 +434,7 @@ class CandidateProposal:
             "candidate_role": self.candidate_role,
             "comparison_group": self.comparison_group,
             "affordance_ids": list(self.affordance_ids),
+            "surface_opportunity_ids": list(self.affordance_ids),
             "target_slice": self.target_slice,
             "transform_context": TransformContextKey.from_candidate(self).to_dict(),
             "hypothesis": self.hypothesis,
@@ -514,225 +508,110 @@ class TransformResultSummary:
     best_cost_delta: float | None = None
     best_latency_delta: float | None = None
     state: str = "available"
-    reason: str = "No candidates evaluated for this transform family."
+    reason: str = "No candidates evaluated for this surface mechanism."
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
 TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
-    "prompt_rewrite": TransformFamily(
-        name="prompt_rewrite",
-        category="instructions",
-        purpose="Edit the context graph to change model-visible behavior.",
-        supported_edit_kinds=["context"],
+    "surface_context": TransformFamily(
+        name="surface_context",
+        category="context",
+        purpose="Modify model-visible context graph sections through typed DSL patches.",
+        supported_edit_kinds=["instruction"],
         supported_ops=["add_context_section", "replace_context_section", "remove_context_section", "move_context_section", "reorder_context_sections"],
-        activation_signals=["semantic_failures", "invalid_output", "general_correctness_gap"],
-        expected_effects={"correctness": "possible_increase", "cost": "neutral", "latency": "neutral"},
+        activation_signals=["branch_failures", "correctness_gap", "weak_slices"],
+        expected_effects={"correctness": "variable", "cost": "token-dependent", "latency": "token-dependent"},
         risks=["overconstrains behavior", "moves failures between slices"],
-        required_measurements=["score_delta", "regressions", "cost_delta", "latency_delta"],
+        required_measurements=["score_delta", "regression_cases", "cost_delta", "latency_delta"],
         complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "mechanism_class": ["rubric_clarification", "label_disambiguation", "format_instruction", "grounding", "fallback_policy"],
-                "target_names": "editable instruction targets touched by the patch",
-                "affected_slices": "labels, categories, or failure slices expected to move",
-            }
-        },
     ),
-    "output_contract_tightening": TransformFamily(
-        name="output_contract_tightening",
-        category="output",
-        purpose="Tighten externally visible output format or response validation.",
-        supported_edit_kinds=["context", "response"],
-        supported_ops=["add_context_section", "replace_context_section", "validate", "validate_claims", "rewrite_response", "block_response"],
-        activation_signals=["invalid_output", "output_contract_failure"],
-        expected_effects={"invalid_output_rate": "decrease", "correctness": "possible_increase"},
-        risks=["may reduce semantic quality while fixing format"],
-        required_measurements=["invalid_output_rate_delta", "score_delta", "regressions"],
-        complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "mechanism_class": ["json_schema_clarification", "required_field_rule", "parser_compatibility"],
-                "affected_failure_modes": "invalid-output or output-contract labels addressed",
-            }
-        },
-    ),
-    "targeted_few_shot": TransformFamily(
-        name="targeted_few_shot",
-        category="examples",
-        purpose="Add selected proposal-safe examples as a generated context section.",
-        supported_edit_kinds=["context"],
-        supported_ops=["add_context_section"],
-        activation_signals=["weak_slice", "label_confusion", "invalid_output"],
-        expected_effects={"target_slice_score": "possible_increase", "cost": "increase"},
-        risks=["overfits examples", "increases prompt length"],
-        required_measurements=["target_slice_score_delta", "non_target_regressions", "token_delta"],
-        complexity_cost=1.5,
-        parameter_contract={
-            "required": {
-                "source_case_ids": "train example IDs from proposal_example_bank",
-            },
-            "recommended": {
-                "target_labels": "labels or slices addressed",
-                "selection_strategy": ["representative", "contrastive", "hard_negative"],
-                "affected_confusions": "expected->actual confusion pairs the examples target",
-            },
-        },
-    ),
-    "model_substitution": TransformFamily(
-        name="model_substitution",
-        category="model",
-        purpose="Change model invocation configuration.",
-        supported_edit_kinds=["model"],
-        supported_ops=["set_model_config"],
-        activation_signals=["capability_gap", "cost_objective", "latency_objective"],
-        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
-        risks=["changes behavior globally", "cost or latency regression"],
-        required_measurements=["score_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "from_model": "current model",
-                "to_model": "allowed replacement model",
-                "expected_tradeoff": "quality, cost, or latency tradeoff being tested",
-            }
-        },
-    ),
-    "runtime_tuning": TransformFamily(
-        name="runtime_tuning",
-        category="runtime",
-        purpose="Tune runtime controls such as caps, reasoning settings, or validator flags.",
-        supported_edit_kinds=["model", "runtime"],
-        supported_ops=["set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"],
-        activation_signals=["cost_objective", "latency_objective", "invalid_output"],
-        expected_effects={"cost": "variable", "latency": "variable", "correctness": "variable"},
-        risks=["hidden correctness tradeoff"],
-        required_measurements=["score_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.0,
-        parameter_contract={
-            "recommended": {
-                "runtime_param": "runtime setting being changed",
-                "expected_tradeoff": "quality, cost, or latency tradeoff",
-            }
-        },
-    ),
-    "tool_policy_revision": TransformFamily(
-        name="tool_policy_revision",
-        category="tools",
-        purpose="Revise tool descriptions, enablement, or tool-use policy exposed by the agent surface.",
+    "surface_tool_loop": TransformFamily(
+        name="surface_tool_loop",
+        category="tool_loop",
+        purpose="Modify tool presentation and tool-loop middleware without changing true tool semantics.",
         supported_edit_kinds=["tool"],
-        supported_ops=["annotate_tool", "rewrite_tool_description", "normalize_tool_args", "repair_tool_args", "validate", "replan"],
-        activation_signals=["tool_dependent_slice", "tool_trajectory_defect", "cost_objective", "latency_objective"],
+        supported_ops=["annotate_tool", "rewrite_tool_description", "validate", "normalize_tool_args", "repair_tool_args", "replan"],
+        activation_signals=["tool_dependent_slice", "correctness_gap"],
         expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
         risks=["tool overuse", "tool underuse", "tool-call regression"],
-        required_measurements=["score_delta", "tool_call_delta", "tool_error_delta", "turn_delta", "cost_delta", "latency_delta"],
+        required_measurements=["score_delta", "tool_call_delta", "tool_error_delta", "turn_delta"],
         complexity_cost=1.25,
-        parameter_contract={
-            "recommended": {
-                "tool_target": "tool description, enabled flag, or policy being changed",
-                "expected_tool_behavior": "how tool-use should change",
-            }
-        },
     ),
-    "verifier_retry": TransformFamily(
-        name="verifier_retry",
+    "surface_state": TransformFamily(
+        name="surface_state",
+        category="state",
+        purpose="Add and maintain typed runtime state for context, validation, and response guards.",
+        supported_edit_kinds=["state"],
+        supported_ops=["define_state", "store_state", "append_state", "merge_state", "clear_state", "expose_state"],
+        activation_signals=["branch_failures", "tool_dependent_slice"],
+        expected_effects={"correctness": "variable", "cost": "low", "latency": "low"},
+        risks=["state drift", "extra prompt tokens when exposed"],
+        required_measurements=["score_delta", "runtime_error_delta", "cost_delta"],
+        complexity_cost=1.25,
+    ),
+    "surface_response": TransformFamily(
+        name="surface_response",
+        category="response",
+        purpose="Validate, block, or rewrite draft responses at declared response hooks.",
+        supported_edit_kinds=["response"],
+        supported_ops=["extract_claims", "validate", "validate_claims", "rewrite_response", "block_response"],
+        activation_signals=["invalid_output", "runtime_truncation"],
+        expected_effects={"correctness": "variable", "cost": "low", "latency": "low"},
+        risks=["over-suppresses valid responses"],
+        required_measurements=["score_delta", "invalid_output_delta", "cost_delta"],
+        complexity_cost=1.0,
+    ),
+    "surface_output": TransformFamily(
+        name="surface_output",
+        category="output",
+        purpose="Modify explicit output-contract sections and output schemas.",
+        supported_edit_kinds=["output"],
+        supported_ops=["add_context_section", "replace_context_section", "validate"],
+        activation_signals=["invalid_output", "runtime_truncation"],
+        expected_effects={"correctness": "variable", "cost": "token-dependent", "latency": "token-dependent"},
+        risks=["format improves while semantics regress"],
+        required_measurements=["score_delta", "invalid_output_delta", "regression_cases"],
+        complexity_cost=1.0,
+    ),
+    "surface_runtime": TransformFamily(
+        name="surface_runtime",
         category="runtime",
-        purpose="Add or tune verifier/retry behavior for high-risk output failures.",
-        supported_edit_kinds=["response", "state"],
-        supported_ops=["define_state", "validate", "validate_claims", "rewrite_response", "block_response", "replan"],
-        activation_signals=["invalid_output", "runtime_errors", "high_risk_slice"],
-        expected_effects={"correctness": "possible_increase", "cost": "increase", "latency": "increase"},
-        risks=["extra model calls", "latency increase", "retry overfitting"],
-        required_measurements=["score_delta", "invalid_output_rate_delta", "cost_delta", "latency_delta"],
-        complexity_cost=1.75,
-        parameter_contract={
-            "recommended": {
-                "trigger": "failure condition that should trigger verifier/retry",
-                "retry_limit": "maximum retry count",
-            }
-        },
+        purpose="Tune declared retry, turn, and runtime-control surfaces.",
+        supported_edit_kinds=["runtime"],
+        supported_ops=["set_retry_policy", "set_turn_limit", "set_tool_call_limit", "validate_completion"],
+        activation_signals=["runtime_errors", "runtime_truncation", "cost_objective", "latency_objective"],
+        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
+        risks=["hidden correctness tradeoff"],
+        required_measurements=["score_delta", "turn_delta", "latency_delta", "cost_delta"],
+        complexity_cost=1.0,
+    ),
+    "surface_model": TransformFamily(
+        name="surface_model",
+        category="model",
+        purpose="Change declared model invocation settings.",
+        supported_edit_kinds=["model"],
+        supported_ops=["set_model_config"],
+        activation_signals=["correctness_gap", "cost_objective", "latency_objective"],
+        expected_effects={"correctness": "variable", "cost": "variable", "latency": "variable"},
+        risks=["global behavior change", "cost or latency regression"],
+        required_measurements=["score_delta", "cost_delta", "latency_delta"],
+        complexity_cost=1.0,
+    ),
+    "surface_examples": TransformFamily(
+        name="surface_examples",
+        category="examples",
+        purpose="Expose proposal-safe examples as typed context sections.",
+        supported_edit_kinds=["few_shot"],
+        supported_ops=["add_context_section"],
+        activation_signals=["weak_slices"],
+        expected_effects={"correctness": "variable", "cost": "increase", "latency": "token-dependent"},
+        risks=["example overfitting", "prompt growth"],
+        required_measurements=["score_delta", "example_token_delta", "regression_cases"],
+        complexity_cost=1.5,
     ),
 }
-
-
-SIGNAL_WEIGHTS_BY_FAMILY: dict[str, dict[str, float]] = {
-    "branch_failures": {
-        "prompt_rewrite": 1.0,
-        "output_contract_tightening": 1.0,
-        "targeted_few_shot": 1.0,
-        "model_substitution": 1.0,
-        "runtime_tuning": 1.0,
-        "tool_policy_revision": 1.0,
-        "verifier_retry": 1.0,
-    },
-    "invalid_output": {
-        "output_contract_tightening": 1.0,
-        "prompt_rewrite": 1.0,
-        "targeted_few_shot": 1.0,
-        "runtime_tuning": 1.0,
-        "model_substitution": -0.6,
-        "verifier_retry": 0.8,
-    },
-    "correctness_gap": {
-        "prompt_rewrite": 1.0,
-        "model_substitution": 1.0,
-        "targeted_few_shot": 1.0,
-        "tool_policy_revision": 0.4,
-    },
-    "cost_objective": {
-        "model_substitution": 1.0,
-        "runtime_tuning": 1.0,
-        "tool_policy_revision": 0.8,
-    },
-    "high_cost_cases": {
-        "runtime_tuning": 1.0,
-        "tool_policy_revision": 0.8,
-        "model_substitution": 1.0,
-    },
-    "latency_objective": {
-        "model_substitution": 1.0,
-        "runtime_tuning": 1.0,
-        "tool_policy_revision": 0.8,
-    },
-    "high_latency_cases": {
-        "runtime_tuning": 1.0,
-        "verifier_retry": 0.8,
-        "model_substitution": 1.0,
-    },
-    "weak_slices": {
-        "targeted_few_shot": 1.0,
-        "prompt_rewrite": 1.0,
-    },
-    "runtime_errors": {
-        "runtime_tuning": 1.0,
-        "model_substitution": 1.0,
-    },
-    "runtime_truncation": {
-        "runtime_tuning": 1.0,
-        "output_contract_tightening": 1.0,
-        "prompt_rewrite": 0.4,
-        "model_substitution": 0.2,
-        "targeted_few_shot": -0.4,
-        "verifier_retry": 0.6,
-    },
-}
-
-
-SIGNAL_REASONS = {
-    "branch_failures": "current branch has failing cases",
-    "invalid_output": "invalid output failures observed",
-    "correctness_gap": "correctness gap observed",
-    "tool_dependent_slice": "tool-dependent slice signal observed",
-    "cost_objective": "cost objective active",
-    "high_cost_cases": "high-cost cases observed",
-    "latency_objective": "latency objective active",
-    "high_latency_cases": "high-latency cases observed",
-    "weak_slices": "weak or failing slices available",
-    "runtime_errors": "runtime errors observed",
-    "runtime_truncation": "finish_reason=length or parser fallback observed",
-}
-
 
 def transform_registry() -> dict[str, TransformFamily]:
     return dict(TRANSFORM_FAMILIES)
@@ -815,67 +694,40 @@ def build_search_hypothesis(
         raise TypeError(f"build_search_hypothesis requires SurfaceSpec, got {type(surface).__name__}.")
     profile = build_behavior_profile(summary)
     targets = surface_targets(surface)
-    surface_kinds = {target.kind for target in targets}
-    surface_ops = {op for target in targets for op in target.allowed_ops}
     branch_history = select_branch_history(history, parent_candidate_id or summary.candidate_id)
     diagnosis_signals = _diagnosis_signals(diagnoses or [])
     context_states: dict[str, TransformContextState] = {}
-    for family in TRANSFORM_FAMILIES.values():
-        if family.name == "targeted_few_shot" and proposal_example_count <= 0:
-            context_key = TransformContextKey(family=family.name)
-            context_states[context_key.id] = TransformContextState(
-                key=context_key,
-                state="available",
-                suitability=0.0,
-                reason="No proposal-safe train examples are available for targeted few-shot selection.",
-                constraints=["Add train/search examples before proposing targeted few-shot patches."],
-            )
+    for target in targets:
+        ops = tuple(sorted(str(op) for op in target.allowed_ops if op))
+        if not ops:
             continue
-        if not (set(family.supported_edit_kinds) & surface_kinds) or not (set(family.supported_ops) & surface_ops):
-            context_key = TransformContextKey(family=family.name)
-            context_states[context_key.id] = TransformContextState(
-                key=context_key,
-                state="available",
-                suitability=0.0,
-                reason="No compatible editable target is available.",
-                constraints=["No compatible editable target or operation is available."],
-            )
-            continue
-        base_suitability, base_evidence = _suitability(family, profile, objective)
-        for context_key in _candidate_context_keys(
+        family = _surface_mechanism_for_target(target)
+        context_key = TransformContextKey(
             family=family,
-            surface=targets,
+            target_names=(target.name,),
+            ops=ops,
+            target_slice="global",
+            mechanism=(target.semantics.role or target.kind,),
+        )
+        suitability, evidence = _surface_context_suitability(
+            target=target,
+            family=family,
             profile=profile,
+            objective=objective,
             diagnosis_signals=diagnosis_signals,
-        ):
-            suitability, evidence = _context_suitability(
-                family=family,
-                context_key=context_key,
-                base_suitability=base_suitability,
-                base_evidence=base_evidence,
-                diagnosis_signals=diagnosis_signals,
-            )
-            context_states[context_key.id] = _context_lifecycle_state(
-                key=context_key,
-                rows=_rows_for_context(branch_history, context_key),
-                suitability=suitability,
-                evidence=evidence,
-            )
+            proposal_example_count=proposal_example_count,
+        )
+        context_states[context_key.id] = _context_lifecycle_state(
+            key=context_key,
+            rows=_rows_for_context(branch_history, context_key),
+            suitability=suitability,
+            evidence=evidence,
+        )
     for row in branch_history:
         context_key = TransformContextKey.from_row(row)
-        if context_key.family not in TRANSFORM_FAMILIES:
-            continue
         if context_key.id in context_states:
             continue
-        family = TRANSFORM_FAMILIES[context_key.family]
-        base_suitability, base_evidence = _suitability(family, profile, objective)
-        suitability, evidence = _context_suitability(
-            family=family,
-            context_key=context_key,
-            base_suitability=base_suitability,
-            base_evidence=base_evidence,
-            diagnosis_signals=diagnosis_signals,
-        )
+        suitability, evidence = _row_context_suitability(context_key=context_key, profile=profile, objective=objective)
         context_states[context_key.id] = _context_lifecycle_state(
             key=context_key,
             rows=_rows_for_context(branch_history, context_key),
@@ -902,7 +754,7 @@ def build_search_hypothesis(
         target_slices=profile.target_slices,
         profile=profile,
         budget_allocation=allocation,
-        rationale="Search hypothesis derived from current behavior profile, diagnoses, editable surface, objective, and branch-local transform context history.",
+        rationale="Search hypothesis derived from the inferred optimization surface, current behavior profile, diagnoses, objective, and branch-local surface-program history.",
     )
 
 
@@ -912,33 +764,21 @@ def validate_candidate_transform(
     surface: SurfaceSpec,
     search_hypothesis: SearchHypothesis | None = None,
 ) -> str | None:
-    registry = TRANSFORM_FAMILIES
     if not candidate.experiment_id:
         return "candidate must belong to an experiment"
     if candidate.candidate_role not in CANDIDATE_ROLES:
         return f"unknown candidate role {candidate.candidate_role!r}"
     if not candidate.applications:
-        return "candidate must include at least one affordance application"
+        return "candidate must include at least one surface opportunity application"
     for application in candidate.applications:
-        family = registry.get(application.family)
-        if family is None:
-            return f"unknown transform family {application.family!r}"
-        mechanism_error = mechanism_error_for_family(application.family, application.mechanism)
-        if mechanism_error is not None:
-            return mechanism_error
-        if application.selection:
-            if application.family != "targeted_few_shot":
-                return f"transform family {application.family!r} does not support example selection"
-            source_ids = application.selection.get("source_case_ids")
-            if not isinstance(source_ids, list) or not all(isinstance(item, str) and item for item in source_ids):
-                return "targeted_few_shot requires selection.source_case_ids"
+        if application.affordance_id.startswith("surface."):
             continue
-        if application.family == "targeted_few_shot":
-            return "targeted_few_shot requires selection.source_case_ids"
+        return f"candidate application must cite a surface_opportunity_id, got {application.affordance_id!r}"
     if search_hypothesis is not None:
-        eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
-        if eligibility_error is not None:
-            return eligibility_error
+        if any(not application.affordance_id.startswith("surface.") for application in candidate.applications):
+            eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
+            if eligibility_error is not None:
+                return eligibility_error
     return None
 
 
@@ -951,7 +791,7 @@ def validate_candidate_context(
     for family_name in sorted({application.family for application in candidate.applications}):
         family_state = search_hypothesis.family_states.get(family_name)
         if family_state is None or family_name not in search_hypothesis.active_families:
-            return f"inactive transform family {family_name!r}"
+            return f"inactive surface mechanism {family_name!r}"
     combined_key = TransformContextKey.from_candidate(candidate)
     exact_state = search_hypothesis.context_states.get(combined_key.id)
     if exact_state is not None and exact_state.state in {"paused", "available"}:
@@ -1009,7 +849,7 @@ def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, di
         else:
             grouped[family].append(row)
     summaries: dict[str, dict[str, Any]] = {}
-    for family in sorted(set(grouped) | set(proposed_counts) | set(TRANSFORM_FAMILIES)):
+    for family in sorted(set(grouped) | set(proposed_counts)):
         rows = grouped.get(family, [])
         evaluated_count = len(rows)
         proposed_count = max(proposed_counts.get(family, 0), evaluated_count)
@@ -1021,11 +861,11 @@ def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, di
         score_regressed = any(delta < 0 for delta in score_deltas)
         if accepted_rows:
             state = "promoted"
-            reason = "At least one candidate from this transform family improved the configured objective on dev."
+            reason = "At least one candidate from this surface mechanism improved the configured objective on dev."
         elif evaluated_count >= 2 or score_regressed:
             state = "constrained"
             reason = (
-                "At least one candidate from this transform family regressed score; future attempts should use a distinct target, slice, or instance."
+                "At least one candidate from this surface mechanism regressed score; future attempts should use a distinct target, slice, or instance."
                 if score_regressed
                 else "Multiple evaluated candidates failed the configured objective gate; future attempts should avoid near-duplicate instances."
             )
@@ -1034,7 +874,7 @@ def summarize_transform_results(proposals: list[dict[str, Any]]) -> dict[str, di
             reason = "The evaluated candidate failed the configured objective gate."
         else:
             state = "available"
-            reason = "No candidates evaluated for this transform family."
+            reason = "No candidates evaluated for this surface mechanism."
         summaries[family] = TransformResultSummary(
             family=family,
             proposed_count=proposed_count,
@@ -1131,7 +971,7 @@ def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, d
         )
         if accepted_rows:
             state = "promoted"
-            reason = "At least one application of this affordance improved the configured objective on dev."
+            reason = "At least one application of this surface opportunity improved the configured objective on dev."
         elif score_deltas and any(delta < 0 for delta in score_deltas):
             state = "constrained"
             reason = "At least one evaluated application regressed score."
@@ -1204,87 +1044,6 @@ def observe_transform_result(
     }
 
 
-def _suitability(
-    family: TransformFamily,
-    profile: BehaviorProfile,
-    objective: OptimizationObjective,
-) -> tuple[float, list[str]]:
-    signals = _evidence_signals(profile, objective)
-    score = -family.complexity_cost * 0.03
-    evidence: list[str] = []
-    for signal, strength in signals.items():
-        family_weight = SIGNAL_WEIGHTS_BY_FAMILY.get(signal, {}).get(family.name, 0.0)
-        if family_weight == 0:
-            continue
-        score += strength * family_weight
-        evidence.append(SIGNAL_REASONS.get(signal, signal))
-    return max(round(score, 4), 0.0), _unique(evidence)
-
-
-def _evidence_signals(
-    profile: BehaviorProfile,
-    objective: OptimizationObjective,
-) -> dict[str, float]:
-    signals: dict[str, float] = {}
-    has_failures = profile.pass_count < profile.case_count
-    failure_rate = 1.0 - profile.pass_rate
-    if has_failures:
-        signals["branch_failures"] = min(0.15 + failure_rate * 0.25, 0.4)
-    if profile.invalid_output_rate > 0:
-        signals["invalid_output"] = 0.3 + min(profile.invalid_output_rate * 0.35, 0.35)
-    if objective.mode == "correctness" and has_failures:
-        signals["correctness_gap"] = 0.25
-        if _metadata_flag_present(profile, "needs_tool"):
-            signals["tool_dependent_slice"] = 0.2
-    if objective.mode == "cost":
-        signals["cost_objective"] = 0.55
-        if profile.high_cost_case_ids:
-            signals["high_cost_cases"] = 0.15
-    if objective.mode == "latency":
-        signals["latency_objective"] = 0.55
-        if profile.high_latency_case_ids:
-            signals["high_latency_cases"] = 0.15
-    if profile.weak_slice_count:
-        signals["weak_slices"] = min(0.1 + profile.weak_slice_count * 0.05, 0.25)
-    if profile.runtime_error_rate > 0:
-        signals["runtime_errors"] = 0.2
-    if profile.length_finish_rate > 0 or profile.parser_fallback_rate > 0:
-        signals["runtime_truncation"] = min(
-            0.2 + (profile.length_finish_rate + profile.parser_fallback_rate) * 0.3,
-            0.5,
-        )
-    return signals
-
-
-def _candidate_context_keys(
-    *,
-    family: TransformFamily,
-    surface: list[SurfaceTarget],
-    profile: BehaviorProfile,
-    diagnosis_signals: dict[str, set[str]],
-) -> list[TransformContextKey]:
-    slices = sorted(diagnosis_signals["target_slices"] or set(profile.target_slices[:3]) or {"global"})
-    keys: list[TransformContextKey] = []
-    for target in surface:
-        ops = tuple(sorted(set(target.allowed_ops) & set(family.supported_ops)))
-        if not ops or target.kind not in family.supported_edit_kinds:
-            continue
-        target_slices = slices
-        if diagnosis_signals["target_names"] and target.name not in diagnosis_signals["target_names"]:
-            target_slices = ["global"]
-        for target_slice in target_slices[:3]:
-            keys.append(
-                TransformContextKey(
-                    family=family.name,
-                    target_names=(target.name,),
-                    ops=ops,
-                    target_slice=target_slice,
-                    transform_instance="candidate",
-                )
-            )
-    return keys or [TransformContextKey(family=family.name)]
-
-
 def _diagnosis_signals(diagnoses: list[FailureDiagnosis]) -> dict[str, set[str]]:
     target_names: set[str] = set()
     categories: set[str] = set()
@@ -1302,30 +1061,82 @@ def _diagnosis_signals(diagnoses: list[FailureDiagnosis]) -> dict[str, set[str]]
     }
 
 
-def _context_suitability(
+def _surface_mechanism_for_target(target: SurfaceTarget) -> str:
+    if target.kind == "instruction":
+        return "surface_context"
+    if target.kind == "output":
+        return "surface_output"
+    if target.kind == "state":
+        return "surface_state"
+    if target.kind == "tool":
+        return "surface_tool_loop"
+    if target.kind == "model":
+        return "surface_model"
+    if target.kind == "response":
+        return "surface_response"
+    if target.kind == "few_shot":
+        return "surface_examples"
+    if target.kind == "runtime":
+        return "surface_runtime"
+    return f"surface_{_normalize_token(target.kind)}"
+
+
+def _surface_context_suitability(
     *,
-    family: TransformFamily,
-    context_key: TransformContextKey,
-    base_suitability: float,
-    base_evidence: list[str],
+    target: SurfaceTarget,
+    family: str,
+    profile: BehaviorProfile,
+    objective: OptimizationObjective,
     diagnosis_signals: dict[str, set[str]],
+    proposal_example_count: int,
 ) -> tuple[float, list[str]]:
-    suitability = base_suitability
-    evidence = list(base_evidence)
-    if set(context_key.target_names) & diagnosis_signals["target_names"]:
+    suitability = 0.2 + min(max(target.semantics.confidence, 0.0), 1.0) * 0.15
+    evidence: list[str] = [f"inferred editable {target.kind} surface"]
+    if profile.pass_count < profile.case_count:
+        suitability += 0.1
+        evidence.append("branch has residual correctness failures")
+    if profile.invalid_output_rate > 0 and family in {"surface_output", "surface_response", "surface_runtime"}:
+        suitability += 0.3
+        evidence.append("invalid or incomplete outputs observed")
+    if profile.runtime_error_rate > 0 and family == "surface_runtime":
+        suitability += 0.25
+        evidence.append("runtime errors observed")
+    if profile.length_finish_rate > 0 and family in {"surface_runtime", "surface_output"}:
+        suitability += 0.2
+        evidence.append("finish_reason=length observed")
+    if profile.parser_fallback_rate > 0 and family in {"surface_output", "surface_response"}:
+        suitability += 0.2
+        evidence.append("parser fallback observed")
+    if profile.weak_slice_count > 0 and family in {"surface_context", "surface_examples"}:
         suitability += 0.15
+        evidence.append("weak slices are available")
+    if objective.mode in {"cost", "latency"} and family in {"surface_model", "surface_runtime", "surface_context"}:
+        suitability += 0.25
+        evidence.append(f"{objective.mode} objective is active")
+    if family == "surface_examples" and proposal_example_count <= 0:
+        return 0.0, ["No proposal-safe train examples are available for example-surface patches."]
+    if target.name in diagnosis_signals["target_names"]:
+        suitability += 0.2
         evidence.append("diagnosis points at this editable target")
-    if diagnosis_signals["categories"] and context_key.family in {
-        "prompt_rewrite",
-        "output_contract_tightening",
-        "targeted_few_shot",
-    }:
+    if diagnosis_signals["categories"] and family in {"surface_context", "surface_tool_loop", "surface_response"}:
         suitability += 0.05
         evidence.append("diagnosis categories provide targetable failure context")
-    if context_key.target_slice in diagnosis_signals["target_slices"]:
-        suitability += 0.05
-        evidence.append("context targets a diagnosed failure slice")
-    return round(max(suitability, 0.0), 4), _unique(evidence)
+    return round(min(max(suitability, 0.0), 1.0), 4), _unique(evidence)
+
+
+def _row_context_suitability(
+    *,
+    context_key: TransformContextKey,
+    profile: BehaviorProfile,
+    objective: OptimizationObjective,
+) -> tuple[float, list[str]]:
+    suitability = 0.35
+    evidence = ["surface-program context seen in branch history"]
+    if profile.pass_count < profile.case_count:
+        suitability += 0.1
+    if context_key.family == "surface_model" and objective.mode in {"cost", "latency"}:
+        suitability += 0.2
+    return round(min(suitability, 1.0), 4), evidence
 
 
 def _rows_for_context(rows: list[dict[str, Any]], context_key: TransformContextKey) -> list[dict[str, Any]]:
@@ -1395,17 +1206,8 @@ def _aggregate_family_states(context_states: dict[str, TransformContextState]) -
     for context_state in context_states.values():
         grouped[context_state.key.family].append(context_state)
     family_states: dict[str, TransformFamilyState] = {}
-    for family_name in sorted(TRANSFORM_FAMILIES):
+    for family_name in sorted(grouped):
         states = grouped.get(family_name, [])
-        if not states:
-            family_states[family_name] = TransformFamilyState(
-                family=family_name,
-                state="available",
-                suitability=0.0,
-                budget_share=0.0,
-                reason="No transform contexts are available for this family.",
-            )
-            continue
         if any(state.state == "promoted" for state in states):
             state_name = "promoted"
         elif any(state.state == "active" for state in states):
@@ -1529,7 +1331,7 @@ def _operation_context_error(
         return f"inactive transform context scope {operation_key.scope_id!r}"
     if operation_key.family in search_hypothesis.active_families:
         return None
-    return f"inactive transform family {operation_key.family!r}"
+    return f"inactive surface mechanism {operation_key.family!r}"
 
 
 def _context_scope_covers(known: TransformContextKey, candidate: TransformContextKey) -> bool:
@@ -1566,12 +1368,6 @@ def _target_slices(summary: CandidateSummary) -> list[str]:
         if count:
             slices.append(f"failure_label:{label}")
     return sorted(set(slices))
-
-
-def _metadata_flag_present(profile: BehaviorProfile, key: str) -> bool:
-    # BehaviorProfile intentionally stores aggregate slice facts, not raw cases.
-    # For now, infer common metadata signals from target slice names when present.
-    return any(key in slice_name for slice_name in profile.target_slices)
 
 
 def _high_metric_threshold(values: list[float]) -> float:

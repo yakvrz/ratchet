@@ -354,7 +354,7 @@ class RatchetReporter:
             "",
             transform_narrative,
             "",
-            "## Transform Families",
+            "## Surface Mechanisms",
             "",
             *[
                 "- "
@@ -367,7 +367,7 @@ class RatchetReporter:
                 for name, summary in sorted(result.transform_summaries.items())
             ],
             "",
-            "## Optimization Affordances",
+            "## Surface Opportunities",
             "",
             *self._affordance_summary_rows(result),
             "",
@@ -560,7 +560,7 @@ class RatchetReporter:
         invalid_reasons = implementer.get("invalid_reason_counts") or {}
         rows = [
             f"- Planner intents: {planner.get('intent_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
-            f"- Intents citing affordances: {planner.get('intent_with_affordance_ids', 0)}.",
+            f"- Intents citing surface opportunities: {planner.get('intent_with_affordance_ids', 0)}.",
             f"- Implementer candidates: valid={implementer.get('valid_candidate_count', 0)} invalid={implementer.get('invalid_candidate_count', 0)}.",
             f"- Discovery stages: {json.dumps(stage_counts, sort_keys=True)}",
         ]
@@ -743,9 +743,9 @@ class RatchetReporter:
     @staticmethod
     def _affordance_summary_rows(result: RatchetResult) -> list[str]:
         if not result.affordance_summaries:
-            return ["No optimization affordance applications were recorded."]
+            return ["No surface opportunity applications were recorded."]
         rows = [
-            "| Affordance | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
+            "| Surface opportunity | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
             "| --- | --- | ---: | ---: | ---: | ---: | --- |",
         ]
         ranked = sorted(
@@ -767,7 +767,7 @@ class RatchetReporter:
                 f"{_short_reason(item.get('reason'))} |"
             )
         if len(ranked) > 20:
-            rows.append(f"- {len(ranked) - 20} additional affordance summaries omitted from this table.")
+            rows.append(f"- {len(ranked) - 20} additional surface opportunity summaries omitted from this table.")
         return rows
 
     @staticmethod
@@ -879,7 +879,7 @@ class RatchetReporter:
         rows = [
             row
             for row in result.proposals
-            if row.get("transform_family") == "targeted_few_shot" and row.get("metrics")
+            if row.get("transform_family") == "surface_examples" and row.get("metrics")
         ]
         if not rows:
             return ["No evaluated few-shot example candidates were recorded."]
@@ -1077,14 +1077,14 @@ class RatchetReporter:
             if summary.get("state") == "paused"
         ]
         if not tested:
-            return "Ratchet did not evaluate any transform-family candidates after profiling the current branch."
-        parts = [f"Ratchet evaluated transform families: {', '.join(f'`{name}`' for name in tested)}."]
+            return "Ratchet did not evaluate any surface-program candidates after profiling the current branch."
+        parts = [f"Ratchet evaluated surface mechanisms: {', '.join(f'`{name}`' for name in tested)}."]
         if promoted:
-            parts.append(f"Promoted families: {', '.join(f'`{name}`' for name in promoted)}.")
+            parts.append(f"Promoted surface mechanisms: {', '.join(f'`{name}`' for name in promoted)}.")
         if constrained:
-            parts.append(f"Constrained families after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
+            parts.append(f"Constrained surface mechanisms after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
         if paused:
-            parts.append(f"Paused families pending stronger evidence: {', '.join(f'`{name}`' for name in paused)}.")
+            parts.append(f"Paused surface mechanisms pending stronger evidence: {', '.join(f'`{name}`' for name in paused)}.")
         if not result.promoted:
             parts.append("No candidate cleared the configured dev and holdout gates, so Ratchet kept the baseline.")
         return " ".join(parts)

@@ -83,18 +83,18 @@ from ratchet.types import (
 )
 
 
-SEARCH_FRONTIER_WIDTH = 2
+SEARCH_FRONTIER_WIDTH = 1
 PROPOSAL_RETRY_BUDGET = 1
-FINALIST_CONFIRMATION_SAMPLES = 2
+FINALIST_CONFIRMATION_SAMPLES = 1
 FRONTIER_PARENT_STALL_LIMIT = 2
-MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 2
-MAX_SIMPLIFICATION_PARENT_COUNT = 2
-MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT = 1
-MAX_SIMPLIFICATION_FULL_DEV_PER_RUN = 2
+MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 0
+MAX_SIMPLIFICATION_PARENT_COUNT = 0
+MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT = 0
+MAX_SIMPLIFICATION_FULL_DEV_PER_RUN = 0
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
-MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 3
-MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 2
+MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 1
+MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 1
 MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION = 1
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -542,11 +542,11 @@ class RatchetOptimizer:
                 )
                 decision_log.append(
                     {
-                        "type": "optimization_affordances",
+                        "type": "surface_opportunities",
                         "iteration": iteration,
                         "parent_rank": parent_index + 1,
                         "parent_candidate_id": current_dev.candidate_id,
-                        "affordances": [affordance.to_dict() for affordance in affordances],
+                        "surface_opportunities": [affordance.to_dict() for affordance in affordances],
                     }
                 )
                 research_theory = self._build_research_theory(
@@ -1470,7 +1470,7 @@ class RatchetOptimizer:
             "diagnoses": [_theorist_diagnosis(diagnosis) for diagnosis in diagnoses[:8]],
             "search_hypothesis": _theorist_search_hypothesis(search_hypothesis),
             "surface_spec": _theorist_surface_spec(surface),
-            "optimization_affordances": _theorist_affordances(affordances),
+            "surface_opportunities": _theorist_affordances(affordances),
             "prior_experiment_outcomes": _compact_prior_stage_results(proposals_log, stage=None, limit=8),
             "evidence_ledger_summary": evidence_ledger.to_dict()["summary"],
             "recent_candidate_history": _compact_recent_history_for_theory(proposals_log, limit=10),
@@ -1480,7 +1480,7 @@ class RatchetOptimizer:
             iteration=iteration,
             attempt=attempt,
             parent_rank=parent_index + 1,
-            affordance_count=len(affordances),
+            surface_opportunity_count=len(affordances),
             diagnosis_count=len(diagnoses),
         )
         theory = self.research_theorist.build_theory(
@@ -1788,7 +1788,7 @@ class RatchetOptimizer:
             )
             if state.accepted:
                 accepted_rows.append((candidate, summary, comparison))
-                if candidate.mechanism_class in {"runtime_defect_fix", "output_contract_fix"}:
+                if candidate.mechanism_class in {"surface_runtime", "surface_output", "surface_response"}:
                     decision_log.append(
                         {
                             "type": "residual_rediagnosis_triggered",
@@ -1851,7 +1851,7 @@ class RatchetOptimizer:
             parent_rank=parent_index + 1,
             stage="plan_experiments",
             opportunity_count=len(research_theory.experiment_opportunities),
-            affordance_count=len(affordances),
+            surface_opportunity_count=len(affordances),
         )
         intents = self.research_planner.plan(state)
         if self.research_planner.last_call_diagnostics is not None:
@@ -2893,11 +2893,11 @@ def _theorist_affordances(
         seen.add(affordance.affordance_id)
     return [
         {
-            "affordance_id": affordance.affordance_id,
-            "family": affordance.family,
-            "mechanism": affordance.mechanism,
+            "surface_opportunity_id": affordance.affordance_id,
+            "surface": affordance.mechanism,
             "target": affordance.target_name,
             "target_kind": affordance.target_kind,
+            "target_path": affordance.target_path,
             "ops": list(affordance.ops),
             "semantic_role": affordance.semantic_role,
             "behavioral_axes": list(affordance.behavioral_axes)[:4],
@@ -3684,28 +3684,27 @@ def _task_theory_with_affordance_opportunities(
         for item in opportunities
         if isinstance(item, dict) and item.get("mechanism_class")
     }
-    capability_affordances = [
+    model_affordances = [
         affordance
         for affordance in affordances
-        if affordance.family == "model_substitution"
-        and affordance.mechanism == "model_capability_probe"
+        if affordance.mechanism == "surface_model"
     ]
     if (
-        capability_affordances
-        and "model_capability_probe" not in existing_mechanisms
+        model_affordances
+        and "surface_model" not in existing_mechanisms
         and current_dev.pass_count < current_dev.case_count
         and _residual_quality_signal_remains(task_theory, proposals_log, current_dev.candidate_id)
     ):
         opportunities.insert(
             _capability_probe_insert_index(opportunities),
             {
-                "mechanism_class": "model_capability_probe",
+                "mechanism_class": "surface_model",
                 "target_slices": ["global", "failed_cases"],
                 "candidate_roles": ["atomic", "control"],
                 "measurements": ["score_delta", "fixed_case_ids", "regressed_case_ids", "cost_delta", "latency_delta"],
-                "affordance_ids": [affordance.affordance_id for affordance in capability_affordances[:3]],
+                "affordance_ids": [affordance.affordance_id for affordance in model_affordances[:3]],
                 "rationale": (
-                    "Residual correctness failures remain and model-choice affordances are available; "
+                    "Residual correctness failures remain and model-choice surface opportunities are available; "
                     "test whether failures are capability-limited rather than instruction/example-limited."
                 ),
                 "disconfirming_result": "A stronger allowed model does not fix residual failures or causes regressions/cost that dominate the quality gain.",
@@ -3713,18 +3712,16 @@ def _task_theory_with_affordance_opportunities(
         )
         payload["evidence"] = [
             *list(payload.get("evidence") or []),
-            "model capability affordance available for residual correctness failures",
+            "model capability surface opportunity available for residual correctness failures",
         ]
     efficiency_affordances = [
         affordance
-        for affordance in affordances
-        if affordance.family == "model_substitution"
-        and affordance.mechanism == "efficiency_probe"
+        for affordance in model_affordances
     ]
     if efficiency_affordances and _model_efficiency_probe_is_relevant(objective):
-        if "efficiency_probe" in existing_mechanisms:
+        if "surface_model" in existing_mechanisms:
             for opportunity in opportunities:
-                if isinstance(opportunity, dict) and opportunity.get("mechanism_class") == "efficiency_probe":
+                if isinstance(opportunity, dict) and opportunity.get("mechanism_class") == "surface_model":
                     existing_ids = [
                         str(item)
                         for item in opportunity.get("affordance_ids", [])
@@ -3740,19 +3737,19 @@ def _task_theory_with_affordance_opportunities(
                     )
                     opportunity["rationale"] = (
                         str(opportunity.get("rationale") or "")
-                        + " Model-choice affordances can also test cheaper or faster equivalent policies."
+                        + " Model-choice surface opportunities can also test cheaper or faster equivalent policies."
                     ).strip()
                     break
         else:
             opportunities.append(
                 {
-                    "mechanism_class": "efficiency_probe",
+                    "mechanism_class": "surface_model",
                     "target_slices": ["global"],
                     "candidate_roles": ["atomic", "control"],
                     "measurements": ["score_delta", "cost_delta", "latency_delta", "correctness_guard"],
                     "affordance_ids": [affordance.affordance_id for affordance in efficiency_affordances[:3]],
                     "rationale": (
-                        "Model-choice affordances are available; test whether a different allowed model "
+                        "Model-choice surface opportunities are available; test whether a different allowed model "
                         "can preserve quality while reducing cost or latency."
                     ),
                     "disconfirming_result": "The model change reduces cost or latency only by causing correctness regressions.",
@@ -3760,7 +3757,7 @@ def _task_theory_with_affordance_opportunities(
             )
         payload["evidence"] = [
             *list(payload.get("evidence") or []),
-            "model efficiency affordance available for cost/latency tradeoff testing",
+            "model efficiency surface opportunity available for cost/latency tradeoff testing",
         ]
     payload["experiment_opportunities"] = opportunities[:8]
     return payload
@@ -3781,7 +3778,7 @@ def _capability_probe_insert_index(opportunities: list[dict[str, Any]]) -> int:
     for index, row in enumerate(opportunities):
         if not isinstance(row, dict):
             continue
-        if row.get("mechanism_class") in {"representative_examples", "contrastive_examples", "efficiency_probe"}:
+        if row.get("mechanism_class") in {"surface_examples", "surface_model"}:
             return index
     return len(opportunities)
 
@@ -3803,11 +3800,7 @@ def _residual_quality_signal_remains(
     local_mechanism_rows = [
         row
         for row in branch_rows
-        if row.get("mechanism_class") in {
-            "semantic_boundary_rewrite",
-            "representative_examples",
-            "contrastive_examples",
-        }
+        if row.get("mechanism_class") in {"surface_context", "surface_examples"}
     ]
     if not local_mechanism_rows:
         return True
