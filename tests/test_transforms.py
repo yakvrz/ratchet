@@ -66,6 +66,53 @@ class TransformLibraryTests(unittest.TestCase):
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "unsupported_hook")
 
+    def test_compiler_rejects_context_patch_without_content(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
+        )
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-context",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "add_context_section",
+                        "section": "empty_rule",
+                        "value": "This is the wrong field.",
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "context_content_required")
+        self.assertIn("content", compiled.report.rejection.message)
+
+    def test_compiler_rejects_empty_context_replacement(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
+        )
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "empty-replace",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "replace_context_section",
+                        "section": "system_prompt",
+                        "content": {},
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "context_content_required")
+
 
 if __name__ == "__main__":
     unittest.main()

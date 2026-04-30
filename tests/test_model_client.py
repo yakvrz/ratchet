@@ -97,7 +97,7 @@ class GeminiCompatClientTests(unittest.TestCase):
             self.assertFalse(request["response_format"]["json_schema"]["strict"])
             self.assertEqual(request["reasoning_effort"], "low")
 
-    def test_gemini_json_schema_preserves_shape_but_drops_complex_constraints(self) -> None:
+    def test_gemini_json_schema_preserves_shape_and_simple_bounds(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
             env_path.write_text("GEMINI_API_KEY=test-gemini-key\n")
@@ -139,7 +139,7 @@ class GeminiCompatClientTests(unittest.TestCase):
 
             schema = FakeOpenAI.instances[0].chat_completions.requests[0]["response_format"]["json_schema"]["schema"]
             self.assertEqual(schema["required"], ["patches"])
-            self.assertNotIn("maxItems", schema["properties"]["patches"])
+            self.assertEqual(schema["properties"]["patches"]["maxItems"], 8)
             value_schema = schema["properties"]["patches"]["items"]["properties"]["value"]
             self.assertEqual(value_schema["anyOf"], [{"type": "string"}, {"type": "boolean"}])
 

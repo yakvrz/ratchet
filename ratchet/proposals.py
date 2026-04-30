@@ -51,7 +51,8 @@ PROPOSER_INSTRUCTIONS = (
     "as the causal context for implementation; opportunities are not candidate recipes. Each candidate must include "
     "a typed transform program under candidate.program and applications[] citing relevant optimization_affordances. "
     "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy candidate operations. "
-    "Every add_context_section candidate needs section and content; every set_model_config candidate needs field and value; every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
+    "For add_context_section or replace_context_section, emit one focused patch with non-empty content containing the actual rendered instruction or context data; prefer a concise string. Do not emit empty content objects, repeated placeholder patches, or context text in value. "
+    "Every set_model_config candidate needs field and value; every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
     "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family, mechanism, "
     "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
     "mechanism_class, affordance_ids, patch, or intervention fields. "
@@ -186,14 +187,97 @@ class CandidateImplementer:
         proposals.extend(llm_proposals)
         analysis_parts.append("Candidate implementer returned transform candidate proposals.")
         invalid_reasons.update(self._last_parse_invalid_reasons)
+        raw_count = self._last_raw_candidate_count
+        invalid_candidate_rows = list(self._last_parse_invalid_candidate_rows)
+        budget_valid, candidate_rows, validation_invalid_rows, validation_invalid_reasons = self._validate_candidate_proposals(
+            proposals,
+            surface=surface,
+            search_hypothesis=search_hypothesis,
+            active_affordances=active_affordances,
+            seen_hashes=seen_hashes,
+            proposal_example_bank=proposal_example_bank,
+        )
+        invalid_candidate_rows.extend(validation_invalid_rows)
+        invalid_reasons.update(validation_invalid_reasons)
+        if not budget_valid and invalid_candidate_rows and proposal_budget > 0:
+            repair_feedback = _repair_feedback_rows(invalid_candidate_rows)
+            repaired_proposals, repaired_considerations = self._llm_proposals(
+                summary,
+                surface,
+                objective=objective,
+                diagnoses=diagnosis_context,
+                history=history,
+                search_hypothesis=search_hypothesis,
+                research_theory=research_theory,
+                evidence_packet=evidence_packet,
+                proposal_example_bank=proposal_example_bank,
+                proposal_budget=proposal_budget,
+                experiment_intents=experiment_intents or [],
+                affordances=active_affordances,
+                repair_feedback=repair_feedback,
+            )
+            raw_count += self._last_raw_candidate_count
+            affordance_considerations.extend(repaired_considerations)
+            invalid_reasons.update(self._last_parse_invalid_reasons)
+            invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
+            repaired_valid, repaired_rows, repaired_invalid_rows, repaired_invalid_reasons = self._validate_candidate_proposals(
+                repaired_proposals,
+                surface=surface,
+                search_hypothesis=search_hypothesis,
+                active_affordances=active_affordances,
+                seen_hashes=seen_hashes,
+                proposal_example_bank=proposal_example_bank,
+            )
+            if repaired_valid:
+                analysis_parts.append("Repaired invalid transform candidates using compiler feedback.")
+            budget_valid.extend(repaired_valid)
+            candidate_rows.extend(repaired_rows)
+            invalid_candidate_rows.extend(repaired_invalid_rows)
+            invalid_reasons.update(repaired_invalid_reasons)
+        self.last_candidate_rows = candidate_rows
+        self.last_invalid_candidate_rows = invalid_candidate_rows
+        self.last_stats = ProposalStats(
+            raw_count=raw_count,
+            valid_count=len(budget_valid),
+            returned_count=len(budget_valid),
+            invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate candidate"),
+            duplicate_count=invalid_reasons.get("duplicate candidate", 0),
+            error=None,
+            invalid_reasons=dict(sorted(invalid_reasons.items())),
+            affordance_considerations=affordance_considerations,
+            plan_audit=self._last_plan_audit,
+            raw_output_text=self._last_raw_output_text,
+            call_diagnostics=self.last_call_diagnostics,
+        )
+        if budget_valid:
+            analysis_parts.append("Validated transform candidate implementations.")
+        else:
+            analysis_parts.append("No valid transform candidate implementations.")
+        analysis_parts.append(
+            "Proposal counts: "
+            f"raw={self.last_stats.raw_count}, valid={self.last_stats.valid_count}, "
+            f"returned={self.last_stats.returned_count}, invalid={self.last_stats.invalid_count}, "
+            f"duplicate={self.last_stats.duplicate_count}."
+        )
+        return budget_valid, " ".join(analysis_parts)
+
+    def _validate_candidate_proposals(
+        self,
+        proposals: list[CandidateProposal],
+        *,
+        surface: SurfaceSpec,
+        search_hypothesis: SearchHypothesis,
+        active_affordances: list[OptimizationAffordance],
+        seen_hashes: set[str],
+        proposal_example_bank: ProposalExampleBank | None,
+    ) -> tuple[list[CandidateProposal], list[dict[str, Any]], list[dict[str, Any]], Counter[str]]:
         valid: list[CandidateProposal] = []
-        budget_valid: list[CandidateProposal] = []
+        candidate_rows: list[dict[str, Any]] = []
+        invalid_candidate_rows: list[dict[str, Any]] = []
+        invalid_reasons: Counter[str] = Counter()
         local_seen: set[str] = set()
         group_count = 0
         group_indices: dict[str, int] = {}
-        candidate_rows: list[dict[str, Any]] = []
-        invalid_candidate_rows: list[dict[str, Any]] = []
-        invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
         for raw_candidate in proposals:
             reference_error = _targeted_few_shot_reference_error(raw_candidate)
             if reference_error is not None:
@@ -209,7 +293,6 @@ class CandidateImplementer:
                     _invalid_candidate_row(raw_candidate, reason, materialization=materialization)
                 )
                 continue
-            group_valid: list[tuple[CandidateProposal, dict[str, Any], str]] = []
             candidate = materialized_candidate
             family_error = validate_candidate_transform(
                 candidate,
@@ -245,66 +328,35 @@ class CandidateImplementer:
                 invalid_candidate_rows.append(_invalid_candidate_row(candidate, "duplicate transform program", materialization=materialization))
                 continue
             local_seen.add(digest)
-            group_valid.append((candidate, materialization, digest))
-            if not group_valid:
-                continue
-            budget_group = _candidate_budget_group(group_valid[0][0])
+            budget_group = _candidate_budget_group(candidate)
             if budget_group not in group_indices:
                 group_count += 1
                 group_indices[budget_group] = group_count
-            proposal_group = group_indices[budget_group]
-            for variant_rank, (candidate, variant_materialization, digest) in enumerate(group_valid, start=1):
-                valid.append(candidate)
-                budget_valid.append(candidate)
-                candidate_rows.append(
-                    {
-                        "rank": len(candidate_rows) + 1,
-                        "proposal_group": proposal_group,
-                        "variant_rank": variant_rank,
-                        "proposal_program_hash": transform_program_hash(candidate.program),
-                        "candidate_id": digest,
-                        "proposal": candidate.program.to_dict(),
-                        "candidate": candidate.to_dict(),
-                        "applications": [application.to_dict() for application in candidate.applications],
-                        "transform_family": candidate.transform_family,
-                        "mechanism_class": candidate.mechanism_class,
-                        "experiment_id": candidate.experiment_id,
-                        "candidate_role": candidate.candidate_role,
-                        "comparison_group": candidate.comparison_group,
-                        "affordance_ids": list(candidate.affordance_ids),
-                        "transform_instance": candidate.transform_instance,
-                        "target_slice": candidate.target_slice,
-                        "hypothesis": candidate.hypothesis,
-                        "evaluation_plan": candidate.evaluation_plan,
-                        "materialization": variant_materialization,
-                    }
-                )
-        self.last_candidate_rows = candidate_rows
-        self.last_invalid_candidate_rows = invalid_candidate_rows
-        self.last_stats = ProposalStats(
-            raw_count=self._last_raw_candidate_count,
-            valid_count=len(budget_valid),
-            returned_count=len(budget_valid),
-            invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate candidate"),
-            duplicate_count=invalid_reasons.get("duplicate candidate", 0),
-            error=None,
-            invalid_reasons=dict(sorted(invalid_reasons.items())),
-            affordance_considerations=affordance_considerations,
-            plan_audit=self._last_plan_audit,
-            raw_output_text=self._last_raw_output_text,
-            call_diagnostics=self.last_call_diagnostics,
-        )
-        if valid:
-            analysis_parts.append("Validated transform candidate implementations.")
-        else:
-            analysis_parts.append("No valid transform candidate implementations.")
-        analysis_parts.append(
-            "Proposal counts: "
-            f"raw={self.last_stats.raw_count}, valid={self.last_stats.valid_count}, "
-            f"returned={self.last_stats.returned_count}, invalid={self.last_stats.invalid_count}, "
-            f"duplicate={self.last_stats.duplicate_count}."
-        )
-        return budget_valid, " ".join(analysis_parts)
+            valid.append(candidate)
+            candidate_rows.append(
+                {
+                    "rank": len(candidate_rows) + 1,
+                    "proposal_group": group_indices[budget_group],
+                    "variant_rank": 1,
+                    "proposal_program_hash": digest,
+                    "candidate_id": digest,
+                    "proposal": candidate.program.to_dict(),
+                    "candidate": candidate.to_dict(),
+                    "applications": [application.to_dict() for application in candidate.applications],
+                    "transform_family": candidate.transform_family,
+                    "mechanism_class": candidate.mechanism_class,
+                    "experiment_id": candidate.experiment_id,
+                    "candidate_role": candidate.candidate_role,
+                    "comparison_group": candidate.comparison_group,
+                    "affordance_ids": list(candidate.affordance_ids),
+                    "transform_instance": candidate.transform_instance,
+                    "target_slice": candidate.target_slice,
+                    "hypothesis": candidate.hypothesis,
+                    "evaluation_plan": candidate.evaluation_plan,
+                    "materialization": materialization,
+                }
+            )
+        return valid, candidate_rows, invalid_candidate_rows, invalid_reasons
 
     def _llm_proposals(
         self,
@@ -321,6 +373,7 @@ class CandidateImplementer:
         proposal_budget: int,
         experiment_intents: list[ExperimentIntent],
         affordances: list[OptimizationAffordance],
+        repair_feedback: list[dict[str, Any]] | None = None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
             self._client = ResponsesModelClient(env_path=self.env_path)
@@ -361,6 +414,18 @@ class CandidateImplementer:
                     "Do not let prompt edits crowd out other plausible target kinds; rank by expected objective impact "
                     "and constraint risk."
                 ),
+                "context_patch_content": (
+                    "For context rewrites, content must be the complete replacement or inserted text. "
+                    "A placeholder object like {} is invalid; repeated identical context patches are invalid."
+                ),
+                "repair_feedback": (
+                    "When repair_feedback is non-empty, return repaired versions of those candidates only. "
+                    "Fix the compiler or parser errors structurally; do not repeat invalid empty content fields."
+                ),
+            },
+            "repair_feedback": {
+                "usage": "previous candidate programs failed validation; repair them instead of creating unrelated candidates",
+                "invalid_candidates": list(repair_feedback or []),
             },
             "current_candidate": summary.candidate.to_dict() if summary.candidate is not None else None,
             "behavior": {
@@ -738,7 +803,15 @@ def _transform_patch_schema() -> dict[str, Any]:
             "target": {"type": "string", "maxLength": 160},
             "tool": {"type": "string", "maxLength": 160},
             "position": {"type": "string", "maxLength": 160},
-            "content": {},
+            "content": {
+                "anyOf": [
+                    {"type": "string", "minLength": 1, "maxLength": 2400},
+                    {"type": "object", "minProperties": 1, "additionalProperties": True},
+                    {"type": "array", "minItems": 1, "maxItems": 8, "items": {}},
+                    {"type": "number"},
+                    {"type": "boolean"},
+                ]
+            },
             "value": {},
             "initial": {},
             "type": {"type": "string", "maxLength": 160},
@@ -1457,6 +1530,31 @@ def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any
         "valid": False,
         "invalid_reason": reason,
     }
+
+
+def _repair_feedback_rows(rows: list[dict[str, Any]], *, limit: int = 4, max_chars: int = 5000) -> list[dict[str, Any]]:
+    feedback: list[dict[str, Any]] = []
+    for row in rows[:limit]:
+        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        proposal = row.get("proposal") if isinstance(row.get("proposal"), dict) else {}
+        applications = row.get("applications") if isinstance(row.get("applications"), list) else []
+        payload = {
+            "invalid_reason": row.get("invalid_reason"),
+            "experiment_id": row.get("experiment_id") or candidate.get("experiment_id"),
+            "candidate_role": row.get("candidate_role") or candidate.get("candidate_role"),
+            "comparison_group": row.get("comparison_group") or candidate.get("comparison_group"),
+            "target_slice": row.get("target_slice") or candidate.get("target_slice"),
+            "hypothesis": row.get("hypothesis") or candidate.get("hypothesis"),
+            "evaluation_plan": row.get("evaluation_plan") or candidate.get("evaluation_plan"),
+            "applications": applications or candidate.get("applications", []),
+            "program": proposal or candidate.get("program", {}),
+        }
+        text = json.dumps(payload, separators=(",", ":"), default=str)
+        if len(text) > max_chars:
+            payload["program"] = _value_summary(payload["program"])
+            payload["applications"] = _value_summary(payload["applications"])
+        feedback.append(payload)
+    return feedback
 
 
 def _candidate_budget_group(candidate: CandidateProposal) -> str:

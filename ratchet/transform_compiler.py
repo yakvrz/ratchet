@@ -158,10 +158,29 @@ class TransformCompiler:
             section = self._required_string(index, patch, "section")
             if section not in surface.context.editable_sections:
                 self._reject(index, "readonly_context_section", f"Context section {section!r} is not editable.")
+        if op in {"add_context_section", "replace_context_section"}:
+            self._validate_context_content(index, patch)
         if op == "reorder_context_sections":
             order = params.get("order")
             if not isinstance(order, list) or not all(isinstance(item, str) and item for item in order):
                 self._reject(index, "invalid_context_order", "reorder_context_sections requires order[] of section names.")
+
+    def _validate_context_content(self, index: int, patch: TransformPatch) -> None:
+        params = patch.op.params
+        if "content" not in params:
+            hint = " Use 'content', not 'value'." if "value" in params else ""
+            self._reject(
+                index,
+                "context_content_required",
+                f"Operation {patch.op.op!r} requires non-empty 'content'.{hint}",
+            )
+        content = params["content"]
+        if content is None:
+            self._reject(index, "context_content_required", f"Operation {patch.op.op!r} requires non-empty 'content'.")
+        if isinstance(content, str) and not content.strip():
+            self._reject(index, "context_content_required", f"Operation {patch.op.op!r} requires non-empty 'content'.")
+        if isinstance(content, (list, tuple, dict)) and not content:
+            self._reject(index, "context_content_required", f"Operation {patch.op.op!r} requires non-empty 'content'.")
 
     def _validate_state_op(
         self,

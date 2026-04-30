@@ -412,6 +412,10 @@ def _gemini_safe_json_schema(schema: Any) -> dict[str, Any]:
         result["additionalProperties"] = bool(schema["additionalProperties"])
     elif isinstance(schema.get("additionalProperties"), dict):
         result["additionalProperties"] = _gemini_safe_json_schema(schema["additionalProperties"])
+    for key in ("minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"):
+        value = schema.get(key)
+        if isinstance(value, int):
+            result[key] = value
     return result or {"type": "object"}
 
 
