@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import copy
 import json
 import os
 from pathlib import Path
@@ -52,6 +53,10 @@ GradeFactory = Callable[[EvalCase, object], GradeResult]
 
 
 class LiteLLMToolLoopClient:
+    def __init__(self, *, max_retries: int = 3, retry_delay_s: float = 2.0) -> None:
+        self.max_retries = max_retries
+        self.retry_delay_s = retry_delay_s
+
     def complete(
         self,
         *,
@@ -65,12 +70,16 @@ class LiteLLMToolLoopClient:
             from litellm import completion
         except ModuleNotFoundError as exc:
             raise RuntimeError("litellm is required to run the generic tool-loop adapter.") from exc
-        response = completion(
-            messages=messages,
-            model=model,
-            custom_llm_provider=provider,
-            tools=tools,
-            temperature=temperature,
+        response = _with_retries(
+            lambda: completion(
+                messages=messages,
+                model=model,
+                custom_llm_provider=provider,
+                tools=tools,
+                temperature=temperature,
+            ),
+            max_retries=self.max_retries,
+            retry_delay_s=self.retry_delay_s,
         )
         message = response.choices[0].message
         if hasattr(message, "model_dump"):
@@ -164,6 +173,7 @@ class GeneratedToolLoopAdapter:
         for step in range(config.max_steps):
             ctx.context = base_context
             ctx.message_history = messages
+            ctx.tools = copy.deepcopy(tools)
             runtime.run_hook("before_model_call", ctx)
             prompt = _system_prompt(env, ctx.context)
             call_messages = [{"role": "system", "content": prompt}, *messages[1:]]
@@ -171,7 +181,7 @@ class GeneratedToolLoopAdapter:
                 messages=call_messages,
                 model=str(ctx.model_config["model_name"]),
                 provider=_provider_for_model(str(ctx.model_config["model_name"]), self._agent_spec, config),
-                tools=tools,
+                tools=ctx.tools,
                 temperature=float(ctx.model_config.get("temperature", config.temperature)),
             )
             model_calls += 1
@@ -308,8 +318,9 @@ class GeneratedToolLoopAdapter:
 def _default_case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
     runtime = dict(spec.runtime)
     metadata = dict(case.metadata)
+    provider = str(runtime.get("model_provider") or _provider_for_model(spec.model, spec, ToolLoopRunConfig(provider="")))
     return ToolLoopRunConfig(
-        provider=str(runtime.get("model_provider", "openai")),
+        provider=provider,
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 30),
         log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "results"),
@@ -421,3 +432,20 @@ def _info_dict(value: Any) -> dict[str, Any]:
     if isinstance(value, dict):
         return dict(value)
     return {"value": str(value)}
+
+
+def _with_retries(call: Callable[[], Any], *, max_retries: int, retry_delay_s: float) -> Any:
+    attempt = 0
+    while True:
+        try:
+            return call()
+        except Exception as exc:
+            attempt += 1
+            if attempt > max_retries or not _is_transient_provider_error(exc):
+                raise
+            time.sleep(retry_delay_s * attempt)
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in ("503", "serviceunavailable", "unavailable", "rate limit", "429"))

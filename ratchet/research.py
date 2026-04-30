@@ -75,10 +75,23 @@ class ResearchTheorist:
             response_format=response_format,
             max_output_tokens=RESEARCH_THEORIST_MAX_OUTPUT_TOKENS,
         )
+        payload = _normalize_research_theory_payload(payload)
         try:
             theory = ResearchTheory.from_dict(payload)
         except Exception as exc:
-            raise OptimizerModelError(f"Research theorist returned malformed research theory: {exc}") from exc
+            repaired = self._repair_payload(
+                payload=payload,
+                validation_error=OptimizerModelError(f"Research theorist returned malformed research theory: {exc}"),
+                response_format=response_format,
+                max_output_tokens=RESEARCH_THEORIST_MAX_OUTPUT_TOKENS,
+            )
+            repaired = _normalize_research_theory_payload(repaired)
+            try:
+                theory = ResearchTheory.from_dict(repaired)
+            except Exception as repair_exc:
+                raise OptimizerModelError(
+                    f"Research theorist returned malformed research theory: {exc}; repair failed: {repair_exc}"
+                ) from repair_exc
         unknown_affordances = sorted(
             {
                 affordance_id
@@ -92,6 +105,54 @@ class ResearchTheorist:
                 f"Research theorist used unknown affordance_ids: {unknown_affordances}"
             )
         return theory
+
+    def _repair_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        validation_error: OptimizerModelError,
+        response_format: dict[str, Any],
+        max_output_tokens: int,
+    ) -> dict[str, Any]:
+        if self._client is None:
+            raise OptimizerModelError("Research theorist repair requested before client initialization.")
+        primary_diagnostics = self.last_call_diagnostics or {}
+        repair_started_at = time.perf_counter()
+        repair_response = self._client.create_response(
+            model=self.model,
+            reasoning={"effort": self.reasoning_effort},
+            text=response_format,
+            input=(
+                "The previous research-theorist response was valid JSON but failed schema validation. "
+                "Return only a valid research theory JSON object. Every hypothesis needs a non-empty "
+                "hypothesis_id; every experiment opportunity needs a non-empty opportunity_id, at least "
+                "one known hypothesis_id, a known mechanism_class, rationale, and only supplied affordance_ids. "
+                "Do not write patches or prose.\n\n"
+                f"Validation error: {validation_error}\n"
+                f"Invalid JSON object:\n{json.dumps(payload, separators=(',', ':'), default=str)[:12000]}"
+            ),
+            max_output_tokens=max_output_tokens,
+        )
+        repair_diagnostics = response_diagnostics(
+            repair_response,
+            model=self.model,
+            elapsed_s=time.perf_counter() - repair_started_at,
+        )
+        self.last_call_diagnostics = combine_response_diagnostics(
+            component="research_theorist",
+            primary=primary_diagnostics,
+            repair=repair_diagnostics,
+        )
+        try:
+            return extract_json_object(repair_response.output_text)
+        except Exception as repair_exc:
+            self.last_call_diagnostics = {
+                **self.last_call_diagnostics,
+                "repair_error": str(repair_exc),
+            }
+            raise OptimizerModelError(
+                f"Research theorist returned schema-invalid JSON: {validation_error}; repair failed: {repair_exc}"
+            ) from repair_exc
 
     def _call_json(
         self,
@@ -649,6 +710,131 @@ def _research_theory_schema() -> dict[str, Any]:
         },
         "required": ["theory_id", "summary", "primary_hypothesis_id", "hypotheses", "experiment_opportunities"],
     }
+
+
+def _normalize_research_theory_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Normalize provider JSON quirks at the optimizer-role boundary.
+
+    IDs are Ratchet-internal references, so assigning them preserves the model's
+    substantive theory while keeping the typed research objects strict.
+    """
+    normalized = dict(payload)
+    raw_hypotheses = normalized.get("hypotheses", normalized.get("causal_hypotheses", []))
+    hypotheses: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_hypotheses if isinstance(raw_hypotheses, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        statement = _first_text(
+            item.get("statement"),
+            item.get("hypothesis"),
+            item.get("description"),
+            item.get("summary"),
+            item.get("rationale"),
+        )
+        mechanism_class = _first_text(item.get("mechanism_class"), item.get("mechanism"))
+        if not statement or mechanism_class not in MECHANISM_CLASSES:
+            continue
+        hypothesis_id = _first_text(item.get("hypothesis_id"), item.get("id")) or f"H_{index:03d}"
+        hypotheses.append(
+            {
+                **item,
+                "hypothesis_id": hypothesis_id,
+                "statement": statement,
+                "mechanism_class": mechanism_class,
+                "target_slices": _string_list(item.get("target_slices")),
+                "supporting_evidence": _string_list(
+                    item.get("supporting_evidence", item.get("evidence", []))
+                ),
+                "competing_evidence": _string_list(item.get("competing_evidence")),
+                "disconfirming_result": _first_text(item.get("disconfirming_result")),
+                "confidence": _first_text(item.get("confidence")) or "low",
+            }
+        )
+    normalized["hypotheses"] = hypotheses
+    hypothesis_ids = [item["hypothesis_id"] for item in hypotheses]
+    mechanism_by_hypothesis = {item["hypothesis_id"]: item["mechanism_class"] for item in hypotheses}
+
+    normalized["theory_id"] = _first_text(normalized.get("theory_id"), normalized.get("id")) or "T_001"
+    normalized["summary"] = _first_text(
+        normalized.get("summary"),
+        normalized.get("overview"),
+        normalized.get("analysis"),
+        normalized.get("rationale"),
+    )
+    primary_hypothesis_id = _first_text(normalized.get("primary_hypothesis_id"))
+    if primary_hypothesis_id not in hypothesis_ids and hypothesis_ids:
+        primary_hypothesis_id = hypothesis_ids[0]
+    normalized["primary_hypothesis_id"] = primary_hypothesis_id
+
+    raw_opportunities = normalized.get(
+        "experiment_opportunities",
+        normalized.get("opportunities", normalized.get("experiments", [])),
+    )
+    opportunities: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_opportunities if isinstance(raw_opportunities, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        raw_ids = _string_list(item.get("hypothesis_ids"))
+        if not raw_ids:
+            single_id = _first_text(item.get("hypothesis_id"))
+            raw_ids = [single_id] if single_id else []
+        cited_ids = [hypothesis_id for hypothesis_id in raw_ids if hypothesis_id in hypothesis_ids]
+        if not cited_ids and len(hypothesis_ids) == 1:
+            cited_ids = list(hypothesis_ids)
+        rationale = _first_text(
+            item.get("rationale"),
+            item.get("hypothesis"),
+            item.get("description"),
+            item.get("summary"),
+        )
+        mechanism_class = _first_text(item.get("mechanism_class"), item.get("mechanism"))
+        if mechanism_class not in MECHANISM_CLASSES and len(cited_ids) == 1:
+            mechanism_class = mechanism_by_hypothesis.get(cited_ids[0], "")
+        if not cited_ids or not rationale or mechanism_class not in MECHANISM_CLASSES:
+            continue
+        opportunity_id = _first_text(item.get("opportunity_id"), item.get("id")) or f"O_{index:03d}"
+        opportunities.append(
+            {
+                **item,
+                "opportunity_id": opportunity_id,
+                "hypothesis_ids": cited_ids,
+                "mechanism_class": mechanism_class,
+                "target_slices": _string_list(item.get("target_slices")),
+                "rationale": rationale,
+                "measurements": _string_list(item.get("measurements")),
+                "disconfirming_result": _first_text(item.get("disconfirming_result")),
+                "candidate_roles": _string_list(item.get("candidate_roles")),
+                "compatible_mechanisms": _string_list(item.get("compatible_mechanisms")),
+                "affordance_ids": _string_list(item.get("affordance_ids")),
+                "priority": int(item.get("priority") or index),
+            }
+        )
+    normalized["experiment_opportunities"] = opportunities
+    normalized["disconfirmed_explanations"] = _string_list(normalized.get("disconfirmed_explanations"))
+    normalized["surprising_observations"] = _string_list(normalized.get("surprising_observations"))
+    normalized["prior_lessons"] = _string_list(normalized.get("prior_lessons"))
+    normalized["uncertainty"] = _first_text(normalized.get("uncertainty"))
+    normalized["confidence"] = _first_text(normalized.get("confidence")) or "low"
+    return normalized
+
+
+def _first_text(*values: Any) -> str:
+    for value in values:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _string_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value).strip()
+    return [text] if text else []
 
 
 def _measurement_decision_from_payload(*, stage: str, payload: dict[str, Any]) -> MeasurementDecision:

@@ -91,13 +91,11 @@ class GeminiCompatClientTests(unittest.TestCase):
             self.assertEqual(FakeOpenAI.instances[0].kwargs["api_key"], "test-gemini-key")
             self.assertEqual(FakeOpenAI.instances[0].kwargs["base_url"], GEMINI_OPENAI_BASE_URL)
             request = FakeOpenAI.instances[0].chat_completions.requests[0]
-            self.assertEqual(request["response_format"]["type"], "json_schema")
-            self.assertEqual(request["response_format"]["json_schema"]["name"], "ratchet_json")
-            self.assertEqual(request["response_format"]["json_schema"]["schema"], {"type": "object"})
-            self.assertFalse(request["response_format"]["json_schema"]["strict"])
+            self.assertNotIn("response_format", request)
             self.assertEqual(request["reasoning_effort"], "low")
+            self.assertIn("JSON schema", request["messages"][-1]["content"])
 
-    def test_gemini_json_schema_preserves_shape_and_simple_bounds(self) -> None:
+    def test_gemini_omits_provider_schema_for_json_prompting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             env_path = Path(tmp) / ".env"
             env_path.write_text("GEMINI_API_KEY=test-gemini-key\n")
@@ -137,11 +135,9 @@ class GeminiCompatClientTests(unittest.TestCase):
                     },
                 )
 
-            schema = FakeOpenAI.instances[0].chat_completions.requests[0]["response_format"]["json_schema"]["schema"]
-            self.assertEqual(schema["required"], ["patches"])
-            self.assertEqual(schema["properties"]["patches"]["maxItems"], 8)
-            value_schema = schema["properties"]["patches"]["items"]["properties"]["value"]
-            self.assertEqual(value_schema["anyOf"], [{"type": "string"}, {"type": "boolean"}])
+            request = FakeOpenAI.instances[0].chat_completions.requests[0]
+            self.assertNotIn("response_format", request)
+            self.assertIn('"required":["patches"]', request["messages"][-1]["content"])
 
     def test_model_request_limits_apply_to_gemini_compat_requests(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -210,10 +206,12 @@ class GeminiCompatClientTests(unittest.TestCase):
             requests = FakeOpenAI.instances[0].chat_completions.requests
             self.assertEqual(requests[0]["tools"][0]["function"]["name"], "docs_search")
             self.assertNotIn("response_format", requests[0])
-            self.assertEqual(requests[1]["messages"][-1]["role"], "tool")
-            self.assertEqual(requests[1]["messages"][-1]["tool_call_id"], "call-1")
+            self.assertEqual(requests[1]["messages"][-2]["role"], "tool")
+            self.assertEqual(requests[1]["messages"][-2]["tool_call_id"], "call-1")
+            self.assertEqual(requests[1]["messages"][-1]["role"], "user")
+            self.assertIn("JSON schema", requests[1]["messages"][-1]["content"])
             self.assertNotIn("tools", requests[1])
-            self.assertEqual(requests[1]["response_format"]["type"], "json_schema")
+            self.assertNotIn("response_format", requests[1])
 
     def test_validate_optimizer_model_access_uses_one_token_probe(self) -> None:
         client = ProbeClient()

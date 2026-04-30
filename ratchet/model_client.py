@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
+import json
 import os
 from pathlib import Path
 import time
@@ -227,7 +228,7 @@ class ResponsesModelClient:
         # Gemini's OpenAI-compatible endpoint rejects function calling combined
         # with JSON response mode. After tool outputs, prefer the structured
         # final answer over allowing another tool round.
-        include_tools = bool(tools) and not (kwargs.get("previous_response_id") and response_format)
+        include_tools = bool(tools) and not (kwargs.get("previous_response_id") and kwargs.get("text"))
         if include_tools:
             request["tools"] = tools
             request["tool_choice"] = "auto"
@@ -241,6 +242,7 @@ class ResponsesModelClient:
         return self._compat_response(completion, messages)
 
     def _gemini_messages(self, kwargs: dict[str, Any]) -> list[dict[str, Any]]:
+        schema_instruction = _gemini_schema_instruction(kwargs.get("text"))
         previous_response_id = kwargs.get("previous_response_id")
         if previous_response_id is not None:
             try:
@@ -257,6 +259,8 @@ class ResponsesModelClient:
                         "content": str(item.get("output", "")),
                     }
                 )
+            if schema_instruction:
+                messages.append({"role": "user", "content": schema_instruction})
             return messages
 
         messages = []
@@ -265,9 +269,12 @@ class ResponsesModelClient:
             messages.append({"role": "system", "content": str(instructions)})
         raw_input = kwargs.get("input", "")
         if isinstance(raw_input, str):
-            messages.append({"role": "user", "content": raw_input})
+            content = raw_input
         else:
-            messages.append({"role": "user", "content": str(raw_input)})
+            content = str(raw_input)
+        if schema_instruction:
+            content = f"{content}\n\n{schema_instruction}"
+        messages.append({"role": "user", "content": content})
         return messages
 
     def _compat_response(self, completion: Any, request_messages: list[dict[str, Any]]) -> CompatResponse:
@@ -364,59 +371,29 @@ def _chat_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _gemini_response_format(text_config: Any) -> dict[str, Any] | None:
-    if not isinstance(text_config, dict):
-        return None
-    text_format = text_config.get("format")
-    if not isinstance(text_format, dict):
-        return None
-    if text_format.get("type") == "json_schema":
-        return {
-            "type": "json_schema",
-            "json_schema": {
-                "name": str(text_format.get("name", "ratchet_json")),
-                "schema": _gemini_safe_json_schema(text_format.get("schema", {"type": "object"})),
-                "strict": False,
-            },
-        }
-    if text_format.get("type") == "json_object":
-        return {"type": "json_object"}
+    # Gemini's OpenAI-compatible endpoint currently accepts only a narrow subset
+    # of structured-output schemas and may return empty assistant content for
+    # accepted schemas. Ratchet prompts optimizer roles to return JSON and then
+    # validates/parses the result itself, so omit provider-side response_format
+    # for Gemini instead of relying on incompatible schema enforcement.
     return None
 
 
-def _gemini_safe_json_schema(schema: Any) -> dict[str, Any]:
+def _gemini_schema_instruction(text_config: Any) -> str:
+    if not isinstance(text_config, dict):
+        return ""
+    format_config = text_config.get("format")
+    if not isinstance(format_config, dict) or format_config.get("type") != "json_schema":
+        return ""
+    schema = format_config.get("schema")
     if not isinstance(schema, dict):
-        return {"type": "object"}
-    if "anyOf" in schema or "oneOf" in schema or "allOf" in schema:
-        raw_options = schema.get("anyOf") or schema.get("oneOf") or schema.get("allOf") or []
-        options = [_gemini_safe_json_schema(item) for item in raw_options if isinstance(item, dict)]
-        return {"anyOf": options} if options else {}
-    result: dict[str, Any] = {}
-    schema_type = schema.get("type")
-    if isinstance(schema_type, str):
-        result["type"] = schema_type
-    elif isinstance(schema_type, list) and schema_type:
-        result["type"] = [str(item) for item in schema_type]
-    if "enum" in schema and isinstance(schema["enum"], list) and len(schema["enum"]) <= 12:
-        result["enum"] = list(schema["enum"])
-    if isinstance(schema.get("properties"), dict):
-        result["properties"] = {
-            str(name): _gemini_safe_json_schema(value)
-            for name, value in schema["properties"].items()
-            if isinstance(value, dict)
-        }
-    if isinstance(schema.get("required"), list):
-        result["required"] = [str(item) for item in schema["required"]]
-    if isinstance(schema.get("items"), dict):
-        result["items"] = _gemini_safe_json_schema(schema["items"])
-    if isinstance(schema.get("additionalProperties"), bool):
-        result["additionalProperties"] = bool(schema["additionalProperties"])
-    elif isinstance(schema.get("additionalProperties"), dict):
-        result["additionalProperties"] = _gemini_safe_json_schema(schema["additionalProperties"])
-    for key in ("minLength", "maxLength", "minItems", "maxItems", "minProperties", "maxProperties"):
-        value = schema.get(key)
-        if isinstance(value, int):
-            result[key] = value
-    return result or {"type": "object"}
+        return ""
+    name = str(format_config.get("name") or "response")
+    return (
+        "Return only a JSON object for schema "
+        f"{name}. Do not wrap it in markdown. JSON schema:\n"
+        f"{json.dumps(schema, separators=(',', ':'), default=str)}"
+    )
 
 
 def _message_text(content: Any) -> str:

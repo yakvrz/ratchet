@@ -136,6 +136,26 @@ class TransformLibraryTests(unittest.TestCase):
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "model_name_not_allowed")
 
+    def test_compiler_rejects_prose_only_validation(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-validation",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "validate",
+                        "content": "Reject unsupported claims.",
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "validation_checks_required")
+
 
 if __name__ == "__main__":
     unittest.main()

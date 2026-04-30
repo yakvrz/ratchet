@@ -120,7 +120,7 @@ Tool calls are handled as an extension of Ratchet's evidence loop, not as a tau-
 - candidates compile into hook-based runtime middleware rather than source rewrites
 - evidence and reports distinguish task score gains from extra model calls, tool calls, turns, latency, and measurement spend
 
-Known public benchmark integrations should use the official simulator when available. If Ratchet is expected to optimize the harness, it must own the agent loop through a general adapter surface; black-box benchmark runners are only measurement bridges. Static action-list proxies are useful only as development probes, not leaderboard-comparable tau-bench evaluation.
+Benchmark integrations should use the real evaluator and environment interface. If Ratchet is expected to optimize the harness, it must own the agent loop through a general adapter surface; black-box benchmark runners are only measurement bridges.
 
 Hard-coded task recipes, fallback proposal generators, or model-bypass switches violate the architecture. Tests may use fakes, but production optimization should fail visibly when a model role cannot produce valid output.
 

@@ -136,6 +136,7 @@ class TransformCompiler:
         self._validate_model_op(index, patch, surface)
         self._validate_response_op(index, patch, surface)
         self._validate_tool_op(index, patch, surface)
+        self._validate_validation_checks(index, patch)
         self._validate_references(index, patch, hook.available_inputs, state_fields)
 
     def _validate_context_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
@@ -242,12 +243,48 @@ class TransformCompiler:
         op = patch.op.op
         if op == "rewrite_tool_description" and not surface.tools.tool_description_rewrite_allowed:
             self._reject(index, "tool_description_rewrite_unsupported", "Surface does not allow tool description rewrites.")
+        if op == "rewrite_tool_description":
+            self._required_string(index, patch, "tool")
+            content = str(patch.op.params.get("content") or "").strip()
+            append = str(patch.op.params.get("append") or "").strip()
+            if not content and not append:
+                self._reject(
+                    index,
+                    "tool_description_content_required",
+                    "rewrite_tool_description requires non-empty content or append.",
+                )
         if op in {"normalize_tool_args", "repair_tool_args"} and not surface.tools.tool_call_interception_allowed:
             self._reject(index, "tool_call_interception_unsupported", "Surface does not allow tool-call interception.")
         if op == "annotate_tool" and not surface.tools.tool_metadata_allowed:
             self._reject(index, "tool_metadata_unsupported", "Surface does not allow tool metadata.")
         if op == "rewrite_tool_result":
             self._reject(index, "tool_result_tampering", "Transform programs may not rewrite tool results.")
+
+    def _validate_validation_checks(self, index: int, patch: TransformPatch) -> None:
+        if patch.op.op not in {"validate", "validate_claims"}:
+            return
+        checks = patch.op.params.get("checks")
+        if checks is None:
+            self._reject(index, "validation_checks_required", "validate requires implemented checks[].")
+        if not isinstance(checks, list):
+            self._reject(index, "invalid_validation_checks", "validate requires checks[] when checks are provided.")
+        if not checks:
+            self._reject(index, "validation_checks_required", "validate requires at least one implemented check.")
+        for check in checks:
+            if isinstance(check, str) and check in {
+                "json_object",
+                "actions_array",
+                "args_schema_valid",
+                "not_duplicate_tool_call",
+            }:
+                continue
+            if isinstance(check, dict) and set(check) == {"required_output_keys"} and isinstance(check.get("required_output_keys"), list):
+                continue
+            self._reject(
+                index,
+                "unsupported_validation_check",
+                f"Validation check {check!r} is not implemented by the runtime.",
+            )
 
     def _validate_references(
         self,

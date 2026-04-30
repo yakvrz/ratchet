@@ -4,7 +4,7 @@ import unittest
 
 from ratchet.errors import OptimizerModelError
 from ratchet.experiments import ResearchState
-from ratchet.research import ResearchPlanner
+from ratchet.research import ResearchPlanner, ResearchTheorist
 
 
 class _Response:
@@ -33,6 +33,24 @@ class _RepairClient:
             '{"experiment_intents":[{"intent_id":"intent_1",'
             '"mechanism_class":"semantic_boundary_rewrite",'
             '"hypothesis":"test","affordance_ids":["known"]}]}'
+        )
+
+
+class _TheoryClient:
+    def create_response(self, **_: object) -> _Response:
+        return _Response(
+            """{
+              "summary":"The baseline is failing before using the available tool-loop surface.",
+              "hypotheses":[{
+                "hypothesis":"The agent is not validating tool calls against observations.",
+                "mechanism":"tool_precondition_policy",
+                "target_slices":["tool tasks"]
+              }],
+              "opportunities":[{
+                "description":"Measure whether a before-tool-call validator improves reliability.",
+                "affordance_ids":["tool_loop"]
+              }]
+            }"""
         )
 
 
@@ -74,6 +92,19 @@ class ResearchRoleTests(unittest.TestCase):
         self.assertEqual(client.calls, 2)
         self.assertEqual([intent.intent_id for intent in intents], ["intent_1"])
         self.assertTrue(planner.last_call_diagnostics and planner.last_call_diagnostics.get("repair_attempted"))
+
+    def test_research_theorist_normalizes_internal_ids_and_aliases(self) -> None:
+        theorist = ResearchTheorist(env_path=".env", model="fake", reasoning_effort="low")
+        theorist._client = _TheoryClient()
+
+        theory = theorist.build_theory(state={}, affordance_ids={"tool_loop"})
+
+        self.assertEqual(theory.theory_id, "T_001")
+        self.assertEqual(theory.primary_hypothesis_id, "H_001")
+        self.assertEqual(theory.hypotheses[0].statement, "The agent is not validating tool calls against observations.")
+        self.assertEqual(theory.hypotheses[0].mechanism_class, "tool_precondition_policy")
+        self.assertEqual(theory.experiment_opportunities[0].opportunity_id, "O_001")
+        self.assertEqual(theory.experiment_opportunities[0].hypothesis_ids, ["H_001"])
 
 
 if __name__ == "__main__":

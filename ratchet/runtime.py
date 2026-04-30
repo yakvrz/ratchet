@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import copy
+import json
 from typing import Any
 
 from ratchet.context_graph import ContextGraph, ContextSection
@@ -16,6 +17,7 @@ class RuntimeContext:
     model_config: dict[str, Any]
     state: dict[str, Any] = field(default_factory=dict)
     message_history: list[dict[str, Any]] = field(default_factory=list)
+    tools: list[dict[str, Any]] = field(default_factory=list)
     tool_call: dict[str, Any] | None = None
     tool_schema: dict[str, Any] | None = None
     tool_metadata: dict[str, Any] | None = None
@@ -151,6 +153,24 @@ class TransformRuntime:
             ctx.tool_call["args"] = _normalize_args(ctx.tool_call.get("args"), params)
             ctx.annotate(hook=hook, op=op, fields={"tool": ctx.tool_call.get("name")})
             return
+        if op == "rewrite_tool_description":
+            tool_name = str(params["tool"])
+            content = str(params.get("content") or "")
+            append = str(params.get("append") or "")
+            if not content and not append:
+                raise ValueError("rewrite_tool_description requires content or append.")
+            rewritten = False
+            for tool in ctx.tools:
+                function = tool.get("function") if isinstance(tool, dict) else None
+                if not isinstance(function, dict) or str(function.get("name") or "") != tool_name:
+                    continue
+                current = str(function.get("description") or "")
+                function["description"] = content if content else f"{current}\n\n{append}".strip()
+                rewritten = True
+            if not rewritten:
+                raise KeyError(f"Tool {tool_name!r} is not available for description rewrite.")
+            ctx.annotate(hook=hook, op=op, fields={"tool": tool_name})
+            return
         if op in {"log_event", "trace_annotation"}:
             ctx.annotate(hook=hook, op=op, fields=resolve_value(params.get("fields", {}), ctx))
             return
@@ -278,7 +298,41 @@ def _validate(params: dict[str, Any], ctx: RuntimeContext) -> bool:
             required = schema.get("required") if isinstance(schema.get("required"), list) else []
             if any(key not in ctx.tool_call["args"] for key in required):
                 return False
+        if check == "not_duplicate_tool_call" and _has_prior_matching_tool_call(ctx):
+            return False
     return True
+
+
+def _has_prior_matching_tool_call(ctx: RuntimeContext) -> bool:
+    if not isinstance(ctx.tool_call, dict):
+        return False
+    current_name = str(ctx.tool_call.get("name") or "")
+    current_args = _stable_json(ctx.tool_call.get("args") or {})
+    for message in ctx.message_history:
+        if not isinstance(message, dict):
+            continue
+        for call in message.get("tool_calls") or []:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if not isinstance(function, dict) or str(function.get("name") or "") != current_name:
+                continue
+            if _stable_json(_tool_call_args(function.get("arguments"))) == current_args:
+                return True
+    return False
+
+
+def _tool_call_args(raw_args: Any) -> Any:
+    if isinstance(raw_args, str):
+        try:
+            return json.loads(raw_args)
+        except json.JSONDecodeError:
+            return raw_args
+    return raw_args or {}
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 def _rewrite_response(params: dict[str, Any], ctx: RuntimeContext) -> Any:

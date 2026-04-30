@@ -316,6 +316,40 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
         tool_ops.append("rewrite_tool_description")
     if surface.tools.tool_call_interception_allowed:
         tool_ops.extend(["normalize_tool_args", "repair_tool_args", "validate", "replan"])
+        targets.append(
+            SurfaceTarget(
+                name="tool_loop",
+                kind="tool",
+                path="tools.*",
+                current_value={
+                    "tools_available": surface.tools.tools_available,
+                    "tool_call_interception_allowed": True,
+                    "tool_result_rewrite_allowed": surface.tools.tool_result_rewrite_allowed,
+                },
+                allowed_ops=tuple(tool_ops),
+                description=(
+                    "Generic tool-call middleware for validating, normalizing, blocking, or replanning "
+                    "proposed tool calls before environment execution. This surface must not modify true "
+                    "tool implementations or fabricate tool results."
+                ),
+                value_schema={
+                    "hooks": ["before_model_call", "before_tool_call", "after_tool_result"],
+                    "available_refs": ["tools", "tool_call", "tool_schema", "tool_metadata", "message_history", "state"],
+                    "safe_patterns": [
+                        "rewrite tool descriptions at before_model_call without changing execution semantics",
+                        "validate tool_call with args_schema_valid then replan on failure",
+                        "validate tool_call with not_duplicate_tool_call then replan on failure",
+                        "normalize tool_call args before execution",
+                        "define state on_task_start and append real tool_result observations after_tool_result",
+                    ],
+                    "forbidden": [
+                        "rewrite_tool_result",
+                        "modify tool implementation",
+                        "read hidden evaluator or expected answers",
+                    ],
+                },
+            )
+        )
     for tool in surface.tools.tools:
         if tool_ops:
             targets.append(
@@ -494,7 +528,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
         ),
         (
             "before_model_call",
-            ("case", "state", "context", "model_config", "message_history"),
+            ("case", "state", "context", "model_config", "message_history", "tools"),
             (
                 "add_context_section",
                 "remove_context_section",
@@ -502,11 +536,12 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
                 "move_context_section",
                 "reorder_context_sections",
                 "render_state_section",
+                "rewrite_tool_description",
                 "set_model_config",
                 "log_event",
                 "trace_annotation",
             ),
-            ("continue", "modified_context", "modified_model_config"),
+            ("continue", "modified_context", "modified_model_config", "modified_tool_presentation"),
         ),
         (
             "after_model_call",

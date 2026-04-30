@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ratchet.affordances import generate_optimization_affordances
-from ratchet.surfaces import surface_from_agent_spec
+from ratchet.surfaces import surface_from_agent_spec, tool_loop_surface_from_agent_spec
 from ratchet.types import AgentSpec, AgentTool, OptimizationObjective
 
 
@@ -47,6 +47,20 @@ class OptimizationAffordanceTests(unittest.TestCase):
 
         self.assertEqual(affordances[0].family, "tool_policy_revision")
         self.assertEqual(affordances[0].mechanism, "tool_selection_policy")
+
+    def test_tool_loop_surface_exposes_generic_tool_affordance_without_static_tools(self) -> None:
+        surface = tool_loop_surface_from_agent_spec(AgentSpec(name="interactive", model="base"))
+
+        affordances = generate_optimization_affordances(
+            surface,
+            active_families=["tool_policy_revision"],
+            evidence={"tool_trajectory_defect": True},
+        )
+
+        tool_loop = [item for item in affordances if item.target_name == "tool_loop"]
+        self.assertTrue(tool_loop)
+        self.assertIn("validate", tool_loop[0].ops)
+        self.assertIn("before_tool_call", tool_loop[0].value_schema["hooks"])
 
 
 if __name__ == "__main__":

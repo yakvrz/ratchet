@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 from ratchet.tool_loop import GeneratedToolLoopAdapter, ToolLoopRunConfig
@@ -9,23 +10,27 @@ from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 BASE_SPEC = AgentSpec(
     name="taubench-tool-loop",
-    model="gpt-4o",
+    model="gemini-2.5-flash-lite",
     model_options=[
-        "gpt-4o",
-        "gpt-4o-mini",
-        "claude-3-5-sonnet-20241022",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-3-flash-preview",
+        "gemini-3-pro-preview",
     ],
     runtime={
-        "model_provider": "openai",
-        "user_model": "gpt-4o",
-        "user_model_provider": "openai",
+        "model_provider": "gemini",
+        "user_model": "gemini-2.5-flash-lite",
+        "user_model_provider": "gemini",
         "user_strategy": "llm",
         "temperature": 0.0,
         "max_steps": 30,
         "model_provider_by_name": {
-            "gpt-4o": "openai",
-            "gpt-4o-mini": "openai",
-            "claude-3-5-sonnet-20241022": "anthropic",
+            "gemini-2.5-flash-lite": "gemini",
+            "gemini-2.5-flash": "gemini",
+            "gemini-2.5-pro": "gemini",
+            "gemini-3-flash-preview": "gemini",
+            "gemini-3-pro-preview": "gemini",
         },
     },
     metadata={"benchmark": "tau-bench", "benchmark_fidelity": "tau_bench_simulator"},
@@ -35,17 +40,19 @@ BASE_SPEC = AgentSpec(
 def _make_environment(case: EvalCase, config: ToolLoopRunConfig) -> Any:
     try:
         from tau_bench.envs import get_env
+        from tau_bench.envs import user as user_module
     except ModuleNotFoundError as exc:
         raise RuntimeError(
             "tau-bench is not installed. Install sierra-research/tau-bench to run this assessment."
         ) from exc
+    _install_taubench_user_retries(user_module)
     metadata = dict(case.metadata)
     return get_env(
         env_name=str(metadata.get("env") or "retail"),
         user_strategy=str(metadata.get("user_strategy") or BASE_SPEC.runtime.get("user_strategy") or "llm"),
-        user_model=str(metadata.get("user_model") or BASE_SPEC.runtime.get("user_model") or "gpt-4o"),
+        user_model=str(metadata.get("user_model") or BASE_SPEC.runtime.get("user_model") or BASE_SPEC.model),
         user_provider=str(
-            metadata.get("user_model_provider") or BASE_SPEC.runtime.get("user_model_provider") or "openai"
+            metadata.get("user_model_provider") or BASE_SPEC.runtime.get("user_model_provider") or "gemini"
         ),
         task_split=str(metadata.get("task_split") or "test"),
         task_index=_task_id(metadata),
@@ -66,7 +73,7 @@ def _case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
     runtime = dict(spec.runtime)
     metadata = dict(case.metadata)
     return ToolLoopRunConfig(
-        provider=str(runtime.get("model_provider", "openai")),
+        provider=str(runtime.get("model_provider", "gemini")),
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 30),
         log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "samples/taubench_agent/results/raw"),
@@ -98,6 +105,29 @@ def _task_id(metadata: dict[str, Any]) -> int:
     if not isinstance(task_id, int):
         raise ValueError("tau-bench cases require integer metadata.task_id.")
     return task_id
+
+
+def _install_taubench_user_retries(user_module: Any) -> None:
+    if getattr(user_module.completion, "_ratchet_retry_wrapped", False):
+        return
+    raw_completion = user_module.completion
+
+    def completion_with_retries(*args: Any, **kwargs: Any) -> Any:
+        for attempt in range(4):
+            try:
+                return raw_completion(*args, **kwargs)
+            except Exception as exc:
+                if attempt >= 3 or not _is_transient_provider_error(exc):
+                    raise
+                time.sleep(2.0 * (attempt + 1))
+
+    completion_with_retries._ratchet_retry_wrapped = True  # type: ignore[attr-defined]
+    user_module.completion = completion_with_retries
+
+
+def _is_transient_provider_error(exc: Exception) -> bool:
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(marker in text for marker in ("503", "serviceunavailable", "unavailable", "rate limit", "429"))
 
 
 adapter = GeneratedToolLoopAdapter(

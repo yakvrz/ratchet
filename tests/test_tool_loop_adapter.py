@@ -78,6 +78,54 @@ class _FakeClient:
         )
 
 
+class _RepeatingToolClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        self.calls += 1
+        if self.calls <= 2:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": f"call_{self.calls}",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_order",
+                                "arguments": '{"order_id": "A1"}',
+                            },
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is delivered."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
+class _ToolDescriptionClient:
+    def __init__(self) -> None:
+        self.tool_descriptions: list[str] = []
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        tools = kwargs["tools"]
+        assert isinstance(tools, list)
+        function = tools[0]["function"]
+        self.tool_descriptions.append(str(function["description"]))
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is delivered."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
 class ToolLoopAdapterTests(unittest.TestCase):
     def test_tool_loop_executes_transform_hooks_around_environment_tools(self) -> None:
         env = _FakeEnvironment()
@@ -126,7 +174,77 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("normalize_tool_args", trace_ops)
         self.assertIn("append_state", trace_ops)
 
-    def test_official_taubench_sample_uses_generic_tool_loop_adapter(self) -> None:
+    def test_tool_loop_validation_can_replan_duplicate_tool_calls(self) -> None:
+        env = _FakeEnvironment()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_RepeatingToolClient(),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "duplicate_guard",
+                    "patches": [
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "target": "tool_call",
+                            "checks": ["not_duplicate_tool_call"],
+                            "on_fail": {
+                                "hook": "before_tool_call",
+                                "op": "replan",
+                                "message": "The proposed tool call repeats an already observed result. Continue with the next step.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec(),
+        )
+        case = EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+
+        record = adapter.run_case(case, candidate)
+
+        self.assertEqual(env.actions, [("lookup_order", {"order_id": "A1"}), ("respond", {"content": "The order is delivered."})])
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
+        self.assertTrue(any(item["op"] == "replan" for item in trace))
+
+    def test_tool_description_rewrite_changes_model_presentation_only(self) -> None:
+        env = _FakeEnvironment()
+        client = _ToolDescriptionClient()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=client,
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "tool_description",
+                    "patches": [
+                        {
+                            "hook": "before_model_call",
+                            "op": "rewrite_tool_description",
+                            "tool": "lookup_order",
+                            "append": "Use after the user supplies an order id.",
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec(),
+        )
+        case = EvalCase(id="case-1", split="dev", input="", expected={"reward": 1.0})
+
+        adapter.run_case(case, candidate)
+
+        self.assertIn("Use after the user supplies an order id.", client.tool_descriptions[0])
+        self.assertEqual(env.actions, [("respond", {"content": "The order is delivered."})])
+
+    def test_taubench_sample_uses_generic_tool_loop_adapter(self) -> None:
         from samples.taubench_agent.ratchet_adapter import adapter
 
         self.assertIsInstance(adapter, GeneratedToolLoopAdapter)
