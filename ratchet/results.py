@@ -365,9 +365,9 @@ class RatchetResult:
     selected_candidate_id: str
     promoted: bool
     baseline_dev: CandidateSummary
-    baseline_holdout: CandidateSummary
+    baseline_holdout: CandidateSummary | None
     best_dev_candidate: CandidateSummary
-    selected_holdout: CandidateSummary
+    selected_holdout: CandidateSummary | None
     accepted_dev_candidates: list[CandidateSummary]
     holdout_candidates: list[CandidateSummary]
     pareto_frontier: list[dict[str, Any]]

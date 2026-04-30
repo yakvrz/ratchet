@@ -345,9 +345,7 @@ class RatchetOptimizer:
         self._emit_progress("baseline_dev_started", case_count=len(dev_cases))
         baseline_dev = self.evaluate_candidate(baseline_candidate, dev_cases)
         self._emit_progress("baseline_dev_completed", **_summary_progress_fields(baseline_dev))
-        self._emit_progress("baseline_holdout_started", case_count=len(holdout_cases))
-        baseline_holdout = self.evaluate_candidate(baseline_candidate, holdout_cases)
-        self._emit_progress("baseline_holdout_completed", **_summary_progress_fields(baseline_holdout))
+        baseline_holdout: CandidateSummary | None = None
 
         accepted_dev_candidates: list[CandidateSummary] = []
         accepted_dev_ids: set[str] = set()
@@ -1054,13 +1052,22 @@ class RatchetOptimizer:
             )
             holdout_ready.append((dev_summary, runtime_diagnostic))
         if holdout_ready:
+            self._emit_progress(
+                "baseline_holdout_started",
+                case_count=len(holdout_cases),
+                reason="finalist_validation",
+            )
             holdout_summaries = self.evaluate_candidates(
-                [dev_summary.candidate for dev_summary, _ in holdout_ready],
+                [baseline_candidate, *[dev_summary.candidate for dev_summary, _ in holdout_ready]],
                 holdout_cases,
             )
+            baseline_holdout = holdout_summaries[compiled_candidate_id(baseline_candidate)]
+            self._emit_progress("baseline_holdout_completed", **_summary_progress_fields(baseline_holdout))
         else:
             holdout_summaries = {}
         for dev_summary, runtime_diagnostic in holdout_ready:
+            if baseline_holdout is None:
+                raise RuntimeError("baseline holdout must be measured before candidate holdout gating.")
             holdout_summary = holdout_summaries[dev_summary.candidate_id]
             holdout_candidates.append(holdout_summary)
             gate = final_gate_status(
@@ -1117,18 +1124,23 @@ class RatchetOptimizer:
             promoted = True
             selection_reason = str(frontier_recommendation.get("reason") or f"Promoted validated candidate for {self.objective.mode} objective.")
         else:
-            selected_holdout = baseline_holdout
             promoted = False
-            selection_reason = "No finalist cleared the holdout objective gate; kept original baseline."
+            selected_holdout = baseline_holdout
+            if baseline_holdout is None:
+                selection_reason = "No finalist reached holdout validation; kept original baseline."
+                recommended_candidate_id = baseline_dev.candidate_id
+            else:
+                selection_reason = "No finalist cleared the holdout objective gate; kept original baseline."
+                recommended_candidate_id = baseline_holdout.candidate_id
             frontier_recommendation = {
-                "recommended_candidate_id": selected_holdout.candidate_id,
-                "highest_quality_candidate_id": selected_holdout.candidate_id,
+                "recommended_candidate_id": recommended_candidate_id,
+                "highest_quality_candidate_id": recommended_candidate_id,
                 "reason": selection_reason,
                 "validated_candidate_count": 0,
             }
 
-        selected_candidate = selected_holdout.candidate
-        selected_candidate_id = selected_holdout.candidate_id
+        selected_candidate = selected_holdout.candidate if selected_holdout is not None else baseline_candidate
+        selected_candidate_id = selected_holdout.candidate_id if selected_holdout is not None else baseline_dev.candidate_id
         decision_log.append(
             {
                 "type": "final_selection",
@@ -1206,7 +1218,9 @@ class RatchetOptimizer:
             selected_holdout=selected_holdout,
             accepted_dev_candidates=accepted_dev_candidates,
             holdout_candidates=holdout_candidates,
-            pareto_frontier=pareto_frontier([baseline_holdout, *holdout_candidates]),
+            pareto_frontier=pareto_frontier([baseline_holdout, *holdout_candidates])
+            if baseline_holdout is not None
+            else [],
             decision_log=decision_log,
             diagnoses=diagnoses_log,
             proposals=proposals_log,

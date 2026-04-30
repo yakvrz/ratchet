@@ -14,6 +14,19 @@ from ratchet.transform_program import CompiledCandidate
 from ratchet.types import OptimizationObjective
 
 
+def _summary_dict(summary: CandidateSummary | None) -> dict[str, Any] | None:
+    return summary.to_dict() if summary is not None else None
+
+
+def _metric_text(summary: CandidateSummary | None, field: str, *, currency: bool = False) -> str:
+    if summary is None:
+        return "not measured"
+    value = float(getattr(summary, field))
+    if currency:
+        return f"${value:.6f}"
+    return f"{value:.3f}"
+
+
 def build_outcome_analysis(
     *,
     objective: OptimizationObjective,
@@ -152,7 +165,11 @@ class RatchetReporter:
         self.stats = stats
 
     def write_outputs(self, result: RatchetResult) -> None:
-        selected_comparison = compare_summaries(result.baseline_holdout, result.selected_holdout)
+        selected_comparison = (
+            compare_summaries(result.baseline_holdout, result.selected_holdout)
+            if result.baseline_holdout is not None and result.selected_holdout is not None
+            else None
+        )
         write_json(self.out_dir / "run_manifest.json", result.manifest)
         write_json(self.out_dir / "decision_log.json", result.decision_log)
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
@@ -164,9 +181,9 @@ class RatchetReporter:
             self.out_dir / "candidate_metrics.json",
             {
                 "baseline_dev": result.baseline_dev.to_dict(),
-                "baseline_holdout": result.baseline_holdout.to_dict(),
+                "baseline_holdout": _summary_dict(result.baseline_holdout),
                 "best_dev_candidate": result.best_dev_candidate.to_dict(),
-                "selected_holdout": result.selected_holdout.to_dict(),
+                "selected_holdout": _summary_dict(result.selected_holdout),
                 "accepted_dev_candidates": [summary.to_dict() for summary in result.accepted_dev_candidates],
                 "holdout_candidates": [summary.to_dict() for summary in result.holdout_candidates],
                 "pareto_frontier": result.pareto_frontier,
@@ -219,9 +236,11 @@ class RatchetReporter:
                 "ideation_metrics": result.ideation_metrics,
                 "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
-                "holdout_comparison_to_baseline": selected_comparison.to_dict(),
-                "baseline": result.baseline_holdout.to_dict(),
-                "selected": result.selected_holdout.to_dict(),
+                "holdout_comparison_to_baseline": selected_comparison.to_dict()
+                if selected_comparison is not None
+                else None,
+                "baseline": _summary_dict(result.baseline_holdout),
+                "selected": _summary_dict(result.selected_holdout),
             },
         )
         export_dir = self.out_dir / "exported_candidate"
@@ -232,8 +251,18 @@ class RatchetReporter:
 
     def _write_report(self, result: RatchetResult) -> None:
         changes = self._candidate_change_rows(result.selected_candidate)
-        comparison = compare_summaries(result.baseline_holdout, result.selected_holdout)
+        comparison = (
+            compare_summaries(result.baseline_holdout, result.selected_holdout)
+            if result.baseline_holdout is not None and result.selected_holdout is not None
+            else None
+        )
         transform_narrative = self._transform_narrative(result)
+        holdout_rows = self._holdout_comparison_rows(result, comparison)
+        samples_per_case = (
+            result.baseline_holdout.samples_per_case
+            if result.baseline_holdout is not None
+            else result.baseline_dev.samples_per_case
+        )
         lines = [
             "# Ratchet Report",
             "",
@@ -275,21 +304,11 @@ class RatchetReporter:
             "",
             "## Baseline vs Selected Holdout",
             "",
-            "| Metric | Baseline | Selected |",
-            "| --- | ---: | ---: |",
-            f"| Mean score | {result.baseline_holdout.mean_score:.3f} | {result.selected_holdout.mean_score:.3f} |",
-            f"| Pass count | {result.baseline_holdout.pass_count} | {result.selected_holdout.pass_count} |",
-            f"| Avg cost | ${result.baseline_holdout.mean_cost_usd:.6f} | ${result.selected_holdout.mean_cost_usd:.6f} |",
-            f"| Median latency | {result.baseline_holdout.median_latency_s:.2f}s | {result.selected_holdout.median_latency_s:.2f}s |",
-            f"| Samples | {result.baseline_holdout.sample_count} over {result.baseline_holdout.case_count} cases | {result.selected_holdout.sample_count} over {result.selected_holdout.case_count} cases |",
-            f"| Split-vote cases | {len(result.baseline_holdout.split_vote_case_ids)} | {len(result.selected_holdout.split_vote_case_ids)} |",
+            *holdout_rows,
             "",
             "## Holdout Uncertainty",
             "",
-            f"- Score delta: {comparison.score_delta:.4f} CI [{comparison.score_ci[0]:.4f}, {comparison.score_ci[1]:.4f}]",
-            f"- Cost delta: ${comparison.cost_delta:.6f} CI [${comparison.cost_ci[0]:.6f}, ${comparison.cost_ci[1]:.6f}]",
-            f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
-            f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
+            *self._holdout_uncertainty_rows(comparison),
             "",
             "## Selected Candidate",
             "",
@@ -391,7 +410,7 @@ class RatchetReporter:
             f"- Runtime errors: {self.stats.runtime_errors}",
             f"- Grader errors: {self.stats.grader_errors}",
             f"- Timeouts: {self.stats.timeouts}",
-            f"- Samples per case: {result.baseline_holdout.samples_per_case:g}",
+            f"- Samples per case: {samples_per_case:g}",
             f"- Proposal-safe train examples: {(result.manifest.get('proposal_example_bank') or {}).get('example_count', 0)}",
         ]
         (self.out_dir / "report.md").write_text("\n".join(lines) + "\n")
@@ -399,6 +418,9 @@ class RatchetReporter:
     def _write_summary_html(self, result: RatchetResult) -> None:
         rows = self._candidate_change_rows(result.selected_candidate)
         html_rows = "".join(f"<li>{escape(row)}</li>" for row in rows) or "<li>Original baseline kept.</li>"
+        baseline_score = _metric_text(result.baseline_holdout, "mean_score")
+        selected_score = _metric_text(result.selected_holdout, "mean_score")
+        selected_cost = _metric_text(result.selected_holdout, "mean_cost_usd", currency=True)
         html = f"""<!doctype html>
 <html>
 <head>
@@ -418,9 +440,9 @@ class RatchetReporter:
   <p>{escape(result.selection_reason)}</p>
   <p><strong>{escape(str(result.outcome_analysis['status']))}</strong>: {escape(str(result.outcome_analysis['summary']))}</p>
   <h2>Outcome</h2>
-  <div class="metric"><span>Baseline score</span><strong>{result.baseline_holdout.mean_score:.3f}</strong></div>
-  <div class="metric"><span>Selected score</span><strong>{result.selected_holdout.mean_score:.3f}</strong></div>
-  <div class="metric"><span>Selected cost</span><strong>${result.selected_holdout.mean_cost_usd:.6f}</strong></div>
+  <div class="metric"><span>Baseline holdout score</span><strong>{baseline_score}</strong></div>
+  <div class="metric"><span>Selected holdout score</span><strong>{selected_score}</strong></div>
+  <div class="metric"><span>Selected holdout cost</span><strong>{selected_cost}</strong></div>
   <h2>What Changed</h2>
   <ul>{html_rows}</ul>
   <h2>Progress</h2>
@@ -438,7 +460,46 @@ class RatchetReporter:
         self._write_progress_svg(plots / "progress.svg", result)
         self._write_progress_svg(plots / "efficiency_progress.svg", result)
 
+    @staticmethod
+    def _holdout_comparison_rows(result: RatchetResult, comparison: Any | None) -> list[str]:
+        if result.baseline_holdout is None or result.selected_holdout is None or comparison is None:
+            return ["Holdout was not measured because no candidate reached final validation."]
+        return [
+            "| Metric | Baseline | Selected |",
+            "| --- | ---: | ---: |",
+            f"| Mean score | {result.baseline_holdout.mean_score:.3f} | {result.selected_holdout.mean_score:.3f} |",
+            f"| Pass count | {result.baseline_holdout.pass_count} | {result.selected_holdout.pass_count} |",
+            f"| Avg cost | ${result.baseline_holdout.mean_cost_usd:.6f} | ${result.selected_holdout.mean_cost_usd:.6f} |",
+            f"| Median latency | {result.baseline_holdout.median_latency_s:.2f}s | {result.selected_holdout.median_latency_s:.2f}s |",
+            f"| Samples | {result.baseline_holdout.sample_count} over {result.baseline_holdout.case_count} cases | {result.selected_holdout.sample_count} over {result.selected_holdout.case_count} cases |",
+            f"| Split-vote cases | {len(result.baseline_holdout.split_vote_case_ids)} | {len(result.selected_holdout.split_vote_case_ids)} |",
+        ]
+
+    @staticmethod
+    def _holdout_uncertainty_rows(comparison: Any | None) -> list[str]:
+        if comparison is None:
+            return ["Holdout uncertainty was not computed."]
+        return [
+            f"- Score delta: {comparison.score_delta:.4f} CI [{comparison.score_ci[0]:.4f}, {comparison.score_ci[1]:.4f}]",
+            f"- Cost delta: ${comparison.cost_delta:.6f} CI [${comparison.cost_ci[0]:.6f}, ${comparison.cost_ci[1]:.6f}]",
+            f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
+            f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
+        ]
+
     def _write_scorecard_svg(self, path: Path, result: RatchetResult) -> None:
+        if result.baseline_holdout is None or result.selected_holdout is None:
+            path.write_text(
+                "\n".join(
+                    [
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180">',
+                        '<rect width="100%" height="100%" fill="#ffffff"/>',
+                        '<text x="32" y="36" font-size="22" font-family="Arial">Holdout not measured</text>',
+                        '<text x="32" y="78" font-size="14" font-family="Arial">No candidate reached final holdout validation.</text>',
+                        "</svg>",
+                    ]
+                )
+            )
+            return
         metrics = [
             ("Score", result.baseline_holdout.mean_score, result.selected_holdout.mean_score),
             ("Cost", result.baseline_holdout.mean_cost_usd, result.selected_holdout.mean_cost_usd),

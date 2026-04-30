@@ -169,12 +169,12 @@ def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) ->
     eval_output_tokens = 0
     eval_total_tokens = 0
     eval_count = 0
-    for summary in [
+    for summary in _present_summaries([
         result.baseline_dev,
         result.baseline_holdout,
         *result.accepted_dev_candidates,
         *result.holdout_candidates,
-    ]:
+    ]):
         for evaluation in summary.evaluations:
             key = (summary.candidate_id, evaluation.case.id, evaluation.sample_index)
             if key in seen_evaluations:
@@ -342,7 +342,7 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
         "accepted_dev": result.accepted_dev_candidates,
         "holdout": result.holdout_candidates,
     }.items():
-        for summary in summaries:
+        for summary in _present_summaries(summaries):
             for evaluation in summary.evaluations:
                 metrics = evaluation.record.metrics
                 rows.append(
@@ -362,7 +362,9 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
 
 
 def _candidate_profiles(result: RatchetResult) -> list[dict[str, Any]]:
-    summaries = [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_candidates, *result.holdout_candidates]
+    summaries = _present_summaries(
+        [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_candidates, *result.holdout_candidates]
+    )
     seen: set[tuple[str, str]] = set()
     rows = []
     for summary in summaries:
@@ -388,10 +390,10 @@ def _candidate_profiles(result: RatchetResult) -> list[dict[str, Any]]:
 
 def _candidate_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for split_name, baseline, summaries in [
-        ("dev", result.baseline_dev, result.accepted_dev_candidates),
-        ("holdout", result.baseline_holdout, result.holdout_candidates),
-    ]:
+    split_groups = [("dev", result.baseline_dev, result.accepted_dev_candidates)]
+    if result.baseline_holdout is not None:
+        split_groups.append(("holdout", result.baseline_holdout, result.holdout_candidates))
+    for split_name, baseline, summaries in split_groups:
         for summary in summaries:
             if set(summary.grouped_evaluations) != set(baseline.grouped_evaluations):
                 continue
@@ -411,6 +413,10 @@ def _candidate_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]
                 }
             )
     return rows
+
+
+def _present_summaries(summaries: list[CandidateSummary | None]) -> list[CandidateSummary]:
+    return [summary for summary in summaries if summary is not None]
 
 
 def _cache_hit_rate(rows: list[dict[str, Any]]) -> float:
