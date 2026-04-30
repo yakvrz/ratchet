@@ -87,10 +87,6 @@ SEARCH_FRONTIER_WIDTH = 1
 PROPOSAL_RETRY_BUDGET = 1
 FINALIST_CONFIRMATION_SAMPLES = 1
 FRONTIER_PARENT_STALL_LIMIT = 2
-MAX_SIMPLIFICATION_VARIANTS_PER_FINALIST = 0
-MAX_SIMPLIFICATION_PARENT_COUNT = 0
-MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT = 0
-MAX_SIMPLIFICATION_FULL_DEV_PER_RUN = 0
 MIN_REMAINING_DEV_EVALS_FOR_NEW_ROUND = 2
 MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 1
@@ -267,6 +263,11 @@ class RatchetOptimizer:
         self.stage_case_concurrency = stage_case_concurrency or case_concurrency
         self.max_case_retries = max_case_retries
         self.case_timeout_s = case_timeout_s
+        if self.case_timeout_s > 0 and (self.case_concurrency > 1 or self.stage_case_concurrency > 1):
+            raise ValueError(
+                "case_timeout_s requires serial case execution; set case_timeout_s=0 to use "
+                "case_concurrency or stage_case_concurrency above 1."
+            )
         self.fail_fast = fail_fast
         if expensive_candidate_cost_ratio <= 0:
             raise ValueError("expensive_candidate_cost_ratio must be positive.")
@@ -880,17 +881,6 @@ class RatchetOptimizer:
             key=lambda summary: objective_sort_key(summary, self.objective),
         )[: self.holdout_budget]
         simplification_results: list[dict[str, Any]] = []
-        if finalist_dev_candidates:
-            finalist_dev_candidates = self._augment_finalists_with_simplifications(
-                finalist_dev_candidates=finalist_dev_candidates,
-                accepted_dev_candidates=accepted_dev_candidates,
-                accepted_dev_ids=accepted_dev_ids,
-                evaluated_candidate_ids=evaluated_candidate_ids,
-                baseline_dev=baseline_dev,
-                dev_cases=dev_cases,
-                decision_log=decision_log,
-                simplification_results=simplification_results,
-            )
 
         holdout_candidates: list[CandidateSummary] = []
         finalist_statuses: list[dict[str, Any]] = []
@@ -1249,201 +1239,6 @@ class RatchetOptimizer:
         self.write_outputs(result)
         return result
 
-    def _augment_finalists_with_simplifications(
-        self,
-        *,
-        finalist_dev_candidates: list[CandidateSummary],
-        accepted_dev_candidates: list[CandidateSummary],
-        accepted_dev_ids: set[str],
-        evaluated_candidate_ids: set[str],
-        baseline_dev: CandidateSummary,
-        dev_cases: tuple[EvalCase, ...],
-        decision_log: list[dict[str, Any]],
-        simplification_results: list[dict[str, Any]],
-    ) -> list[CandidateSummary]:
-        known_by_id = {summary.candidate_id: summary for summary in [baseline_dev, *accepted_dev_candidates]}
-        augmented_by_id = {summary.candidate_id: summary for summary in finalist_dev_candidates}
-        simplification_parents = list(finalist_dev_candidates)[:MAX_SIMPLIFICATION_PARENT_COUNT]
-        for skipped_parent in list(finalist_dev_candidates)[MAX_SIMPLIFICATION_PARENT_COUNT:]:
-            row = {
-                "type": "simplification_skipped",
-                "parent_candidate_id": skipped_parent.candidate_id,
-                "reason": "simplification parent cap reached",
-                "max_simplification_parent_count": MAX_SIMPLIFICATION_PARENT_COUNT,
-            }
-            simplification_results.append(row)
-            decision_log.append(row)
-        simplification_full_dev_count = 0
-        for parent_index, parent in enumerate(simplification_parents, start=1):
-            parent_full_dev_count = 0
-            candidate_variants: list[CompiledCandidate] = []
-            selected_variant_hashes = {compiled_candidate_id(variant) for variant in candidate_variants}
-            skipped_variant_reasons: dict[str, str] = {}
-            for variant in candidate_variants:
-                digest = compiled_candidate_id(variant)
-                if digest not in selected_variant_hashes:
-                    row = {
-                        "type": "simplification_skipped",
-                        "parent_candidate_id": parent.candidate_id,
-                        "candidate_id": digest,
-                        "candidate": variant.to_dict(),
-                        "simplification": variant.metadata.get("simplification"),
-                        "reason": skipped_variant_reasons.get(
-                            digest,
-                            "research controller did not select simplification variant",
-                        ),
-                    }
-                    simplification_results.append(row)
-                    decision_log.append(row)
-                    continue
-                summary = known_by_id.get(digest)
-                reused = summary is not None
-                if summary is None:
-                    if digest in evaluated_candidate_ids:
-                        continue
-                    self._emit_progress(
-                        "simplification_started",
-                        parent_candidate_id=parent.candidate_id,
-                        candidate_id=digest,
-                        simplification=variant.metadata.get("simplification"),
-                    )
-                    summary, rejection_reason, stage_rows = self._evaluate_simplification_variant(
-                        candidate=variant,
-                        parent=parent,
-                        baseline=baseline_dev,
-                        dev_cases=dev_cases,
-                        allow_full_dev=(
-                            parent_full_dev_count < MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT
-                            and simplification_full_dev_count < MAX_SIMPLIFICATION_FULL_DEV_PER_RUN
-                        ),
-                    )
-                    reached_full_dev = any(row.get("stage") == "full_dev" for row in stage_rows)
-                    if reached_full_dev:
-                        parent_full_dev_count += 1
-                        simplification_full_dev_count += 1
-                    evaluated_candidate_ids.add(digest)
-                    known_by_id[digest] = summary
-                else:
-                    rejection_reason = None
-                    stage_rows = []
-                summary_cases = tuple(evaluation.case for evaluation in summary.evaluations)
-                comparable_baseline = _summary_for_cases(baseline_dev, summary_cases) or baseline_dev
-                comparable_parent = _summary_for_cases(parent, summary_cases) or parent
-                comparison_to_baseline = compare_summaries(comparable_baseline, summary)
-                comparison_to_parent = compare_summaries(comparable_parent, summary)
-                if rejection_reason is None:
-                    rejection_reason = candidate_rejection_reason(
-                        baseline=baseline_dev,
-                        reference=baseline_dev,
-                        candidate_summary=summary,
-                        objective=self.objective,
-                    )
-                accepted = rejection_reason is None
-                row = {
-                    "type": "simplification_evaluation",
-                    "parent_candidate_id": parent.candidate_id,
-                    "candidate_id": digest,
-                    "candidate": variant.to_dict(),
-                    "simplification": variant.metadata.get("simplification"),
-                    "reused_existing_summary": reused,
-                    "accepted": accepted,
-                    "rejection_reason": rejection_reason,
-                    "evaluation_stages": stage_rows,
-                    "metrics": summary.to_dict(),
-                    "comparison_to_baseline": comparison_to_baseline.to_dict(),
-                    "comparison_to_parent": comparison_to_parent.to_dict(),
-                }
-                simplification_results.append(row)
-                decision_log.append(row)
-                self._emit_progress(
-                    "simplification_completed",
-                    parent_candidate_id=parent.candidate_id,
-                    variant_candidate_id=digest,
-                    accepted=accepted,
-                    rejection_reason=rejection_reason,
-                    **_summary_progress_fields(summary),
-                )
-                if accepted:
-                    augmented_by_id.setdefault(digest, summary)
-                    if digest not in accepted_dev_ids:
-                        accepted_dev_ids.add(digest)
-                        accepted_dev_candidates.append(summary)
-        return sorted(
-            augmented_by_id.values(),
-            key=lambda summary: objective_sort_key(summary, self.objective),
-        )[: self.holdout_budget]
-
-    def _evaluate_simplification_variant(
-        self,
-        *,
-        candidate: CompiledCandidate,
-        parent: CandidateSummary,
-        baseline: CandidateSummary,
-        dev_cases: tuple[EvalCase, ...],
-        allow_full_dev: bool = True,
-    ) -> tuple[CandidateSummary, str | None, list[dict[str, Any]]]:
-        stage_rows: list[dict[str, Any]] = []
-        latest_summary: CandidateSummary | None = None
-        latest_rejection: str | None = None
-        for stage_name, stage_cases in self._progressive_eval_stages(parent, dev_cases):
-            if stage_name == "full_dev" and not allow_full_dev and latest_summary is not None:
-                return (
-                    latest_summary,
-                    (
-                        "simplification_full_dev_cap: screened out before full_dev "
-                        f"(max {MAX_SIMPLIFICATION_FULL_DEV_PER_PARENT} per parent, "
-                        f"{MAX_SIMPLIFICATION_FULL_DEV_PER_RUN} per run)"
-                    ),
-                    stage_rows,
-                )
-            parent_stage = _summary_for_cases(parent, stage_cases) or self.evaluate_candidate(parent.candidate, stage_cases)
-            baseline_stage = _summary_for_cases(baseline, stage_cases) or self.evaluate_candidate(baseline.candidate, stage_cases)
-            candidate_stage = self.evaluate_candidate(candidate, stage_cases)
-            latest_summary = candidate_stage
-            comparison_to_parent = compare_summaries(parent_stage, candidate_stage)
-            comparison_to_baseline = compare_summaries(baseline_stage, candidate_stage)
-            flip_summary = behavior_flip_summary(baseline_stage, candidate_stage)
-            if stage_name == "smoke":
-                rejection = _smoke_rejection_reason(parent_stage, candidate_stage)
-            else:
-                rejection = candidate_rejection_reason(
-                    baseline=baseline_stage,
-                    reference=baseline_stage,
-                    candidate_summary=candidate_stage,
-                    objective=self.objective,
-                )
-            latest_rejection = rejection
-            stage_rows.append(
-                {
-                    "stage": stage_name,
-                    "case_ids": [case.id for case in stage_cases],
-                    "case_count": len(stage_cases),
-                    "candidate_id": candidate_stage.candidate_id,
-                    "metrics": candidate_stage.to_dict(),
-                    "comparison_to_parent": comparison_to_parent.to_dict(),
-                    "comparison_to_baseline": comparison_to_baseline.to_dict(),
-                    "behavior_flip_summary": flip_summary,
-                    "rejection_reason": rejection,
-                    "passed": rejection is None,
-                }
-            )
-            if rejection is not None:
-                return candidate_stage, f"simplification {stage_name} gate rejected variant: {rejection}", stage_rows
-            if stage_name == "small_dev" and candidate_stage.pass_count < parent_stage.pass_count:
-                return (
-                    candidate_stage,
-                    (
-                        "simplification small_dev gate rejected variant: "
-                        f"pass count regressed versus parent ({candidate_stage.pass_count} < {parent_stage.pass_count})"
-                    ),
-                    stage_rows,
-                )
-            if stage_name == "full_dev":
-                return candidate_stage, None, stage_rows
-        if latest_summary is None:
-            latest_summary = self.evaluate_candidate(candidate, dev_cases)
-        return latest_summary, latest_rejection, stage_rows
-
     def _build_research_theory(
         self,
         *,
@@ -1716,7 +1511,7 @@ class RatchetOptimizer:
             attempt=attempt,
             parent_index=parent_index,
         )
-        evaluations_used = len(evaluation_states)
+        evaluations_used = sum(1 for state in evaluation_states if state.summary is not None)
         for state in evaluation_states:
             candidate = state.proposal
             summary = state.summary
@@ -1734,7 +1529,7 @@ class RatchetOptimizer:
                 "parent_candidate_id": current_dev.candidate_id,
                 "proposal_candidate_id": state.proposal_candidate_id,
                 "proposal": candidate.program.to_dict(),
-                "candidate": candidate.to_dict(),
+                "proposal_candidate": candidate.to_dict(),
                 "materialization": materialization_by_proposal_hash.get(state.proposal_candidate_id, {}),
                 "applications": [application.to_dict() for application in candidate.applications],
                 "affordance_ids": list(candidate.affordance_ids),
@@ -1760,6 +1555,7 @@ class RatchetOptimizer:
                     record.to_dict() for record in evidence_ledger.by_candidate(state.candidate_id)
                 ],
                 "candidate_id": state.candidate_id,
+                "compiled_candidate": state.compiled_candidate.to_dict(),
                 "candidate": state.compiled_candidate.to_dict(),
                 "comparison_to_parent": comparison.to_dict(),
                 "behavior_flip_summary": flip_summary,
@@ -1923,6 +1719,15 @@ class RatchetOptimizer:
         for stage_name, stage_cases in self._progressive_eval_stages(reference, dev_cases):
             if not active:
                 break
+            active = self._filter_candidate_stage_by_measurement_budget(
+                active,
+                reference=reference,
+                stage_name=stage_name,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+            )
+            if not active:
+                break
             if stage_name == "full_dev":
                 if _has_evidence_for_selector(evidence_ledger, active):
                     active = self._select_candidate_stage_with_measurement_selector(
@@ -2063,6 +1868,81 @@ class RatchetOptimizer:
             state.rejection_reason = "budget_not_worth_information"
             state.frontier_status = "screened_out"
             state.accepted = False
+
+    def _filter_candidate_stage_by_measurement_budget(
+        self,
+        states: list[CandidateEvaluationState],
+        *,
+        reference: CandidateSummary,
+        stage_name: str,
+        stage_cases: tuple[EvalCase, ...],
+        evidence_ledger: EvidenceLedger,
+    ) -> list[CandidateEvaluationState]:
+        kept: list[CandidateEvaluationState] = []
+        selected_measurement_cost = 0.0
+        selected_measurement_tool_calls = 0.0
+        selected_measurement_turns = 0.0
+        for state in states:
+            marginal_case_count = _marginal_case_count(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+            )
+            marginal_cost = _estimated_marginal_measurement_cost_usd(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+                reference=reference,
+            )
+            marginal_tool_calls = _estimated_marginal_measurement_units(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+                unit="tool_calls",
+                reference=reference,
+            )
+            marginal_turns = _estimated_marginal_measurement_units(
+                state=state,
+                stage_cases=stage_cases,
+                evidence_ledger=evidence_ledger,
+                samples_per_case=self.samples_per_case,
+                unit="turns",
+                reference=reference,
+            )
+            budget_reason = _measurement_budget_reason(
+                used_usd=self._dev_measurement_cost_usd + selected_measurement_cost,
+                marginal_usd=marginal_cost,
+                max_usd=self.max_dev_measurement_cost_usd,
+                used_tool_calls=self._dev_measurement_tool_calls + selected_measurement_tool_calls,
+                marginal_tool_calls=marginal_tool_calls,
+                max_tool_calls=self.max_dev_measurement_tool_calls,
+                used_turns=self._dev_measurement_turns + selected_measurement_turns,
+                marginal_turns=marginal_turns,
+                max_turns=self.max_dev_measurement_turns,
+                stage=stage_name,
+            )
+            if budget_reason is None and marginal_case_count > 0:
+                budget_reason = _closed_measurement_budget_reason(
+                    used_usd=self._dev_measurement_cost_usd + selected_measurement_cost,
+                    max_usd=self.max_dev_measurement_cost_usd,
+                    used_tool_calls=self._dev_measurement_tool_calls + selected_measurement_tool_calls,
+                    max_tool_calls=self.max_dev_measurement_tool_calls,
+                    used_turns=self._dev_measurement_turns + selected_measurement_turns,
+                    max_turns=self.max_dev_measurement_turns,
+                    stage=stage_name,
+            )
+            if budget_reason is not None:
+                state.rejection_reason = f"measurement_budget_exhausted: {budget_reason}"
+                state.frontier_status = "screened_out"
+                state.accepted = False
+                continue
+            selected_measurement_cost += marginal_cost
+            selected_measurement_tool_calls += marginal_tool_calls
+            selected_measurement_turns += marginal_turns
+            kept.append(state)
+        return kept
 
     def _select_candidate_stage_with_measurement_selector(
         self,
@@ -3508,13 +3388,17 @@ def _estimated_marginal_measurement_cost_usd(
     stage_cases: tuple[EvalCase, ...],
     evidence_ledger: EvidenceLedger,
     samples_per_case: int,
+    reference: CandidateSummary | None = None,
 ) -> float:
-    if state.summary is None:
+    summary = state.summary or reference
+    if summary is None:
         return 0.0
-    latest = evidence_ledger.latest(state.candidate_id)
-    previously_measured = set(latest.case_ids) if latest is not None else set()
-    marginal_case_count = sum(1 for case in stage_cases if case.id not in previously_measured)
-    return max(0.0, state.summary.mean_cost_usd * marginal_case_count * max(1, samples_per_case))
+    marginal_case_count = _marginal_case_count(
+        state=state,
+        stage_cases=stage_cases,
+        evidence_ledger=evidence_ledger,
+    )
+    return max(0.0, summary.mean_cost_usd * marginal_case_count * max(1, samples_per_case))
 
 
 def _estimated_marginal_measurement_units(
@@ -3524,20 +3408,35 @@ def _estimated_marginal_measurement_units(
     evidence_ledger: EvidenceLedger,
     samples_per_case: int,
     unit: str,
+    reference: CandidateSummary | None = None,
 ) -> float:
-    if state.summary is None:
+    summary = state.summary or reference
+    if summary is None:
         return 0.0
-    latest = evidence_ledger.latest(state.candidate_id)
-    previously_measured = set(latest.case_ids) if latest is not None else set()
-    marginal_case_count = sum(1 for case in stage_cases if case.id not in previously_measured)
+    marginal_case_count = _marginal_case_count(
+        state=state,
+        stage_cases=stage_cases,
+        evidence_ledger=evidence_ledger,
+    )
     multiplier = max(1, samples_per_case) * marginal_case_count
     if unit == "model_calls":
-        return max(0.0, state.summary.mean_model_calls * multiplier)
+        return max(0.0, summary.mean_model_calls * multiplier)
     if unit == "tool_calls":
-        return max(0.0, state.summary.mean_tool_calls * multiplier)
+        return max(0.0, summary.mean_tool_calls * multiplier)
     if unit == "turns":
-        return max(0.0, state.summary.mean_turns * multiplier)
+        return max(0.0, summary.mean_turns * multiplier)
     raise ValueError(f"Unsupported marginal measurement unit: {unit}")
+
+
+def _marginal_case_count(
+    *,
+    state: CandidateEvaluationState,
+    stage_cases: tuple[EvalCase, ...],
+    evidence_ledger: EvidenceLedger,
+) -> int:
+    latest = evidence_ledger.latest(state.candidate_id)
+    previously_measured = set(latest.case_ids) if latest is not None else set()
+    return sum(1 for case in stage_cases if case.id not in previously_measured)
 
 
 def _measurement_budget_exhausted(
@@ -3582,6 +3481,25 @@ def _measurement_budget_reason(
     return None
 
 
+def _closed_measurement_budget_reason(
+    *,
+    used_usd: float,
+    max_usd: float | None,
+    used_tool_calls: float,
+    max_tool_calls: int | None,
+    used_turns: float,
+    max_turns: int | None,
+    stage: str,
+) -> str | None:
+    if max_usd is not None and used_usd >= max_usd - 1e-12:
+        return f"no remaining measurement dollar budget for {stage}"
+    if max_tool_calls is not None and used_tool_calls >= max_tool_calls - 1e-12:
+        return f"no remaining measurement tool-call budget for {stage}"
+    if max_turns is not None and used_turns >= max_turns - 1e-12:
+        return f"no remaining measurement turn budget for {stage}"
+    return None
+
+
 def _safe_ratio(numerator: float, denominator: float) -> float | None:
     if denominator <= 0:
         return None
@@ -3620,10 +3538,6 @@ def _touches_output_or_runtime(candidate: CompiledCandidate | None) -> bool:
         if target == "output_contract" or target.startswith("output"):
             return True
     return False
-
-
-def _simplification_variants(patch: CompiledCandidate | None) -> list[CompiledCandidate]:
-    return []
 
 
 def _transform_lineage_families(candidate_id_value: str, proposals: list[dict[str, Any]]) -> list[str]:

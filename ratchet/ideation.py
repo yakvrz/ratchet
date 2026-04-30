@@ -50,9 +50,9 @@ def build_ideation_metrics(
             stage_counts["unstable_confirmation"] += 1
     intent_ids = {str(intent.get("intent_id")) for intent in intents if intent.get("intent_id")}
     implemented_intent_ids = {
-        str((row.get("candidate") or {}).get("experiment_id") or row.get("experiment_id"))
+        str(_proposal_candidate(row).get("experiment_id") or row.get("experiment_id"))
         for row in valid_rows
-        if (row.get("candidate") or {}).get("experiment_id") or row.get("experiment_id")
+        if _proposal_candidate(row).get("experiment_id") or row.get("experiment_id")
     }
     mechanism_counts = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
     family_counts = Counter(str(row.get("transform_family") or "unknown") for row in valid_rows)
@@ -62,7 +62,7 @@ def build_ideation_metrics(
         rows = [
             row
             for row in proposal_rows
-            if str((row.get("candidate") or {}).get("experiment_id") or row.get("experiment_id")) == intent_id
+            if str(_proposal_candidate(row).get("experiment_id") or row.get("experiment_id")) == intent_id
         ]
         by_intent[intent_id] = {
             "candidate_count": len(rows),
@@ -112,7 +112,18 @@ def _discovery_stage(row: dict[str, Any]) -> str:
 def _is_candidate_row(row: dict[str, Any]) -> bool:
     if row.get("type") == "candidate_proposal":
         return True
-    return bool(row.get("candidate") and (row.get("transform_family") or row.get("mechanism_class")))
+    return bool(
+        (row.get("proposal_candidate") or row.get("compiled_candidate") or row.get("candidate"))
+        and (row.get("transform_family") or row.get("mechanism_class"))
+    )
+
+
+def _proposal_candidate(row: dict[str, Any]) -> dict[str, Any]:
+    candidate = row.get("proposal_candidate")
+    if isinstance(candidate, dict):
+        return candidate
+    candidate = row.get("candidate")
+    return candidate if isinstance(candidate, dict) else {}
 
 
 def _best_intent_stage(rows: list[dict[str, Any]]) -> str:

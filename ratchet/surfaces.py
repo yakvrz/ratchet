@@ -256,7 +256,7 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
             )
         )
     if surface.response.draft_response_interception_allowed:
-        response_ops = ["validate", "validate_claims", "extract_claims"]
+        response_ops = ["validate", "validate_claims"]
         if surface.response.response_rewrite_allowed:
             response_ops.append("rewrite_response")
         if surface.response.response_blocking_allowed:
@@ -450,7 +450,6 @@ def surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
             "before_user_response",
             ("state", "draft_response", "message_history"),
             (
-                "extract_claims",
                 "validate",
                 "validate_claims",
                 "rewrite_response",
@@ -579,7 +578,6 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
             "before_user_response",
             ("state", "draft_response", "message_history"),
             (
-                "extract_claims",
                 "validate",
                 "validate_claims",
                 "rewrite_response",

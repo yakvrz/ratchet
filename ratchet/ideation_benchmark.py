@@ -156,7 +156,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 def _is_candidate_row(row: dict[str, Any]) -> bool:
     if row.get("type") == "candidate_proposal":
         return True
-    return bool(row.get("candidate") and (row.get("transform_family") or row.get("mechanism_class")))
+    return bool(
+        (row.get("proposal_candidate") or row.get("compiled_candidate") or row.get("candidate"))
+        and (row.get("transform_family") or row.get("mechanism_class"))
+    )
 
 
 def _opportunity_mechanisms(task_theories: list[dict[str, Any]]) -> set[str]:

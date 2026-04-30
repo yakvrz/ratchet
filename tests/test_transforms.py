@@ -1,12 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 
+from ratchet.context_graph import ContextGraph
+from ratchet.runtime import RuntimeContext, TransformRuntime
 from ratchet.results import CaseEvaluation, CandidateSummary
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
-from ratchet.transforms import build_search_hypothesis
+from ratchet.transforms import (
+    CandidateAffordanceApplication,
+    CandidateProposal,
+    TransformContextKey,
+    TransformContextState,
+    build_search_hypothesis,
+    validate_candidate_transform,
+)
 from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
@@ -32,6 +42,32 @@ def _summary(labels: list[list[str]]) -> CandidateSummary:
             )
         )
     return CandidateSummary(candidate_id="baseline", candidate=None, split="dev", evaluations=evaluations)
+
+
+def _context_candidate() -> CandidateProposal:
+    return CandidateProposal(
+        program=TransformProgram.from_dict(
+            {
+                "candidate_id": "context",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "add_context_section",
+                        "section": "extra_rule",
+                        "content": "Answer with the requested format.",
+                    }
+                ],
+            }
+        ),
+        applications=[
+            CandidateAffordanceApplication(
+                affordance_id="surface.surface_context.system_prompt",
+                rationale="extra_rule",
+            )
+        ],
+        experiment_id="intent-1",
+        hypothesis="Add a concise formatting rule.",
+    )
 
 
 class TransformLibraryTests(unittest.TestCase):
@@ -155,6 +191,114 @@ class TransformLibraryTests(unittest.TestCase):
 
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "validation_checks_required")
+
+    def test_candidate_validation_rejects_inactive_surface_family(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
+        )
+        hypothesis = build_search_hypothesis(
+            summary=_summary([["wrong_label"], []]),
+            surface=surface,
+            objective=OptimizationObjective(),
+            history=[],
+        )
+        family_state = hypothesis.family_states["surface_context"]
+        paused_hypothesis = replace(
+            hypothesis,
+            family_states={
+                **hypothesis.family_states,
+                "surface_context": replace(family_state, state="paused"),
+            },
+        )
+
+        error = validate_candidate_transform(
+            _context_candidate(),
+            surface=surface,
+            search_hypothesis=paused_hypothesis,
+        )
+
+        self.assertEqual(error, "inactive surface mechanism 'surface_context'")
+
+    def test_candidate_validation_rejects_constrained_exact_context(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", instructions={"system_prompt": "Answer."})
+        )
+        hypothesis = build_search_hypothesis(
+            summary=_summary([["wrong_label"], []]),
+            surface=surface,
+            objective=OptimizationObjective(),
+            history=[],
+        )
+        candidate = _context_candidate()
+        context_key = TransformContextKey.from_candidate(candidate)
+        constrained_hypothesis = replace(
+            hypothesis,
+            context_states={
+                **hypothesis.context_states,
+                context_key.id: TransformContextState(
+                    key=context_key,
+                    state="constrained",
+                    suitability=0.8,
+                    reason="Previous near-duplicate failed.",
+                ),
+            },
+        )
+
+        error = validate_candidate_transform(
+            candidate,
+            surface=surface,
+            search_hypothesis=constrained_hypothesis,
+        )
+
+        self.assertIn("constrained transform context", str(error))
+
+    def test_generated_surface_no_longer_compiles_extract_claims(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "claims",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "extract_claims",
+                        "target": "draft_response",
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "unsupported_operation")
+
+    def test_runtime_resolves_trace_reference_at_task_end(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "trace-ref",
+                    "patches": [
+                        {
+                            "hook": "on_task_end",
+                            "op": "trace_annotation",
+                            "fields": {"prior": {"$ref": "trace"}},
+                        }
+                    ],
+                }
+            ),
+            surface,
+        )
+        ctx = RuntimeContext(
+            case=EvalCase(id="case-1", split="dev", input="x"),
+            context=ContextGraph(),
+            model_config={},
+            trace_annotations=[{"hook": "before_user_response", "op": "rewrite_response"}],
+        )
+
+        TransformRuntime(candidate).run_hook("on_task_end", ctx)
+
+        self.assertEqual(ctx.trace_annotations[-1]["fields"]["prior"][0]["op"], "rewrite_response")
 
 
 if __name__ == "__main__":

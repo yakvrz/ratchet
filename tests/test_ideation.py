@@ -22,7 +22,9 @@ class IdeationMetricsTests(unittest.TestCase):
             ],
             proposals=[
                 {
-                    "candidate": {"experiment_id": "intent_1"},
+                    "proposal_candidate": {"experiment_id": "intent_1"},
+                    "compiled_candidate": {"program": {"candidate_id": "compiled"}},
+                    "candidate": {"program": {"candidate_id": "compiled"}},
                     "transform_family": "surface_context",
                     "mechanism_class": "surface_context",
                     "accepted": True,

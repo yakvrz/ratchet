@@ -221,7 +221,9 @@ def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, An
                 "rejection_reason": reason,
                 "comparison_to_parent": row.get("comparison_to_parent"),
                 "metrics": _compact_metrics(row.get("metrics") or {}),
-                "candidate": row.get("candidate"),
+                "proposal_candidate": row.get("proposal_candidate"),
+                "compiled_candidate": row.get("compiled_candidate"),
+                "candidate": row.get("compiled_candidate") or row.get("candidate"),
             }
         )
     return rows

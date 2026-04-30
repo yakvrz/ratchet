@@ -239,6 +239,8 @@ def _resolve_ref(ref: str, ctx: RuntimeContext) -> Any:
         current = ctx.draft_response
     elif root == "output":
         current = ctx.output
+    elif root == "trace":
+        current = ctx.trace_annotations
     else:
         raise KeyError(f"Unknown runtime reference root {root!r}.")
     for part in parts[1:]:

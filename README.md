@@ -225,6 +225,7 @@ min_correctness_delta = 0.0 # optional; defaults to strict improvement for corre
 
 Relative paths in `ratchet.toml` are resolved relative to the config file itself.
 Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and candidate case with separate cache entries and aggregates case outcomes by majority vote / mean score.
+Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1` and `stage_case_concurrency = 1` when `case_timeout_s > 0`; set `case_timeout_s = 0` for threaded case concurrency.
 
 `max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. Interactive runs can also set tool-call and turn ceilings. These are separate from deployed-policy constraints: an expensive or long-horizon candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed configured measurement budgets.
 

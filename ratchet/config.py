@@ -199,6 +199,12 @@ class RatchetRunConfig:
             raise RatchetConfigError("case_concurrency must be positive.")
         if self.stage_case_concurrency is not None and self.stage_case_concurrency <= 0:
             raise RatchetConfigError("stage_case_concurrency must be positive when set.")
+        effective_stage_concurrency = self.stage_case_concurrency or self.case_concurrency
+        if self.case_timeout_s > 0 and (self.case_concurrency > 1 or effective_stage_concurrency > 1):
+            raise RatchetConfigError(
+                "case_timeout_s requires serial case execution; set case_timeout_s = 0 to use "
+                "case_concurrency or stage_case_concurrency above 1."
+            )
         for name in ("max_dev_measurement_cost_usd", "max_holdout_measurement_cost_usd"):
             value = getattr(self, name)
             if value is not None and value < 0:

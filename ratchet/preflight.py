@@ -128,7 +128,7 @@ def run_preflight_check(
         )
 
     stability = _stability_summary(adapter, sample_cases, first_pass=first_pass)
-    materialization = _materialization_audit(adapter, surface)
+    materialization = _materialization_audit(adapter, surface, sample_case=sample_cases[0])
     optimizer_model_access = (
         validate_optimizer_model_access(
             env_path=optimizer_env_path,
@@ -158,11 +158,20 @@ def run_preflight_check(
 def _materialization_audit(
     adapter: AdapterProtocol,
     surface: SurfaceSpec,
+    *,
+    sample_case: EvalCase,
 ) -> dict[str, Any]:
     compiler = TransformCompiler()
     raw_programs = _sentinel_transform_programs(surface)
-    if not raw_programs:
-        return {"checked": False, "verified_surfaces": [], "skipped_surfaces": [], "checks": []}
+    execution_programs = _sentinel_execution_programs(surface)
+    if not raw_programs and not execution_programs:
+        return {
+            "checked": False,
+            "verified_surfaces": [],
+            "skipped_surfaces": [],
+            "checks": [],
+            "execution_checks": [],
+        }
     checks: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
@@ -180,7 +189,26 @@ def _materialization_audit(
                     "reason": None if verified else "compiled transform sentinel was not found in exported artifacts",
                 }
             )
+    execution_checks: list[dict[str, Any]] = []
+    for surface_name, raw_program, expected in execution_programs:
+        candidate = compiler.compile_or_raise(TransformProgram.from_dict(raw_program), surface)
+        record = adapter.run_case(sample_case, candidate)
+        if not isinstance(record, RunRecord):
+            raise TypeError(f"run_case returned {type(record).__name__}, expected RunRecord.")
+        output_text = json.dumps(record.output, sort_keys=True, default=str)
+        trace = record.diagnostics.metadata.get("transform_trace", [])
+        trace_text = json.dumps(trace, sort_keys=True, default=str)
+        verified = expected in output_text or expected in trace_text
+        execution_checks.append(
+            {
+                "surface": surface_name,
+                "verified": verified,
+                "expected": expected,
+                "reason": None if verified else "compiled transform sentinel was not observed during run_case execution",
+            }
+        )
     failed = [check for check in checks if not check["verified"]]
+    failed.extend(check for check in execution_checks if not check["verified"])
     if failed:
         failed_rows = ", ".join(str(check["surface"]) for check in failed)
         raise ValueError(f"Materialization audit failed for transform surfaces: {failed_rows}")
@@ -189,6 +217,7 @@ def _materialization_audit(
         "verified_surfaces": [str(check["surface"]) for check in checks],
         "skipped_surfaces": [],
         "checks": checks,
+        "execution_checks": execution_checks,
     }
 
 
@@ -254,6 +283,29 @@ def _sentinel_transform_programs(surface: SurfaceSpec) -> list[tuple[str, dict[s
             )
         )
     return programs
+
+
+def _sentinel_execution_programs(surface: SurfaceSpec) -> list[tuple[str, dict[str, Any], str]]:
+    hook = surface.hooks["before_user_response"]
+    if not hook.supported or "rewrite_response" not in hook.allowed_ops:
+        return []
+    sentinel = "RATCHET_TRANSFORM_SENTINEL_RESPONSE"
+    return [
+        (
+            "response_execution",
+            {
+                "id": "preflight_response_execution_sentinel",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "rewrite_response",
+                        "message": sentinel,
+                    }
+                ],
+            },
+            sentinel,
+        )
+    ]
 
 
 def _exported_review_text(root: Path) -> str:

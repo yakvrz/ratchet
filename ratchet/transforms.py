@@ -159,7 +159,9 @@ class TransformContextKey:
                 mechanism=tuple(str(item) for item in existing.get("mechanism", [])),
                 transform_instance=str(existing.get("transform_instance") or row.get("transform_instance") or "candidate"),
             )
-        candidate_payload = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        candidate_payload = row.get("proposal_candidate") if isinstance(row.get("proposal_candidate"), dict) else {}
+        if not candidate_payload:
+            candidate_payload = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
         program_payload = row.get("proposal") or candidate_payload.get("program") or {}
         raw_patches = program_payload.get("patches", []) if isinstance(program_payload, dict) else []
         patches = [TransformPatch.from_dict(item) for item in raw_patches if isinstance(item, dict)]
@@ -556,7 +558,7 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
         category="response",
         purpose="Validate, block, or rewrite draft responses at declared response hooks.",
         supported_edit_kinds=["response"],
-        supported_ops=["extract_claims", "validate", "validate_claims", "rewrite_response", "block_response"],
+        supported_ops=["validate", "validate_claims", "rewrite_response", "block_response"],
         activation_signals=["invalid_output", "runtime_truncation"],
         expected_effects={"correctness": "variable", "cost": "low", "latency": "low"},
         risks=["over-suppresses valid responses"],
@@ -775,10 +777,9 @@ def validate_candidate_transform(
             continue
         return f"candidate application must cite a surface_opportunity_id, got {application.affordance_id!r}"
     if search_hypothesis is not None:
-        if any(not application.affordance_id.startswith("surface.") for application in candidate.applications):
-            eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
-            if eligibility_error is not None:
-                return eligibility_error
+        eligibility_error = validate_candidate_context(candidate, search_hypothesis=search_hypothesis, surface=surface)
+        if eligibility_error is not None:
+            return eligibility_error
     return None
 
 
@@ -944,7 +945,9 @@ def summarize_transform_context_results(proposals: list[dict[str, Any]]) -> dict
 def summarize_affordance_results(proposals: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in proposals:
-        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        candidate = row.get("proposal_candidate") if isinstance(row.get("proposal_candidate"), dict) else {}
+        if not candidate:
+            candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
         applications = row.get("applications") or candidate.get("applications") if isinstance(candidate, dict) else []
         if not isinstance(applications, list):
             continue

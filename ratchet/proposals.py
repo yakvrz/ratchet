@@ -1422,7 +1422,8 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
                 "comparison_group": row.get("comparison_group"),
                 "transform_instance": row.get("transform_instance"),
                 "transform_parameters": _value_summary(
-                    (row.get("candidate") or {}).get("transform_parameters") or row.get("transform_parameters")
+                    (row.get("proposal_candidate") or row.get("candidate") or {}).get("transform_parameters")
+                    or row.get("transform_parameters")
                 ),
                 "transform_context": row.get("transform_context"),
                 "target_slice": row.get("target_slice"),
@@ -1494,6 +1495,7 @@ def _invalid_candidate_row(
     return {
         "proposal_program_hash": digest,
         "proposal": candidate.program.to_dict(),
+        "proposal_candidate": candidate.to_dict(),
         "candidate": candidate.to_dict(),
         "applications": [application.to_dict() for application in candidate.applications],
         "transform_family": candidate.transform_family,
@@ -1531,7 +1533,9 @@ def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any
 def _repair_feedback_rows(rows: list[dict[str, Any]], *, limit: int = 4, max_chars: int = 5000) -> list[dict[str, Any]]:
     feedback: list[dict[str, Any]] = []
     for row in rows[:limit]:
-        candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
+        candidate = row.get("proposal_candidate") if isinstance(row.get("proposal_candidate"), dict) else {}
+        if not candidate:
+            candidate = row.get("candidate") if isinstance(row.get("candidate"), dict) else {}
         proposal = row.get("proposal") if isinstance(row.get("proposal"), dict) else {}
         applications = row.get("applications") if isinstance(row.get("applications"), list) else []
         payload = {

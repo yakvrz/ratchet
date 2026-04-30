@@ -13,7 +13,7 @@ from ratchet.preflight import run_preflight_check
 from ratchet.config import RatchetConfigError, load_run_config, resolve_run_config
 from ratchet.__main__ import CliProgressPrinter
 from ratchet.transform_program import CompiledCandidate
-from ratchet.types import AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 FUNCTION_AGENT_BODY = """from __future__ import annotations
@@ -153,6 +153,33 @@ class IgnoringExportAdapter:
     def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / "candidate.json").write_text(json.dumps(candidate.to_dict() if candidate else None, sort_keys=True))
+
+
+class CandidateAwareExportAdapter(IgnoringExportAdapter):
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
+        if candidate is not None:
+            return RunRecord(
+                output={"message": "RATCHET_TRANSFORM_SENTINEL_RESPONSE"},
+                metrics=OperationalMetrics(
+                    latency_s=0.0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=0,
+                    cost_usd=0.0,
+                ),
+                diagnostics=DiagnosticTrace(
+                    metadata={
+                        "transform_trace": [
+                            {
+                                "hook": "before_user_response",
+                                "op": "rewrite_response",
+                                "fields": {"message": "RATCHET_TRANSFORM_SENTINEL_RESPONSE"},
+                            }
+                        ]
+                    }
+                ),
+            )
+        return super().run_case(case, candidate)
 
 
 class NoneAgentSpecAdapter(IgnoringExportAdapter):
@@ -298,11 +325,25 @@ class CliConfigIntegrationTests(unittest.TestCase):
         )
         run_preflight_check(
             adapter_spec="tests.test_cli_config:adapter",
-            adapter=IgnoringExportAdapter(),
+            adapter=CandidateAwareExportAdapter(),
             cases=cases,
             objective=OptimizationObjective(),
             sample_limit=2,
         )
+
+    def test_check_rejects_adapter_that_exports_but_ignores_candidate_execution(self) -> None:
+        cases = (
+            EvalCase(id="dev-1", split="dev", input="x", expected="x"),
+            EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
+        )
+        with self.assertRaisesRegex(ValueError, "Materialization audit failed"):
+            run_preflight_check(
+                adapter_spec="tests.test_cli_config:adapter",
+                adapter=IgnoringExportAdapter(),
+                cases=cases,
+                objective=OptimizationObjective(),
+                sample_limit=2,
+            )
 
     def test_check_rejects_none_agent_spec(self) -> None:
         cases = (
@@ -360,6 +401,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
             summary = (out_dir / "summary.html").read_text()
             report = (out_dir / "report.md").read_text()
             self.assertIn("selected_candidate_id", manifest)
+            self.assertEqual(manifest["simplification_results"], [])
             self.assertFalse(selected["promoted"])
             exported_surface = json.loads((out_dir / "exported_candidate" / "surface_spec.json").read_text())
             self.assertEqual(exported_surface["agent_id"], "scaffolded-python-function-agent")
@@ -379,6 +421,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     adapter = "pkg.module:adapter"
                     evals = "evals.jsonl"
                     out = "results/run"
+                    case_timeout_s = 0
                     stage_case_concurrency = 12
                     sanitize_examples = true
                     """
@@ -408,6 +451,26 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 sanitize_examples=False,
             )
             self.assertFalse(overridden.objective.constraints.sanitize_examples)
+
+    def test_config_rejects_hard_timeout_with_threaded_case_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    case_timeout_s = 180
+                    case_concurrency = 2
+                    """
+                ).strip()
+            )
+            with self.assertRaisesRegex(RatchetConfigError, "case_timeout_s requires serial case execution"):
+                load_run_config(config_path)
 
     def test_measurement_budgets_replace_expensive_candidate_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

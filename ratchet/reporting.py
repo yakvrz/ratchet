@@ -976,7 +976,7 @@ class RatchetReporter:
     @staticmethod
     def _simplification_rows(result: RatchetResult) -> list[str]:
         if not result.simplification_results:
-            return ["No finalist simplification variants were evaluated."]
+            return ["Finalist simplification is not enabled in this Ratchet run."]
         evaluated = [row for row in result.simplification_results if row.get("type") == "simplification_evaluation"]
         skipped = [row for row in result.simplification_results if row.get("type") == "simplification_skipped"]
         accepted = [row for row in evaluated if row.get("accepted")]
