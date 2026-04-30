@@ -226,6 +226,18 @@ class ResearchPlanner:
             response_format=response_format,
             max_output_tokens=RESEARCH_PLANNER_MAX_OUTPUT_TOKENS,
         )
+        try:
+            return self._parse_intents(payload, state)
+        except OptimizerModelError as validation_error:
+            repaired = self._repair_payload(
+                payload=payload,
+                validation_error=validation_error,
+                response_format=response_format,
+                max_output_tokens=RESEARCH_PLANNER_MAX_OUTPUT_TOKENS,
+            )
+            return self._parse_intents(repaired, state)
+
+    def _parse_intents(self, payload: dict[str, Any], state: ResearchState) -> list[ExperimentIntent]:
         raw_intents = payload.get("experiment_intents")
         if not isinstance(raw_intents, list):
             raise OptimizerModelError("Research planner experiment_intents is not an array")
@@ -249,6 +261,52 @@ class ResearchPlanner:
                 )
             intents.append(intent)
         return intents
+
+    def _repair_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        validation_error: OptimizerModelError,
+        response_format: dict[str, Any],
+        max_output_tokens: int,
+    ) -> dict[str, Any]:
+        if self._client is None:
+            raise OptimizerModelError("Research planner repair requested before client initialization.")
+        primary_diagnostics = self.last_call_diagnostics or {}
+        repair_started_at = time.perf_counter()
+        repair_response = self._client.create_response(
+            model=self.model,
+            reasoning={"effort": self.reasoning_effort},
+            text=response_format,
+            input=(
+                "The previous research-planner response was valid JSON but failed schema validation. "
+                "Return only a JSON object with experiment_intents as an array of valid intent objects. "
+                "Preserve the intended research mechanisms where possible; do not add prose.\n\n"
+                f"Validation error: {validation_error}\n"
+                f"Invalid JSON object:\n{json.dumps(payload, separators=(',', ':'), default=str)[:9000]}"
+            ),
+            max_output_tokens=max_output_tokens,
+        )
+        repair_diagnostics = response_diagnostics(
+            repair_response,
+            model=self.model,
+            elapsed_s=time.perf_counter() - repair_started_at,
+        )
+        self.last_call_diagnostics = combine_response_diagnostics(
+            component="research_planner",
+            primary=primary_diagnostics,
+            repair=repair_diagnostics,
+        )
+        try:
+            return extract_json_object(repair_response.output_text)
+        except Exception as repair_exc:
+            self.last_call_diagnostics = {
+                **self.last_call_diagnostics,
+                "repair_error": str(repair_exc),
+            }
+            raise OptimizerModelError(
+                f"Research planner returned schema-invalid JSON: {validation_error}; repair failed: {repair_exc}"
+            ) from repair_exc
 
     def _call_json(
         self,

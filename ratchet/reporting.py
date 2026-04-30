@@ -71,6 +71,13 @@ def build_outcome_analysis(
         ):
             status = "no_failures"
             summary = "Baseline had no dev failures under the correctness objective."
+        elif proposal_evaluations and not accepted_dev_candidates:
+            if any("tradeoff" in reason or "constraint rejected" in reason for reason in dev_rejection_reasons):
+                status = "objective_tradeoff_rejected"
+                summary = "Candidate proposals were evaluated but rejected by objective constraints or tradeoff guards."
+            else:
+                status = "proposals_evaluated_no_dev_gain"
+                summary = "Candidate proposals ran on dev but did not improve the configured objective."
         elif (
             latest_stats.get("raw_count", 0) > 0
             and latest_stats.get("valid_count", 0) == 0
@@ -88,13 +95,6 @@ def build_outcome_analysis(
                 summary = "Baseline had no dev failures under the correctness objective."
             else:
                 summary = "The optimizing model produced no valid candidates."
-        elif proposal_evaluations and not accepted_dev_candidates:
-            if any("tradeoff" in reason or "constraint rejected" in reason for reason in dev_rejection_reasons):
-                status = "objective_tradeoff_rejected"
-                summary = "Candidate proposals were evaluated but rejected by objective constraints or tradeoff guards."
-            else:
-                status = "proposals_evaluated_no_dev_gain"
-                summary = "Candidate proposals ran on dev but did not improve the configured objective."
         elif accepted_dev_candidates and not holdout_candidates:
             if finalist_status_counts.get("unstable", 0) > 0:
                 status = "runtime_baseline_unstable"
