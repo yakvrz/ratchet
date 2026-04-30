@@ -140,8 +140,8 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
         "phase_attempt_durations_s": _phase_attempt_durations(progress_rows),
         "slowest_cases": _case_metric_extremes(result, metric="latency_s", limit=8),
         "highest_token_cases": _case_metric_extremes(result, metric="total_tokens", limit=8),
-        "patch_profiles": _patch_profiles(result),
-        "patch_deltas_vs_baseline": _patch_deltas_vs_baseline(result),
+        "candidate_profiles": _candidate_profiles(result),
+        "candidate_deltas_vs_baseline": _candidate_deltas_vs_baseline(result),
         "optimizer_calls": optimizer_calls,
         "run_cost": run_cost,
         "cache_events": {
@@ -221,7 +221,7 @@ def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, An
                 "rejection_reason": reason,
                 "comparison_to_parent": row.get("comparison_to_parent"),
                 "metrics": _compact_metrics(row.get("metrics") or {}),
-                "patch": row.get("patch"),
+                "candidate": row.get("candidate"),
             }
         )
     return rows
@@ -361,7 +361,7 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
     return rows[:limit]
 
 
-def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
+def _candidate_profiles(result: RatchetResult) -> list[dict[str, Any]]:
     summaries = [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_candidates, *result.holdout_candidates]
     seen: set[tuple[str, str]] = set()
     rows = []
@@ -386,7 +386,7 @@ def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
     return rows
 
 
-def _patch_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
+def _candidate_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for split_name, baseline, summaries in [
         ("dev", result.baseline_dev, result.accepted_dev_candidates),

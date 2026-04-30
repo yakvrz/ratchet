@@ -78,7 +78,7 @@ def build_outcome_analysis(
             and not holdout_candidates
         ):
             status = "proposals_invalid"
-            summary = "The optimizing model returned patches, but none satisfied the generated surface schema."
+            summary = "The optimizing model returned candidates, but none satisfied the generated surface schema."
         elif proposal_iterations and not proposal_evaluations:
             status = "no_valid_model_proposals"
             if "failed" in proposal_analysis.lower():
@@ -87,14 +87,14 @@ def build_outcome_analysis(
                 status = "no_failures"
                 summary = "Baseline had no dev failures under the correctness objective."
             else:
-                summary = "The optimizing model produced no valid patches."
+                summary = "The optimizing model produced no valid candidates."
         elif proposal_evaluations and not accepted_dev_candidates:
             if any("tradeoff" in reason or "constraint rejected" in reason for reason in dev_rejection_reasons):
                 status = "objective_tradeoff_rejected"
-                summary = "Patch proposals were evaluated but rejected by objective constraints or tradeoff guards."
+                summary = "Candidate proposals were evaluated but rejected by objective constraints or tradeoff guards."
             else:
                 status = "proposals_evaluated_no_dev_gain"
-                summary = "Patch proposals ran on dev but did not improve the configured objective."
+                summary = "Candidate proposals ran on dev but did not improve the configured objective."
         elif accepted_dev_candidates and not holdout_candidates:
             if finalist_status_counts.get("unstable", 0) > 0:
                 status = "runtime_baseline_unstable"
@@ -291,7 +291,7 @@ class RatchetReporter:
             f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
             f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
             "",
-            "## Selected Patch",
+            "## Selected Candidate",
             "",
             *(changes or ["No transform operations; original baseline selected."]),
             "",
@@ -629,7 +629,7 @@ class RatchetReporter:
         if not rows:
             return ["No candidates were screened after small-dev triage."]
         table = [
-            "| Patch | Reason | Small-dev cases | Score delta | Pass gain | Mechanism |",
+            "| Candidate | Reason | Small-dev cases | Score delta | Pass gain | Mechanism |",
             "| --- | --- | ---: | ---: | ---: | --- |",
         ]
         for row in rows[:12]:
@@ -698,7 +698,7 @@ class RatchetReporter:
             return rows
         rows.extend(
             [
-                "| Patch | Status | Passed | Reason |",
+                "| Candidate | Status | Passed | Reason |",
                 "| --- | --- | --- | --- |",
             ]
         )
@@ -810,7 +810,7 @@ class RatchetReporter:
             else:
                 return ["No holdout finalist candidates were available."]
         rows = [
-            "| Role | Patch | Holdout | Score | Cost | Tokens | Latency | Ops |",
+            "| Role | Candidate | Holdout | Score | Cost | Tokens | Latency | Ops |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
         selected_hash = result.selected_candidate_id
@@ -884,7 +884,7 @@ class RatchetReporter:
         if not rows:
             return ["No evaluated few-shot example candidates were recorded."]
         table = [
-            "| Patch | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
+            "| Candidate | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
             "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
         ]
         for row in rows[:12]:
@@ -967,12 +967,12 @@ class RatchetReporter:
         token_heavy = profile.get("highest_token_cases") or []
         if token_heavy:
             rows.append("- Highest token cases: " + RatchetReporter._compact_profile_rows(token_heavy, "total_tokens"))
-        patch_profiles = profile.get("patch_profiles") or []
-        if patch_profiles:
-            rows.append("- Patch profiles: " + RatchetReporter._compact_patch_profile_rows(patch_profiles))
-        patch_deltas = profile.get("patch_deltas_vs_baseline") or []
-        if patch_deltas:
-            rows.append("- Patch deltas vs baseline: " + RatchetReporter._compact_patch_delta_rows(patch_deltas))
+        candidate_profiles = profile.get("candidate_profiles") or []
+        if candidate_profiles:
+            rows.append("- Candidate profiles: " + RatchetReporter._compact_candidate_profile_rows(candidate_profiles))
+        candidate_deltas = profile.get("candidate_deltas_vs_baseline") or []
+        if candidate_deltas:
+            rows.append("- Candidate deltas vs baseline: " + RatchetReporter._compact_candidate_delta_rows(candidate_deltas))
         return rows
 
     @staticmethod
@@ -1025,7 +1025,7 @@ class RatchetReporter:
         )
 
     @staticmethod
-    def _compact_patch_profile_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+    def _compact_candidate_profile_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
         return "; ".join(
             f"{row.get('split')}:{row.get('candidate_id')} score={float(row.get('mean_score') or 0.0):.3f} "
             f"cost=${float(row.get('mean_cost_usd') or 0.0):.6f} "
@@ -1035,7 +1035,7 @@ class RatchetReporter:
         )
 
     @staticmethod
-    def _compact_patch_delta_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+    def _compact_candidate_delta_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
         return "; ".join(
             f"{row.get('split')}:{row.get('candidate_id')} "
             f"score_delta={float(row.get('score_delta') or 0.0):+.3f} "

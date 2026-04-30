@@ -524,7 +524,7 @@ TRANSFORM_FAMILIES: dict[str, TransformFamily] = {
     "prompt_rewrite": TransformFamily(
         name="prompt_rewrite",
         category="instructions",
-        purpose="Patch the context graph to change model-visible behavior.",
+        purpose="Edit the context graph to change model-visible behavior.",
         supported_edit_kinds=["context"],
         supported_ops=["add_context_section", "replace_context_section", "remove_context_section", "move_context_section", "reorder_context_sections"],
         activation_signals=["semantic_failures", "invalid_output", "general_correctness_gap"],

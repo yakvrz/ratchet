@@ -56,7 +56,7 @@ PROPOSER_INSTRUCTIONS = (
     "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
     "mechanism_class, affordance_ids, patch, or intervention fields. "
     "Do not copy diagnostic_only_examples into candidate values; only proposal-safe train examples may be copied, "
-    "and only through source_case_id. Prefer minimal, independently evaluable patches. For cost/latency modes, "
+    "and only through source_case_id. Prefer minimal, independently evaluable candidates. For cost/latency modes, "
     "preserve correctness and explore model/runtime/tool efficiency even when failures are absent. "
     "Return empty experiments only when no safe evaluable candidate exists."
 )
@@ -285,8 +285,8 @@ class CandidateImplementer:
             raw_count=self._last_raw_candidate_count,
             valid_count=len(budget_valid),
             returned_count=len(budget_valid),
-            invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate patch"),
-            duplicate_count=invalid_reasons.get("duplicate patch", 0),
+            invalid_count=sum(count for reason, count in invalid_reasons.items() if reason != "duplicate candidate"),
+            duplicate_count=invalid_reasons.get("duplicate candidate", 0),
             error=None,
             invalid_reasons=dict(sorted(invalid_reasons.items())),
             affordance_considerations=affordance_considerations,
@@ -354,10 +354,10 @@ class CandidateImplementer:
                 ),
                 "cost_or_latency_without_failures": (
                     "If correctness is currently saturated and the objective is cost or latency, still propose minimal "
-                    "efficiency patches from the affordance surface so the eval loop can validate the tradeoff."
+                    "efficiency candidates from the affordance surface so the eval loop can validate the tradeoff."
                 ),
                 "candidate_portfolio": (
-                    "Generate an ordered portfolio of distinct, independently evaluable patches up to proposal_budget. "
+                    "Generate an ordered portfolio of distinct, independently evaluable candidates up to proposal_budget. "
                     "Do not let prompt edits crowd out other plausible target kinds; rank by expected objective impact "
                     "and constraint risk."
                 ),
@@ -414,7 +414,7 @@ class CandidateImplementer:
                 text={
                     "format": {
                         "type": "json_schema",
-                        "name": "ratchet_patch_proposals",
+                        "name": "ratchet_candidate_proposals",
                         "strict": False,
                         "schema": {
                             "type": "object",
@@ -526,7 +526,7 @@ class CandidateImplementer:
                     text={
                         "format": {
                             "type": "json_schema",
-                            "name": "ratchet_patch_proposals_repair",
+                            "name": "ratchet_candidate_proposals_repair",
                             "strict": False,
                             "schema": {
                                 "type": "object",
@@ -541,7 +541,7 @@ class CandidateImplementer:
                     input=(
                         "The previous candidate-implementer response was invalid JSON. "
                         "Return only a valid JSON object with affordance_considerations and experiments. "
-                        "Preserve the intended experiment groups and candidate patches where possible; do not add prose.\n\n"
+                        "Preserve the intended experiment groups and candidate programs where possible; do not add prose.\n\n"
                         f"Invalid response:\n{response.output_text[:9000]}"
                     ),
                     max_output_tokens=PROPOSER_MAX_OUTPUT_TOKENS,
@@ -1339,18 +1339,19 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
         comparison = row.get("comparison_to_parent") or {}
         metrics = row.get("metrics") or {}
         candidate = row.get("proposal") or {}
+        program = candidate.get("program") if isinstance(candidate.get("program"), dict) else {}
         rows.append(
             {
                 "iteration": row.get("iteration"),
                 "attempt": row.get("attempt"),
                 "parent_candidate_id": row.get("parent_candidate_id"),
                 "candidate_id": row.get("candidate_id"),
-            "transform_family": row.get("transform_family"),
-            "mechanism_class": row.get("mechanism_class"),
-            "experiment_id": row.get("experiment_id"),
-            "candidate_role": row.get("candidate_role"),
-            "comparison_group": row.get("comparison_group"),
-            "transform_instance": row.get("transform_instance"),
+                "transform_family": row.get("transform_family"),
+                "mechanism_class": row.get("mechanism_class"),
+                "experiment_id": row.get("experiment_id"),
+                "candidate_role": row.get("candidate_role"),
+                "comparison_group": row.get("comparison_group"),
+                "transform_instance": row.get("transform_instance"),
                 "transform_parameters": _value_summary(
                     (row.get("candidate") or {}).get("transform_parameters") or row.get("transform_parameters")
                 ),
@@ -1368,10 +1369,13 @@ def _compact_recent_history(history: list[dict[str, Any]], *, limit: int) -> lis
                 "operations": [
                     {
                         "op": operation.get("op"),
+                        "hook": operation.get("hook"),
+                        "section": operation.get("section"),
+                        "field": operation.get("field"),
                         "target": operation.get("target"),
-                        "value_summary": _value_summary(operation.get("value")),
+                        "content_summary": _value_summary(operation.get("content")),
                     }
-                    for operation in patch.get("operations", [])
+                    for operation in program.get("patches", [])
                     if isinstance(operation, dict)
                 ],
             }
@@ -1396,22 +1400,6 @@ def prompt_size_profile(text: str) -> dict[str, int]:
     return {
         "chars": len(text),
         "approx_tokens": approximate_prompt_tokens(text),
-    }
-
-
-def _compact_patch(patch: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "operations": [
-            {
-                "op": operation.get("op"),
-                "target": operation.get("target"),
-                "value_summary": _value_summary(operation.get("value")),
-            }
-            for operation in patch.get("operations", [])
-            if isinstance(operation, dict)
-        ],
-        "rationale": str(patch.get("rationale") or "")[:240],
-        "expected_effect": str(patch.get("expected_effect") or "")[:240],
     }
 
 

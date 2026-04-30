@@ -77,7 +77,7 @@ def compare_summaries(reference: CandidateSummary, candidate_summary: CandidateS
     reference_by_id = _case_metric_rows(reference)
     patch_by_id = _case_metric_rows(candidate_summary)
     if set(reference_by_id) != set(patch_by_id):
-        raise ValueError("Patch summaries must cover the same cases for paired comparison.")
+        raise ValueError("Candidate summaries must cover the same cases for paired comparison.")
     case_ids = list(reference_by_id)
     score_deltas = [
         patch_by_id[case_id]["score"] - reference_by_id[case_id]["score"]
@@ -150,7 +150,7 @@ def behavior_flip_summary(reference: CandidateSummary, candidate_summary: Candid
     reference_rows = {case_id: case_passed for case_id, _, _, _, case_passed in reference._case_rows()}
     patch_rows = {case_id: case_passed for case_id, _, _, _, case_passed in candidate_summary._case_rows()}
     if set(reference_rows) != set(patch_rows):
-        raise ValueError("Patch summaries must cover the same cases for flip comparison.")
+        raise ValueError("Candidate summaries must cover the same cases for flip comparison.")
     fixed: list[str] = []
     regressed: list[str] = []
     for case_id, reference_passed in reference_rows.items():

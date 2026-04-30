@@ -1272,7 +1272,7 @@ class RatchetOptimizer:
                         "type": "simplification_skipped",
                         "parent_candidate_id": parent.candidate_id,
                         "candidate_id": digest,
-                        "patch": variant.to_dict(),
+                        "candidate": variant.to_dict(),
                         "simplification": variant.metadata.get("simplification"),
                         "reason": skipped_variant_reasons.get(
                             digest,
@@ -1329,7 +1329,7 @@ class RatchetOptimizer:
                     "type": "simplification_evaluation",
                     "parent_candidate_id": parent.candidate_id,
                     "candidate_id": digest,
-                    "patch": variant.to_dict(),
+                    "candidate": variant.to_dict(),
                     "simplification": variant.metadata.get("simplification"),
                     "reused_existing_summary": reused,
                     "accepted": accepted,
@@ -3543,20 +3543,20 @@ def _is_timeout_error(error: Exception) -> bool:
     return "timed out" in message or "timeout" in message
 
 
-def _requires_finalist_confirmation(patch: CompiledCandidate | None, runtime_diagnostic: dict[str, Any]) -> bool:
+def _requires_finalist_confirmation(candidate: CompiledCandidate | None, runtime_diagnostic: dict[str, Any]) -> bool:
     if runtime_diagnostic.get("baseline_runtime_defect_fixed"):
         return True
-    if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(patch):
+    if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(candidate):
         return True
-    if runtime_diagnostic.get("finish_reason_changed_case_ids") and _touches_output_or_runtime(patch):
+    if runtime_diagnostic.get("finish_reason_changed_case_ids") and _touches_output_or_runtime(candidate):
         return True
     return False
 
 
-def _touches_output_or_runtime(patch: CompiledCandidate | None) -> bool:
+def _touches_output_or_runtime(candidate: CompiledCandidate | None) -> bool:
     if candidate is None:
         return False
-    for operation in patch.program.patches:
+    for operation in candidate.program.patches:
         target = str(operation.op.params.get("section") or operation.op.params.get("field") or "")
         if operation.op.op == "set_model_config" and target in {"max_tokens", "temperature", "reasoning_effort"}:
             return True
@@ -3572,7 +3572,7 @@ def _simplification_variants(patch: CompiledCandidate | None) -> list[CompiledCa
 
 
 def _transform_lineage_families(candidate_id_value: str, proposals: list[dict[str, Any]]) -> list[str]:
-    row_by_patch = {
+    row_by_candidate = {
         str(row.get("candidate_id")): row
         for row in proposals
         if row.get("accepted") is not None and row.get("candidate_id")
@@ -3582,7 +3582,7 @@ def _transform_lineage_families(candidate_id_value: str, proposals: list[dict[st
     cursor = candidate_id_value
     while cursor and cursor not in seen:
         seen.add(cursor)
-        row = row_by_patch.get(cursor)
+        row = row_by_candidate.get(cursor)
         if row is None:
             break
         family = row.get("transform_family")

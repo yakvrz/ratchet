@@ -192,7 +192,7 @@ class TransformCompiler:
         if patch.op.op == "set_model_config":
             field = self._required_string(index, patch, "field")
             allowed = {
-                "model": surface.model.model_name_configurable,
+                "model_name": surface.model.model_name_configurable,
                 "temperature": surface.model.temperature_configurable,
                 "max_tokens": surface.model.max_tokens_configurable,
                 "reasoning_effort": surface.model.reasoning_effort_configurable,

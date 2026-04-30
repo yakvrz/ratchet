@@ -365,7 +365,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertEqual(exported_surface["agent_id"], "scaffolded-python-function-agent")
             self.assertIn("<h2>What Changed</h2>", summary)
             self.assertIn('src="plots/scorecard.svg"', summary)
-            self.assertIn("## Selected Patch", report)
+            self.assertIn("## Selected Candidate", report)
 
     def test_sanitize_examples_can_be_configured_and_overridden(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -92,7 +92,7 @@ class GeneratedSingleCallAdapter:
         runtime.run_hook("before_model_call", ctx)
         started_at = time.perf_counter()
         response = self._client_or_create().create_response(
-            model=str(ctx.model_config["model"]),
+            model=str(ctx.model_config["model_name"]),
             reasoning={"effort": str(ctx.model_config.get("reasoning_effort", "low"))},
             instructions=ctx.context.render_text(),
             input=request.input,
@@ -111,7 +111,7 @@ class GeneratedSingleCallAdapter:
         runtime.run_hook("on_task_end", ctx)
         input_tokens = int(getattr(response.usage, "input_tokens", 0))
         output_tokens = int(getattr(response.usage, "output_tokens", 0))
-        model = str(ctx.model_config["model"])
+        model = str(ctx.model_config["model_name"])
         return RunRecord(
             output=output,
             metrics=OperationalMetrics(
@@ -187,7 +187,7 @@ def context_graph_from_spec(
 
 def model_config_from_spec(spec: AgentSpec) -> dict[str, Any]:
     return {
-        "model": spec.model,
+        "model_name": spec.model,
         "reasoning_effort": str(spec.runtime.get("reasoning_effort", "low")),
         "max_tokens": int(spec.runtime.get("output_cap", spec.runtime.get("max_tokens", 512))),
     }

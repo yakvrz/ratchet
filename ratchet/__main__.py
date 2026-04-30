@@ -720,12 +720,12 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--candidate-implementer-reasoning", help="Override reasoning effort for Ratchet's candidate implementer")
     parser.add_argument("--measurement-selector-model", help="Override model for Ratchet's measurement selector")
     parser.add_argument("--measurement-selector-reasoning", help="Override reasoning effort for Ratchet's measurement selector")
-    parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per patch/case")
-    parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per patch")
+    parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per candidate/case")
+    parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per candidate")
     parser.add_argument(
         "--stage-case-concurrency",
         type=int,
-        help="Maximum concurrent case evaluations across a multi-patch stage; defaults to --case-concurrency.",
+        help="Maximum concurrent case evaluations across a multi-candidate stage; defaults to --case-concurrency.",
     )
     parser.add_argument("--max-case-retries", type=int, help="Per-case retry budget after the first attempt")
     parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds")
