@@ -2383,6 +2383,10 @@ class RatchetOptimizer:
         if uncached:
             concurrency_limit = self.stage_case_concurrency if len(candidate_by_id) > 1 else self.case_concurrency
             effective_concurrency = 1 if self.fail_fast else min(concurrency_limit, len(uncached))
+            effective_concurrency = min(
+                effective_concurrency,
+                _candidate_batch_concurrency_limit(candidate_by_id.values()),
+            )
             for digest, fresh_count in fresh_by_digest.items():
                 self._emit_progress(
                     "case_batch_started",
@@ -2960,6 +2964,43 @@ def _smoke_rejection_reason(reference: CandidateSummary, candidate: CandidateSum
         return "smoke rejected candidate because runtime errors increased"
     if candidate.pass_count < reference.pass_count:
         return "smoke rejected candidate because pass count regressed"
+    return None
+
+
+def _candidate_batch_concurrency_limit(candidates: Iterable[CompiledCandidate | None]) -> int:
+    limits = [
+        limit
+        for candidate in candidates
+        if (limit := _compiled_candidate_concurrency_limit(candidate)) is not None
+    ]
+    return min(limits) if limits else 10_000
+
+
+def _compiled_candidate_concurrency_limit(candidate: CompiledCandidate | None) -> int | None:
+    model_name = _compiled_candidate_model_name(candidate)
+    if model_name is None:
+        return None
+    return _model_name_concurrency_limit(model_name)
+
+
+def _compiled_candidate_model_name(candidate: CompiledCandidate | None) -> str | None:
+    if candidate is None:
+        return None
+    for patch in candidate.program.patches:
+        if patch.op.op != "set_model_config":
+            continue
+        if patch.op.params.get("field") != "model_name":
+            continue
+        value = patch.op.params.get("value")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def _model_name_concurrency_limit(model_name: str) -> int | None:
+    normalized = model_name.lower()
+    if normalized.startswith("gemini-") and "pro" in normalized:
+        return 1
     return None
 
 
