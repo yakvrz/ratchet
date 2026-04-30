@@ -113,6 +113,29 @@ class TransformLibraryTests(unittest.TestCase):
         self.assertEqual(compiled.report.status, "rejected")
         self.assertEqual(compiled.report.rejection.code, "context_content_required")
 
+    def test_compiler_rejects_model_name_outside_surface_options(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(name="sample", model="base", model_options=["base", "larger"])
+        )
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-model",
+                "patches": [
+                    {
+                        "hook": "before_model_call",
+                        "op": "set_model_config",
+                        "field": "model_name",
+                        "value": "unavailable",
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "model_name_not_allowed")
+
 
 if __name__ == "__main__":
     unittest.main()

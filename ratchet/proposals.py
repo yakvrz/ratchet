@@ -52,7 +52,7 @@ PROPOSER_INSTRUCTIONS = (
     "a typed transform program under candidate.program and applications[] citing relevant optimization_affordances. "
     "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not legacy candidate operations. "
     "For add_context_section or replace_context_section, emit one focused patch with non-empty content containing the actual rendered instruction or context data; prefer a concise string. Do not emit empty content objects, repeated placeholder patches, or context text in value. "
-    "Every set_model_config candidate needs field and value; every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
+    "Every set_model_config candidate needs field and value; for field=model_name, value must be one of the model values exposed by the cited model_config affordance and should differ from the current model. Every define_state candidate needs field, type, and initial. Use selection.source_case_ids "
     "only for few-shot examples from proposal_example_bank. Do not inline few-shot examples. Family, mechanism, "
     "measurements, and risks are derived from cited affordances; do not emit candidate-level transform_family, "
     "mechanism_class, affordance_ids, patch, or intervention fields. "

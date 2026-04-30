@@ -147,6 +147,8 @@ class ToolSurface:
 @dataclass(frozen=True)
 class ModelSurface:
     provider: str = "configurable"
+    current_model: str = ""
+    model_options: tuple[str, ...] = ()
     model_name_configurable: bool = True
     temperature_configurable: bool = False
     max_tokens_configurable: bool = True
@@ -155,7 +157,9 @@ class ModelSurface:
     auxiliary_model_calls_allowed: bool = False
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        row = asdict(self)
+        row["model_options"] = list(self.model_options)
+        return row
 
 
 @dataclass(frozen=True)
@@ -301,6 +305,8 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                 current_value=surface.model.to_dict(),
                 allowed_ops=tuple(model_ops),
                 description="Model invocation configuration exposed by the adapter.",
+                choices=tuple(surface.model.model_options),
+                value_schema=_model_config_value_schema(surface.model),
             )
         )
     tool_ops = []
@@ -334,6 +340,28 @@ def _context_allowed_ops(surface: SurfaceSpec) -> list[str]:
     if surface.state.expose_to_context:
         ops.append("render_state_section")
     return ops
+
+
+def _model_config_value_schema(model: ModelSurface) -> dict[str, Any]:
+    fields = []
+    if model.model_name_configurable:
+        fields.append("model_name")
+    if model.temperature_configurable:
+        fields.append("temperature")
+    if model.max_tokens_configurable:
+        fields.append("max_tokens")
+    if model.reasoning_effort_configurable:
+        fields.append("reasoning_effort")
+    if model.tool_choice_mode_configurable:
+        fields.append("tool_choice_mode")
+    return {
+        "operation": "set_model_config",
+        "fields": fields,
+        "current_model": model.current_model,
+        "model_name": {
+            "allowed_values": list(model.model_options),
+        },
+    }
 
 
 def unsupported_hooks() -> dict[str, HookSurface]:
@@ -429,7 +457,7 @@ def surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
             tool_description_rewrite_allowed=True,
             tool_metadata_allowed=True,
         ),
-        model=ModelSurface(),
+        model=ModelSurface(current_model=spec.model, model_options=tuple(spec.model_options)),
         response=ResponseSurface(),
         immutable_boundaries=(
             "evaluator",

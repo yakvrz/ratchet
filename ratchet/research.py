@@ -198,7 +198,9 @@ class ResearchPlanner:
                 "Each intent must choose mechanism_class from the listed affordances and cite concrete affordance_ids "
                 "that a later implementer may use. Treat research_theory/task_theory experiment opportunities and high-suitability "
                 "affordances as the research surface; preserve mechanism-distinct questions when residual failures "
-                "could plausibly be instruction/example-limited or model-capability-limited."
+                "could plausibly be instruction/example-limited or model-capability-limited. When budget permits and "
+                "a model_capability_probe opportunity exists for residual correctness failures, include it unless prior "
+                "evidence already disconfirms model substitution."
             ),
             "state": state.to_dict(),
         }

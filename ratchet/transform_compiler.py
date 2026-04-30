@@ -219,6 +219,16 @@ class TransformCompiler:
             }
             if field not in allowed or not allowed[field]:
                 self._reject(index, "model_config_unsupported", f"Model config field {field!r} is not configurable.")
+            if field == "model_name":
+                value = patch.op.params.get("value")
+                if not isinstance(value, str) or not value:
+                    self._reject(index, "model_name_required", "set_model_config field 'model_name' requires a non-empty string value.")
+                if surface.model.model_options and value not in surface.model.model_options:
+                    self._reject(
+                        index,
+                        "model_name_not_allowed",
+                        f"Model name {value!r} is not in this surface's model_options.",
+                    )
 
     def _validate_response_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
         if patch.op.op in {"extract_claims", "validate_claims"} and not surface.response.draft_response_interception_allowed:

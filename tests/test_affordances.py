@@ -13,6 +13,7 @@ class OptimizationAffordanceTests(unittest.TestCase):
             AgentSpec(
                 name="sample",
                 model="base",
+                model_options=["base", "larger"],
                 instructions={"system_prompt": "Classify."},
                 output_contract="Return JSON.",
                 tools={"search": AgentTool(name="search", description="Search docs.")},
@@ -25,6 +26,9 @@ class OptimizationAffordanceTests(unittest.TestCase):
         self.assertTrue(any(item.target_name == "system_prompt" for item in affordances))
         self.assertTrue(any(item.target_name == "output_contract" for item in affordances))
         self.assertIn("model_substitution.model_capability_probe.generic_policy.model_config", ids)
+        model_affordance = next(item for item in affordances if item.family == "model_substitution")
+        self.assertEqual(model_affordance.value_schema["current_model"], "base")
+        self.assertEqual(model_affordance.value_schema["model_name"]["allowed_values"], ["base", "larger"])
 
     def test_tool_trajectory_evidence_activates_tool_policy_mechanism(self) -> None:
         surface = surface_from_agent_spec(
