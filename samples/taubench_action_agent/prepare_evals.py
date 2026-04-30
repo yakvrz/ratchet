@@ -59,6 +59,7 @@ def main() -> None:
     parser.add_argument("--retail-train", type=int, default=DEFAULT_COUNTS["retail_train"])
     parser.add_argument("--retail-dev", type=int, default=DEFAULT_COUNTS["retail_dev"])
     parser.add_argument("--airline-holdout", type=int, default=DEFAULT_COUNTS["airline_holdout"])
+    parser.add_argument("--policy-chars", type=int, default=12000)
     args = parser.parse_args()
 
     root = Path(__file__).resolve().parent
@@ -77,6 +78,7 @@ def main() -> None:
             task=task,
             tool_catalog=_tool_catalog(cache_dir, "retail"),
             policy=_load_text(cache_dir, "retail", "wiki.md"),
+            policy_chars=args.policy_chars,
         )
         for index, task in enumerate(retail_train)
     )
@@ -88,6 +90,7 @@ def main() -> None:
             task=task,
             tool_catalog=_tool_catalog(cache_dir, "retail"),
             policy=_load_text(cache_dir, "retail", "wiki.md"),
+            policy_chars=args.policy_chars,
         )
         for index, task in enumerate(retail_test)
     )
@@ -99,6 +102,7 @@ def main() -> None:
             task=task,
             tool_catalog=_tool_catalog(cache_dir, "airline"),
             policy=_load_text(cache_dir, "airline", "wiki.md"),
+            policy_chars=args.policy_chars,
         )
         for index, task in enumerate(airline_test)
     )
@@ -144,14 +148,23 @@ def _tool_catalog(cache_dir: Path, domain: str) -> list[dict[str, str]]:
     rows = []
     for name in TOOL_FILES[domain]:
         source = _load_source(cache_dir, f"tau_bench/envs/{domain}/tools/{name}.py")
-        tree = ast.parse(source)
-        description = ""
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef):
-                description = ast.get_docstring(node) or ""
-                break
-        rows.append({"name": name, "description": " ".join(description.split())[:500]})
+        info = _tool_info_from_source(source)
+        function = info.get("function") if isinstance(info.get("function"), dict) else {}
+        description = str(function.get("description") or "")
+        rows.append({"name": name, "description": " ".join(description.split())[:800]})
     return rows
+
+
+def _tool_info_from_source(source: str) -> dict[str, object]:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "get_info":
+            for child in node.body:
+                if isinstance(child, ast.Return) and isinstance(child.value, ast.Dict):
+                    value = ast.literal_eval(child.value)
+                    if isinstance(value, dict):
+                        return value
+    raise ValueError("Could not find static get_info() tool metadata.")
 
 
 def _load_text(cache_dir: Path, domain: str, filename: str) -> str:
@@ -175,6 +188,7 @@ def _case_row(
     task: dict[str, object],
     tool_catalog: list[dict[str, str]],
     policy: str,
+    policy_chars: int,
 ) -> dict[str, object]:
     actions = task["actions"] if isinstance(task.get("actions"), list) else []
     expected_actions = [
@@ -193,7 +207,7 @@ def _case_row(
                     "instruction": task.get("instruction"),
                 },
                 "available_tools": tool_catalog,
-                "policy_excerpt": _compact_policy(policy),
+                "policy_excerpt": _compact_policy(policy, max_chars=policy_chars),
             },
             sort_keys=True,
         ),
@@ -203,15 +217,16 @@ def _case_row(
         },
         "metadata": {
             "category": domain,
-            "source": "tau_bench",
+            "source": "tau_bench_static_action_proxy",
             "source_id": f"{domain}:{split}:{index}",
             "expected_action_count": len(expected_actions),
+            "benchmark_fidelity": "static_action_proxy_not_official_tau_bench",
         },
     }
 
 
-def _compact_policy(policy: str) -> str:
-    return " ".join(policy.split())[:3500]
+def _compact_policy(policy: str, *, max_chars: int) -> str:
+    return " ".join(policy.split())[:max_chars]
 
 
 if __name__ == "__main__":
