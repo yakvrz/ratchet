@@ -5,6 +5,7 @@ Ratchet's sample suite is intentionally limited to public, trusted assessment ve
 Current samples:
 
 - `samples/bfcl_function_calling_agent/`
+- `samples/taubench_official_agent/`
 - `samples/taubench_action_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
@@ -26,7 +27,15 @@ Good Ratchet behavior on BFCL means discovering mechanism-relevant candidates, p
 
 BFCL is not a full leaderboard run in this repo. The sample is a fixed development assessment split large enough to inspect optimizer behavior while remaining affordable and reproducible.
 
-## tau-bench
+## Official tau-bench
+
+The official tau-bench sample uses `GeneratedToolLoopAdapter`, so Ratchet owns the agent loop: model calls, tool-call parsing, `before_tool_call`, `after_tool_result`, response interception, state, traces, and transform instrumentation. The external `sierra-research/tau-bench` package supplies the user simulator, environment state, tool schemas, and official reward.
+
+That split is intentional. The benchmark connector may know how to create a tau-bench environment, but the optimizer does not get tau-specific candidate logic. Candidate programs still compile against the same hook-based surface used by any other interactive tool environment.
+
+A credible tau-bench result should compare baseline and Ratchet-optimized runs with the same agent model, user simulator, task set, trial count, and inference budget. The report should include held-out success, failure-mode deltas, tool/model/turn cost deltas, promoted transform diffs, and immutable-boundary evidence.
+
+## tau-bench Static Action Proxy
 
 The tau-bench action sample is currently a workflow/action-policy development probe, not the official interactive benchmark.
 
@@ -45,13 +54,12 @@ It should be interpreted as a Ratchet development assessment, not an official ta
 
 Ratchet now has the core substrate needed for faithful tau-style adapters:
 
+- `GeneratedToolLoopAdapter` executes the real model/tool/environment loop under Ratchet-owned middleware hooks.
 - `DiagnosticTrace` can record multi-turn trajectories, tool calls, terminal state, and terminal reason.
 - `InteractionRecorder` helps adapters produce those traces without custom bookkeeping.
 - tool/action affordances can be generated from observed trajectory failures.
 - measurement budgets can cap candidate dollars, tool calls, and turns.
-- `ratchet.benchmarks.taubench` provides an optional bridge for converting original tau-bench retail/airline results into `RunRecord`s when the external `tau-bench` package is installed.
-
-The next tau-bench milestone should replace the static action probe with an adapter backed by the official simulator, not tune Ratchet against the proxy.
+- `ratchet.benchmarks.taubench` provides a legacy bridge for converting original tau-bench retail/airline results into `RunRecord`s when the external `tau-bench` package is installed.
 
 ## BANKING77
 

@@ -114,13 +114,13 @@ Model calls should provide judgment:
 
 Tool calls are handled as an extension of Ratchet's evidence loop, not as a tau-bench-specific recipe.
 
-- adapters execute the real environment loop and return structured trajectories
+- `GeneratedToolLoopAdapter` executes the real environment loop and returns structured trajectories when Ratchet needs to optimize tool-use behavior
 - behavior diagnostics summarize tool status, tool errors, premature stopping, turn counts, and tool-call counts
 - surface specs expose meaningful tool/action capabilities such as tool selection policy, argument grounding, precondition policy, and interaction completion
 - candidates compile into hook-based runtime middleware rather than source rewrites
 - evidence and reports distinguish task score gains from extra model calls, tool calls, turns, latency, and measurement spend
 
-Known public benchmark integrations should use the official simulator when available. The optional tau-bench bridge converts original `tau-bench` retail/airline results into Ratchet `RunRecord`s; static action-list proxies are useful only as development probes, not leaderboard-comparable tau-bench evaluation.
+Known public benchmark integrations should use the official simulator when available. If Ratchet is expected to optimize the harness, it must own the agent loop through a general adapter surface; black-box benchmark runners are only measurement bridges. Static action-list proxies are useful only as development probes, not leaderboard-comparable tau-bench evaluation.
 
 Hard-coded task recipes, fallback proposal generators, or model-bypass switches violate the architecture. Tests may use fakes, but production optimization should fail visibly when a model role cannot produce valid output.
 

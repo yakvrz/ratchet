@@ -474,3 +474,128 @@ def surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
         ),
         metadata={"source": "agent_spec"},
     )
+
+
+def tool_loop_surface_from_agent_spec(spec: AgentSpec) -> SurfaceSpec:
+    surface = surface_from_agent_spec(spec)
+    hooks = unsupported_hooks()
+    hook_specs = [
+        (
+            "on_task_start",
+            ("case", "state", "context"),
+            ("define_state", "set_state", "log_event", "trace_annotation"),
+            ("continue",),
+        ),
+        (
+            "after_user_message",
+            ("case", "state", "message_history"),
+            ("set_state", "append_state", "log_event", "trace_annotation"),
+            ("continue",),
+        ),
+        (
+            "before_model_call",
+            ("case", "state", "context", "model_config", "message_history"),
+            (
+                "add_context_section",
+                "remove_context_section",
+                "replace_context_section",
+                "move_context_section",
+                "reorder_context_sections",
+                "render_state_section",
+                "set_model_config",
+                "log_event",
+                "trace_annotation",
+            ),
+            ("continue", "modified_context", "modified_model_config"),
+        ),
+        (
+            "after_model_call",
+            ("state", "raw_response", "message_history"),
+            ("set_state", "append_state", "log_event", "trace_annotation"),
+            ("continue",),
+        ),
+        (
+            "before_tool_call",
+            ("state", "tool_call", "tool_schema", "tool_metadata", "message_history"),
+            (
+                "validate",
+                "normalize_tool_args",
+                "block",
+                "allow",
+                "replan",
+                "log_event",
+                "trace_annotation",
+            ),
+            ("allow", "block", "modified_tool_call", "replan_instruction"),
+        ),
+        (
+            "after_tool_result",
+            ("state", "tool_call", "tool_result", "message_history"),
+            ("set_state", "append_state", "merge_state", "log_event", "trace_annotation"),
+            ("continue",),
+        ),
+        (
+            "on_tool_error",
+            ("state", "tool_call", "tool_error", "message_history"),
+            ("set_state", "append_state", "retry", "replan", "log_event", "trace_annotation"),
+            ("continue", "retry", "replan_instruction"),
+        ),
+        (
+            "before_user_response",
+            ("state", "draft_response", "message_history"),
+            (
+                "extract_claims",
+                "validate",
+                "validate_claims",
+                "rewrite_response",
+                "block_response",
+                "log_event",
+                "trace_annotation",
+            ),
+            ("continue", "modified_response", "blocked_response"),
+        ),
+        (
+            "on_task_end",
+            ("state", "output", "trace"),
+            ("log_event", "trace_annotation"),
+            ("continue",),
+        ),
+    ]
+    for name, inputs, ops, outputs in hook_specs:
+        hooks[name] = HookSurface(
+            name=name,
+            supported=True,
+            available_inputs=inputs,
+            allowed_outputs=outputs,
+            allowed_ops=ops,
+        )
+    return SurfaceSpec(
+        agent_id=surface.agent_id,
+        context=surface.context,
+        hooks=hooks,
+        state=surface.state,
+        tools=ToolSurface(
+            tools=surface.tools.tools,
+            tool_schema_rewrite_allowed=False,
+            tool_description_rewrite_allowed=True,
+            tool_call_interception_allowed=True,
+            tool_execution_modification_allowed=False,
+            tool_result_rewrite_allowed=False,
+            tool_metadata_allowed=True,
+        ),
+        model=ModelSurface(
+            provider=surface.model.provider,
+            current_model=surface.model.current_model,
+            model_options=surface.model.model_options,
+            model_name_configurable=surface.model.model_name_configurable,
+            temperature_configurable=True,
+            max_tokens_configurable=surface.model.max_tokens_configurable,
+            reasoning_effort_configurable=surface.model.reasoning_effort_configurable,
+            tool_choice_mode_configurable=True,
+            auxiliary_model_calls_allowed=surface.model.auxiliary_model_calls_allowed,
+        ),
+        response=surface.response,
+        immutable_boundaries=surface.immutable_boundaries,
+        safety_constraints=surface.safety_constraints,
+        metadata={"source": "tool_loop_agent_spec"},
+    )

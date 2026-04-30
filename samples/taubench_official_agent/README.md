@@ -1,6 +1,8 @@
 # Official tau-bench Assessment
 
-This sample is the Ratchet adapter for the original `sierra-research/tau-bench` simulator. It runs the real user simulator, domain tools, environment state, and official reward, so its pass rates are comparable to tau-bench leaderboard numbers when model/provider/user settings match.
+This sample runs the original `sierra-research/tau-bench` simulator through Ratchet's generic `GeneratedToolLoopAdapter`. Tau-bench supplies the user simulator, domain tools, environment state, and official reward; Ratchet owns the model/tool loop and transform hooks.
+
+Pass rates are comparable to tau-bench leaderboard numbers when model/provider/user settings match.
 
 Install the upstream benchmark before running:
 

@@ -18,6 +18,7 @@ from ratchet.proposals import CandidateImplementer
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import CompiledCandidate, TransformProgram
+from ratchet.tool_loop import GeneratedToolLoopAdapter, ToolLoopModelResponse, ToolLoopRunConfig
 from ratchet.types import (
     AgentSpec,
     AgentTool,
@@ -46,6 +47,7 @@ __all__ = [
     "GatePredicate",
     "GradeResult",
     "GeneratedSingleCallAdapter",
+    "GeneratedToolLoopAdapter",
     "IdeationAssessmentSpec",
     "InteractionRecorder",
     "ExperimentSpec",
@@ -66,6 +68,8 @@ __all__ = [
     "TaskTheory",
     "TargetSemantics",
     "ToolCallTrace",
+    "ToolLoopModelResponse",
+    "ToolLoopRunConfig",
     "TauBenchRunner",
     "CandidateImplementation",
     "CandidateImplementer",

@@ -15,6 +15,12 @@ class RuntimeContext:
     context: ContextGraph
     model_config: dict[str, Any]
     state: dict[str, Any] = field(default_factory=dict)
+    message_history: list[dict[str, Any]] = field(default_factory=list)
+    tool_call: dict[str, Any] | None = None
+    tool_schema: dict[str, Any] | None = None
+    tool_metadata: dict[str, Any] | None = None
+    tool_result: Any = None
+    tool_error: Any = None
     raw_response: Any = None
     draft_response: Any = None
     output: Any = None
@@ -69,6 +75,15 @@ class TransformRuntime:
             if not isinstance(existing, list):
                 raise TypeError(f"State field {field!r} is not appendable.")
             existing.append(value)
+            ctx.annotate(hook=hook, op=op, fields={"field": field})
+            return
+        if op == "merge_state":
+            field = str(params["field"])
+            value = resolve_value(params.get("value"), ctx)
+            existing = ctx.state.setdefault(field, {})
+            if not isinstance(existing, dict) or not isinstance(value, dict):
+                raise TypeError(f"State field {field!r} is not mergeable.")
+            existing.update(value)
             ctx.annotate(hook=hook, op=op, fields={"field": field})
             return
         if op == "clear_state":
@@ -130,6 +145,12 @@ class TransformRuntime:
             ctx.model_config[field] = resolve_value(params.get("value"), ctx)
             ctx.annotate(hook=hook, op=op, fields={"field": field})
             return
+        if op == "normalize_tool_args":
+            if ctx.tool_call is None:
+                raise TypeError("normalize_tool_args requires a tool_call in the runtime context.")
+            ctx.tool_call["args"] = _normalize_args(ctx.tool_call.get("args"), params)
+            ctx.annotate(hook=hook, op=op, fields={"tool": ctx.tool_call.get("name")})
+            return
         if op in {"log_event", "trace_annotation"}:
             ctx.annotate(hook=hook, op=op, fields=resolve_value(params.get("fields", {}), ctx))
             return
@@ -153,7 +174,7 @@ class TransformRuntime:
         if op in {"allow", "continue"}:
             ctx.annotate(hook=hook, op=op)
             return
-        if op in {"block", "replan", "ask_user", "terminate"}:
+        if op in {"block", "replan", "ask_user", "terminate", "retry"}:
             ctx.state["_control"] = {"op": op, "message": params.get("message")}
             ctx.annotate(hook=hook, op=op)
             return
@@ -182,6 +203,18 @@ def _resolve_ref(ref: str, ctx: RuntimeContext) -> Any:
         current = ctx.context
     elif root == "model_config":
         current = ctx.model_config
+    elif root == "message_history":
+        current = ctx.message_history
+    elif root == "tool_call":
+        current = ctx.tool_call
+    elif root == "tool_schema":
+        current = ctx.tool_schema
+    elif root == "tool_metadata":
+        current = ctx.tool_metadata
+    elif root == "tool_result":
+        current = ctx.tool_result
+    elif root == "tool_error":
+        current = ctx.tool_error
     elif root == "draft_response":
         current = ctx.draft_response
     elif root == "output":
@@ -213,6 +246,17 @@ def _condition_matches(condition: dict[str, Any], ctx: RuntimeContext) -> bool:
     return True
 
 
+def _normalize_args(value: Any, params: dict[str, Any]) -> Any:
+    if isinstance(value, str):
+        normalized = value.strip() if params.get("trim_strings", True) else value
+        return normalized
+    if isinstance(value, list):
+        return [_normalize_args(item, params) for item in value]
+    if isinstance(value, dict):
+        return {key: _normalize_args(item, params) for key, item in value.items()}
+    return value
+
+
 def _validate(params: dict[str, Any], ctx: RuntimeContext) -> bool:
     checks = params.get("checks")
     if not isinstance(checks, list):
@@ -226,6 +270,13 @@ def _validate(params: dict[str, Any], ctx: RuntimeContext) -> bool:
         if isinstance(check, dict) and "required_output_keys" in check:
             keys = check["required_output_keys"]
             if not isinstance(ctx.draft_response, dict) or any(key not in ctx.draft_response for key in keys):
+                return False
+        if check == "args_schema_valid":
+            if not isinstance(ctx.tool_call, dict) or not isinstance(ctx.tool_call.get("args"), dict):
+                return False
+            schema = ctx.tool_schema if isinstance(ctx.tool_schema, dict) else {}
+            required = schema.get("required") if isinstance(schema.get("required"), list) else []
+            if any(key not in ctx.tool_call["args"] for key in required):
                 return False
     return True
 
