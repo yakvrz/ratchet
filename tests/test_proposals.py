@@ -6,6 +6,7 @@ from ratchet.experiments import SearchBrief, SearchPlan
 from ratchet.proposals import _surface_affordance_proposals
 from ratchet.surface_opportunities import generate_surface_opportunities
 from ratchet.surfaces import tool_loop_surface_from_agent_spec
+from ratchet.transform_compiler import TransformCompiler
 from ratchet.types import AgentSpec
 
 
@@ -300,6 +301,82 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
         )
 
         self.assertEqual(proposals, [])
+
+    def test_structural_affordance_skips_identifier_already_present_in_parent(self) -> None:
+        surface = tool_loop_surface_from_agent_spec(
+            AgentSpec(name="interactive", model="base"),
+            probe={
+                "domain_policy": "Inspect records before mutation.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_record",
+                            "description": "Inspect one record.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"record_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "update_record",
+                            "description": "Update a record.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"record_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                ],
+                "tool_result_schemas": {
+                    "get_record": {
+                        "type": "object",
+                        "properties": {
+                            "record": {
+                                "type": "object",
+                                "properties": {"record_id": {"type": "string"}},
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
+        search_plan = SearchPlan(
+            plan_id="plan_tool_loop",
+            diagnosis="Mutating calls need inspected identifier grounding.",
+            hypotheses=["Validate mutations only against inspected identifiers."],
+            target_mechanisms=["surface_tool_loop"],
+            briefs=[
+                SearchBrief(
+                    brief_id="brief_tool_loop",
+                    mechanism_class="surface_tool_loop",
+                    hypothesis="Validate mutations only against inspected identifiers.",
+                    surface_opportunity_ids=["surface.surface_tool_loop.inspect_before_mutate_record_id"],
+                    candidate_roles=["composed"],
+                )
+            ],
+        )
+        first_round = _surface_affordance_proposals(
+            surface=surface,
+            surface_opportunities=opportunities,
+            search_plan=search_plan,
+            proposal_budget=1,
+        )
+        parent = TransformCompiler().compile_or_raise(first_round[0].program, surface)
+
+        second_round = _surface_affordance_proposals(
+            surface=surface,
+            surface_opportunities=opportunities,
+            search_plan=search_plan,
+            proposal_budget=1,
+            parent_candidate=parent,
+        )
+
+        self.assertEqual(second_round, [])
 
 
 if __name__ == "__main__":

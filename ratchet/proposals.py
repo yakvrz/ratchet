@@ -27,7 +27,7 @@ from ratchet.model_client import (
 from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
-from ratchet.transform_program import TransformPatch, TransformProgram
+from ratchet.transform_program import CompiledCandidate, TransformPatch, TransformProgram
 from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication, Intervention
 from ratchet.transform_validation import (
     validate_candidate_transform,
@@ -158,6 +158,7 @@ class CandidateImplementer:
             surface_opportunities=active_surface_opportunities,
             search_plan=search_plan,
             proposal_budget=proposal_budget,
+            parent_candidate=summary.candidate,
         )
         proposals.extend(structural_proposals)
         if structural_proposals:
@@ -901,6 +902,7 @@ def _surface_affordance_proposals(
     surface_opportunities: list[SurfaceOpportunity],
     search_plan: SearchPlan,
     proposal_budget: int,
+    parent_candidate: CompiledCandidate | None = None,
 ) -> list[CandidateProposal]:
     opportunity_by_target = {item.target_name: item for item in surface_opportunities}
     primary: list[CandidateProposal] = []
@@ -912,6 +914,8 @@ def _surface_affordance_proposals(
         inspected_state_field = _inspected_state_field(identifier)
         listed_state_field = _listed_state_field(identifier)
         if not identifier:
+            continue
+        if _parent_has_affordance(parent_candidate, kind="inspect_before_mutate", identifier=identifier):
             continue
         opportunity = opportunity_by_target.get(f"inspect_before_mutate.{identifier}")
         if opportunity is None:
@@ -1119,6 +1123,32 @@ def _brief_for_opportunity(
         if brief.mechanism_class == "surface_tool_loop":
             return brief
     return None
+
+
+def _parent_has_affordance(
+    parent_candidate: CompiledCandidate | None,
+    *,
+    kind: str,
+    identifier: str,
+) -> bool:
+    if parent_candidate is None:
+        return False
+    metadata = parent_candidate.program.metadata
+    if metadata.get("affordance_kind") == kind and metadata.get("identifier") == identifier:
+        return True
+    inspected_state_field = _inspected_state_field(identifier)
+    for patch in parent_candidate.program.patches:
+        if patch.op.op != "validate":
+            continue
+        checks = patch.op.params.get("checks")
+        if not isinstance(checks, list):
+            continue
+        for check in checks:
+            if not isinstance(check, dict):
+                continue
+            if check.get("type") == "tool_arg_in_state" and check.get("state_field") == inspected_state_field:
+                return True
+    return False
 
 
 def _inspected_state_field(identifier: str) -> str:
