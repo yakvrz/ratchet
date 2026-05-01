@@ -174,30 +174,42 @@ class CandidateImplementer:
             surface=surface,
             surface_opportunities=active_surface_opportunities,
             experiment_intents=experiment_intents or [],
+            proposal_budget=proposal_budget,
         )
         proposals.extend(structural_proposals)
         if structural_proposals:
             analysis_parts.append(
                 f"Added {len(structural_proposals)} surface-derived composed scaffold candidate(s)."
             )
-        llm_proposals, surface_opportunity_considerations = self._llm_proposals(
-            summary,
-            surface,
-            objective=objective,
-            diagnoses=diagnosis_context,
-            history=history,
-            search_hypothesis=search_hypothesis,
-            research_theory=research_theory,
-            evidence_packet=evidence_packet,
-            proposal_example_bank=proposal_example_bank,
-            proposal_budget=proposal_budget,
-            experiment_intents=experiment_intents or [],
-            surface_opportunities=active_surface_opportunities,
-        )
+        remaining_proposal_budget = max(0, proposal_budget - len(structural_proposals))
+        if remaining_proposal_budget:
+            llm_proposals, surface_opportunity_considerations = self._llm_proposals(
+                summary,
+                surface,
+                objective=objective,
+                diagnoses=diagnosis_context,
+                history=history,
+                search_hypothesis=search_hypothesis,
+                research_theory=research_theory,
+                evidence_packet=evidence_packet,
+                proposal_example_bank=proposal_example_bank,
+                proposal_budget=remaining_proposal_budget,
+                experiment_intents=experiment_intents or [],
+                surface_opportunities=active_surface_opportunities,
+            )
+            raw_count = len(structural_proposals) + self._last_raw_candidate_count
+        else:
+            llm_proposals = []
+            surface_opportunity_considerations = []
+            self._last_raw_candidate_count = 0
+            self._last_parse_invalid_reasons = Counter()
+            self._last_parse_invalid_candidate_rows = []
+            self._last_raw_output_text = ""
+            self.last_call_diagnostics = {}
+            raw_count = len(structural_proposals)
         proposals.extend(llm_proposals)
         analysis_parts.append("Candidate implementer returned transform candidate proposals.")
         invalid_reasons.update(self._last_parse_invalid_reasons)
-        raw_count = self._last_raw_candidate_count
         invalid_candidate_rows = list(self._last_parse_invalid_candidate_rows)
         budget_valid, candidate_rows, validation_invalid_rows, validation_invalid_reasons = self._validate_candidate_proposals(
             proposals,
@@ -1009,9 +1021,11 @@ def _surface_affordance_proposals(
     surface: SurfaceSpec,
     surface_opportunities: list[SurfaceOpportunity],
     experiment_intents: list[ExperimentIntent],
+    proposal_budget: int,
 ) -> list[CandidateProposal]:
     opportunity_by_target = {item.target_name: item for item in surface_opportunities}
-    proposals: list[CandidateProposal] = []
+    primary: list[CandidateProposal] = []
+    ablations: list[CandidateProposal] = []
     for affordance in surface.affordances:
         if affordance.get("kind") != "inspect_before_mutate":
             continue
@@ -1099,32 +1113,93 @@ def _surface_affordance_proposals(
                 },
             }
         )
-        proposals.append(
-            CandidateProposal(
-                program=program,
-                applications=[
-                    CandidateSurfaceApplication(
-                        surface_opportunity_id=opportunity.surface_opportunity_id,
-                        rationale=f"Compose observed-{identifier} state tracking with mutating-tool validation.",
-                    )
-                ],
-                experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
-                candidate_role="composed",
-                comparison_group=f"inspect_before_mutate.{identifier}",
-                target_slice="global",
-                hypothesis=(
-                    f"Mutating tool calls that consume {identifier} should be grounded in identifiers "
-                    "previously observed from read tool results."
-                ),
-                expected_effects={
-                    "score": "increase if failures involve ungrounded mutating tool calls",
-                    "cost": "low token overhead from state rendering",
-                    "latency": "low",
-                },
-                evaluation_plan="staged_dev_then_holdout",
-            )
+        primary_candidate = _affordance_candidate(
+            program=program,
+            opportunity_id=opportunity.surface_opportunity_id,
+            experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
+            candidate_role="composed",
+            comparison_group=f"inspect_before_mutate.{identifier}",
+            identifier=identifier,
+            rationale=f"Compose observed-{identifier} state tracking with mutating-tool validation.",
+            hypothesis=(
+                f"Mutating tool calls that consume {identifier} should be grounded in identifiers "
+                "previously observed from read tool results."
+            ),
         )
-    return proposals[:2]
+        primary.append(primary_candidate)
+        context_ablated = [patch for patch in patches if patch.get("op") != "render_state_section"]
+        if len(context_ablated) != len(patches):
+            ablation_program = TransformProgram.from_dict(
+                {
+                    "candidate_id": f"structural_inspect_before_mutate_{identifier}_no_context",
+                    "patches": context_ablated[:12],
+                    "metadata": {
+                        "source": "surface_affordance",
+                        "affordance_kind": "inspect_before_mutate",
+                        "identifier": identifier,
+                        "ablation": "without_state_context_rendering",
+                    },
+                }
+            )
+            ablations.append(
+                _affordance_candidate(
+                    program=ablation_program,
+                    opportunity_id=opportunity.surface_opportunity_id,
+                    experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
+                    candidate_role="ablation",
+                    comparison_group=f"inspect_before_mutate.{identifier}",
+                    identifier=identifier,
+                    rationale=(
+                        f"Ablate model-visible {identifier} state while preserving stateful mutating-tool validation."
+                    ),
+                    hypothesis=(
+                        f"Stateful validation for {identifier} may account for most of the benefit without "
+                        "rendering observed identifiers into model context."
+                    ),
+                )
+            )
+    capacity = max(0, proposal_budget)
+    if capacity == 0:
+        return []
+    selected = primary[:capacity]
+    remaining = capacity - len(selected)
+    if remaining > 0:
+        selected.extend(ablations[:remaining])
+    return selected
+
+
+def _affordance_candidate(
+    *,
+    program: TransformProgram,
+    opportunity_id: str,
+    experiment_id: str,
+    candidate_role: str,
+    comparison_group: str,
+    identifier: str,
+    rationale: str,
+    hypothesis: str,
+) -> CandidateProposal:
+    return CandidateProposal(
+        program=program,
+        applications=[
+            CandidateSurfaceApplication(
+                surface_opportunity_id=opportunity_id,
+                rationale=rationale,
+            )
+        ],
+        experiment_id=experiment_id,
+        candidate_role=candidate_role,
+        comparison_group=comparison_group,
+        target_slice="global",
+        hypothesis=hypothesis,
+        expected_effects={
+            "score": "increase if failures involve ungrounded mutating tool calls",
+            "cost": "low token overhead from state rendering" if candidate_role != "ablation" else "lower token overhead than composed scaffold",
+            "latency": "low",
+            "identifier": identifier,
+        },
+        evaluation_plan="staged_dev_then_holdout",
+    )
 
 
 def _intent_for_opportunity(

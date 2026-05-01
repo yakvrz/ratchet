@@ -692,8 +692,8 @@ class RatchetReporter:
         if not rows:
             return ["No candidates were screened after small-dev triage."]
         table = [
-            "| Candidate | Reason | Small-dev cases | Score delta | Pass gain | Mechanism |",
-            "| --- | --- | ---: | ---: | ---: | --- |",
+            "| Candidate | Reason | Small-dev cases | Score delta | Pass gain | Failure-label delta | Mechanism |",
+            "| --- | --- | ---: | ---: | ---: | --- | --- |",
         ]
         for row in rows[:12]:
             signal = _small_dev_signal(row)
@@ -704,6 +704,7 @@ class RatchetReporter:
                 f"{signal['case_count']} | "
                 f"{signal['score_delta']:+.3f} | "
                 f"{signal['pass_gain']:+d} | "
+                f"{signal['failure_label_delta']} | "
                 f"`{row.get('mechanism_class') or row.get('surface_mechanism')}` |"
             )
         if len(rows) > 12:
@@ -1203,7 +1204,25 @@ def _small_dev_signal(row: dict[str, Any]) -> dict[str, Any]:
         "case_count": int(stage.get("case_count") or 0),
         "score_delta": float(comparison.get("score_delta") or 0.0),
         "pass_gain": pass_gain,
+        "failure_label_delta": _top_failure_label_delta(stage.get("failure_label_delta") or {}),
     }
+
+
+def _top_failure_label_delta(delta: Any) -> str:
+    if not isinstance(delta, dict) or not delta:
+        return "none"
+    rows = []
+    for label, payload in delta.items():
+        if not isinstance(payload, dict):
+            continue
+        change = int(payload.get("delta") or 0)
+        if change == 0:
+            continue
+        rows.append((abs(change), label, change))
+    if not rows:
+        return "none"
+    rows.sort(reverse=True)
+    return ", ".join(f"`{label}` {change:+d}" for _magnitude, label, change in rows[:3])
 
 
 def _short_reason(reason: Any) -> str:

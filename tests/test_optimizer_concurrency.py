@@ -221,7 +221,9 @@ class OptimizerConcurrencyTests(unittest.TestCase):
             }
         )
 
-        self.assertFalse(_eligible_for_full_dev_from_small_signal(state))
+        eligible, reason = _eligible_for_full_dev_from_small_signal(state, OptimizationObjective())
+        self.assertFalse(eligible)
+        self.assertIn("no positive correctness signal", reason)
 
     def test_small_dev_targeted_failure_reduction_reaches_full_dev(self) -> None:
         state = _evaluation_state()
@@ -234,7 +236,9 @@ class OptimizerConcurrencyTests(unittest.TestCase):
             }
         )
 
-        self.assertTrue(_eligible_for_full_dev_from_small_signal(state))
+        eligible, reason = _eligible_for_full_dev_from_small_signal(state, OptimizationObjective())
+        self.assertTrue(eligible)
+        self.assertEqual(reason, "")
 
     def test_small_dev_stage_does_not_expand_to_full_dev_on_many_failures(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

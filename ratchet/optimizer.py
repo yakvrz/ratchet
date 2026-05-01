@@ -1819,10 +1819,11 @@ class RatchetOptimizer:
                 if has_small_dev_stage:
                     next_active = []
                     for state in active:
-                        if _eligible_for_full_dev_from_small_signal(state):
+                        eligible, reason = _eligible_for_full_dev_from_small_signal(state, self.objective)
+                        if eligible:
                             next_active.append(state)
                             continue
-                        state.rejection_reason = "full_dev skipped because small-dev evidence did not show objective gain"
+                        state.rejection_reason = reason
                         state.frontier_status = "screened_out"
                         state.accepted = False
                     active = next_active
@@ -1928,6 +1929,7 @@ class RatchetOptimizer:
                         "metrics": candidate_summary.to_dict(),
                         "comparison_to_parent": comparison.to_dict(),
                         "behavior_flip_summary": flip_summary,
+                        "failure_label_delta": _failure_label_delta(reference_summary, candidate_summary),
                         "rejection_reason": rejection_reason,
                         "constraint_warning": constraint_warning,
                         "passed": rejection_reason is None,
@@ -3244,7 +3246,10 @@ def _finalize_candidate_state(
     state.accepted = state.frontier_status == "promotable_dev"
 
 
-def _eligible_for_full_dev_from_small_signal(state: CandidateEvaluationState) -> bool:
+def _eligible_for_full_dev_from_small_signal(
+    state: CandidateEvaluationState,
+    objective: OptimizationObjective,
+) -> tuple[bool, str]:
     small_stage = next(
         (
             row
@@ -3254,17 +3259,51 @@ def _eligible_for_full_dev_from_small_signal(state: CandidateEvaluationState) ->
         None,
     )
     if small_stage is None:
-        return True
+        return True, ""
     comparison = small_stage.get("comparison_to_parent") or {}
     behavior = small_stage.get("behavior_flip_summary") or {}
-    if float(comparison.get("score_delta") or 0.0) > 0:
-        return True
-    if int(behavior.get("fixed_count") or 0) > int(behavior.get("regressed_count") or 0):
-        return True
-    labels = ((small_stage.get("metrics") or {}).get("behavioral") or {}).get("failure_labels") or {}
-    if isinstance(labels, dict) and int(labels.get("invalid_output") or 0) == 0 and int(behavior.get("regressed_count") or 0) == 0:
-        return True
-    return False
+    score_delta = float(comparison.get("score_delta") or 0.0)
+    fixed_count = int(behavior.get("fixed_count") or 0)
+    regressed_count = int(behavior.get("regressed_count") or 0)
+    pass_delta = fixed_count - regressed_count
+    if objective.mode == "correctness":
+        if score_delta > 0.0:
+            return True, ""
+        if pass_delta > 0:
+            return True, ""
+        return (
+            False,
+            "full_dev skipped because small-dev evidence had no positive correctness signal",
+        )
+    if objective.mode == "cost":
+        cost_delta = float(comparison.get("cost_delta") or 0.0)
+        if score_delta >= -0.01 and pass_delta >= 0 and cost_delta < 0.0:
+            return True, ""
+        return (
+            False,
+            "full_dev skipped because small-dev evidence did not reduce cost without correctness regression",
+        )
+    if objective.mode == "latency":
+        latency_delta = float(comparison.get("latency_delta") or 0.0)
+        if score_delta >= -0.01 and pass_delta >= 0 and latency_delta < 0.0:
+            return True, ""
+        return (
+            False,
+            "full_dev skipped because small-dev evidence did not reduce latency without correctness regression",
+        )
+    return False, f"full_dev skipped because objective mode {objective.mode!r} is unsupported"
+
+
+def _failure_label_delta(reference: CandidateSummary, candidate: CandidateSummary) -> dict[str, dict[str, int]]:
+    labels = sorted(set(reference.failure_labels) | set(candidate.failure_labels))
+    return {
+        label: {
+            "reference": int(reference.failure_labels.get(label, 0)),
+            "candidate": int(candidate.failure_labels.get(label, 0)),
+            "delta": int(candidate.failure_labels.get(label, 0)) - int(reference.failure_labels.get(label, 0)),
+        }
+        for label in labels
+    }
 
 
 def _model_candidate_evidence_present(

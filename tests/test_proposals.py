@@ -66,6 +66,7 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
             surface=surface,
             surface_opportunities=opportunities,
             experiment_intents=[intent],
+            proposal_budget=1,
         )
 
         self.assertEqual(len(proposals), 1)
@@ -94,6 +95,62 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                 for patch in patches
             )
         )
+
+    def test_spare_budget_adds_context_ablation_after_primary_scaffold(self) -> None:
+        surface = tool_loop_surface_from_agent_spec(
+            AgentSpec(name="interactive", model="base"),
+            probe={
+                "domain_policy": "Inspect records before mutation.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "list_orders",
+                            "description": "List orders.",
+                            "parameters": {"type": "object"},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "cancel_order",
+                            "description": "Cancel an order.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                ],
+                "tool_result_schemas": {
+                    "list_orders": {
+                        "type": "object",
+                        "properties": {
+                            "orders": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"order_id": {"type": "string"}},
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
+
+        proposals = _surface_affordance_proposals(
+            surface=surface,
+            surface_opportunities=opportunities,
+            experiment_intents=[],
+            proposal_budget=2,
+        )
+
+        self.assertEqual([proposal.candidate_role for proposal in proposals], ["composed", "ablation"])
+        ablation_ops = [patch.op.op for patch in proposals[1].program.patches]
+        self.assertNotIn("render_state_section", ablation_ops)
+        self.assertIn("validate", ablation_ops)
 
 
 if __name__ == "__main__":

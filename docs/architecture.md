@@ -163,12 +163,14 @@ For interactive agents, measurement budgets may also cap candidate tool calls an
 Staged evaluation has distinct roles:
 
 - smoke: reject crashes and contract violations
-- small dev: triage whether more measurement is worthwhile
+- small dev: triage whether more measurement is worthwhile; correctness runs require positive score/pass signal before full dev
 - full dev: first selection-quality comparison
 - confirmation: stability check for suspicious or runtime-sensitive finalists
 - holdout: protected final validation only
 
 Directional or unstable candidates can be reported as frontier evidence, but only holdout-validated candidates are promoted as selected artifacts.
+
+Composed structural candidates may include ablations when proposal budget remains after primary candidates are queued. Ablations are measured as comparison evidence; they should not displace the primary composed scaffold in a constrained proposal batch.
 
 ## Failure Policy
 
