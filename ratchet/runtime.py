@@ -84,7 +84,10 @@ class TransformRuntime:
             existing = ctx.state.setdefault(field, [])
             if not isinstance(existing, list):
                 raise TypeError(f"State field {field!r} is not appendable.")
-            existing.append(value)
+            if params.get("extend") is True and isinstance(value, list):
+                existing.extend(item for item in value if item not in existing)
+            elif value not in existing:
+                existing.append(value)
             ctx.annotate(hook=hook, op=op, fields={"field": field})
             return
         if op == "merge_state":
@@ -271,11 +274,34 @@ def _resolve_ref(ref: str, ctx: RuntimeContext) -> Any:
     else:
         raise KeyError(f"Unknown runtime reference root {root!r}.")
     for part in parts[1:]:
-        if isinstance(current, dict):
-            current = current.get(part)
-        else:
-            current = getattr(current, part)
+        current = _resolve_ref_part(current, part)
     return current
+
+
+def _resolve_ref_part(current: Any, part: str) -> Any:
+    if part.endswith("[]"):
+        key = part[:-2]
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            current = getattr(current, key)
+        if current is None:
+            return []
+        if not isinstance(current, list):
+            raise TypeError(f"Runtime reference expected list at {part!r}.")
+        return current
+    if isinstance(current, list):
+        values: list[Any] = []
+        for item in current:
+            value = _resolve_ref_part(item, part)
+            if isinstance(value, list):
+                values.extend(value)
+            elif value is not None:
+                values.append(value)
+        return values
+    if isinstance(current, dict):
+        return current.get(part)
+    return getattr(current, part)
 
 
 def _condition_matches(condition: dict[str, Any], ctx: RuntimeContext) -> bool:

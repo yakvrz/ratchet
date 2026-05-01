@@ -11,7 +11,7 @@ The environment exposes:
 - deterministic state-changing tool semantics
 - local grading from final environment state
 
-The optimizer should not contain any Order Desk-specific logic. Candidate programs must use the same surface primitives as other tool-loop tasks: context sections, state, before-tool validation, after-tool-result state updates, response guards, and model config.
+The optimizer should not contain any Order Desk-specific logic. Candidate programs must use the same surface primitives as other tool-loop tasks: context sections, state, before-tool validation, after-tool-result state updates, response guards, and model config. The environment exposes generic tool result schemas so surface inference can derive identifier flows such as read-tool `order_id` observations feeding mutating-tool `order_id` arguments.
 
 Generate evals:
 

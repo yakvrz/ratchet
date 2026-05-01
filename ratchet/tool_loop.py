@@ -70,6 +70,7 @@ def _probe_tool_loop_surface(
     errors: list[str] = []
     domain_policy = ""
     tools: list[dict[str, Any]] = []
+    tool_result_schemas: dict[str, Any] = {}
     for case in cases[:3]:
         try:
             config = case_config(agent_spec, case)
@@ -90,6 +91,13 @@ def _probe_tool_loop_surface(
         raw_tools = getattr(env, "tools_info", None)
         if isinstance(raw_tools, list) and raw_tools:
             tools = [dict(item) for item in raw_tools if isinstance(item, dict)]
+            raw_result_schemas = getattr(env, "tool_result_schemas", None)
+            if isinstance(raw_result_schemas, dict):
+                tool_result_schemas = {
+                    str(name): dict(schema)
+                    for name, schema in raw_result_schemas.items()
+                    if isinstance(schema, dict)
+                }
             break
     if not domain_policy:
         raise RuntimeError(
@@ -101,7 +109,7 @@ def _probe_tool_loop_surface(
             "tool-loop surface inference requires pre-trajectory tool schemas exposed as env.tools_info."
             + detail
         )
-    return {"domain_policy": domain_policy, "tools": tools}
+    return {"domain_policy": domain_policy, "tools": tools, "tool_result_schemas": tool_result_schemas}
 
 
 class LiteLLMToolLoopClient:

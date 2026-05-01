@@ -74,6 +74,20 @@ VALIDATION_CHECKS: dict[str, ValidationCheckSpec] = {
         description="Identifier-like string arguments must appear in prior user/tool observations.",
         parameters_schema={},
     ),
+    "tool_arg_in_state": ValidationCheckSpec(
+        name="tool_arg_in_state",
+        hooks=("before_tool_call",),
+        required_inputs=("tool_call", "state"),
+        description="A named tool-call argument must be present in a configured transform state list.",
+        parameters_schema={
+            "required": ["state_field", "arg"],
+            "properties": {
+                "state_field": {"type": "string"},
+                "arg": {"type": "string"},
+                "state_key": {"type": "string"},
+            },
+        },
+    ),
     "completion_claims_supported": ValidationCheckSpec(
         name="completion_claims_supported",
         hooks=("before_user_response",),
@@ -95,6 +109,8 @@ def validation_check_schema() -> dict[str, Any]:
             "type": {"type": "string", "enum": sorted(VALIDATION_CHECKS)},
             "keys": {"type": "array", "items": {"type": "string", "maxLength": 120}, "maxItems": 20},
             "state_field": {"type": "string", "maxLength": 120},
+            "arg": {"type": "string", "maxLength": 120},
+            "state_key": {"type": "string", "maxLength": 120},
         },
         "required": ["type"],
         "additionalProperties": True,
@@ -132,6 +148,16 @@ def validate_check_payload(raw: Any, *, hook: str) -> str | None:
         state_field = check.get("state_field", "completed_actions")
         if not isinstance(state_field, str) or not state_field:
             return "completion_claims_supported state_field must be a non-empty string."
+    if check_type == "tool_arg_in_state":
+        state_field = check.get("state_field")
+        arg = check.get("arg")
+        state_key = check.get("state_key")
+        if not isinstance(state_field, str) or not state_field:
+            return "tool_arg_in_state requires non-empty state_field."
+        if not isinstance(arg, str) or not arg:
+            return "tool_arg_in_state requires non-empty arg."
+        if state_key is not None and (not isinstance(state_key, str) or not state_key):
+            return "tool_arg_in_state state_key must be a non-empty string when provided."
     return None
 
 
@@ -157,6 +183,13 @@ def run_validation_check(raw: Any, ctx: Any) -> bool:
         return _recent_user_confirmation(ctx)
     if check_type == "referenced_args_observed":
         return _referenced_args_observed(ctx)
+    if check_type == "tool_arg_in_state":
+        return _tool_arg_in_state(
+            ctx,
+            state_field=str(check["state_field"]),
+            arg=str(check["arg"]),
+            state_key=str(check.get("state_key") or check["arg"]),
+        )
     if check_type == "completion_claims_supported":
         return _completion_claims_supported(ctx, state_field=str(check.get("state_field") or "completed_actions"))
     raise ValueError(f"Unsupported validation check: {check_type!r}")
@@ -274,6 +307,24 @@ def _referenced_args_observed(ctx: Any) -> bool:
         if _looks_like_identifier(token) and token not in observed_text:
             return False
     return True
+
+
+def _tool_arg_in_state(ctx: Any, *, state_field: str, arg: str, state_key: str) -> bool:
+    if not isinstance(ctx.tool_call, dict) or not isinstance(ctx.tool_call.get("args"), dict):
+        return False
+    value = ctx.tool_call["args"].get(arg)
+    if value is None:
+        return False
+    state = ctx.state if isinstance(ctx.state, dict) else {}
+    observed = state.get(state_field)
+    if not isinstance(observed, list):
+        return False
+    for item in observed:
+        if item == value:
+            return True
+        if isinstance(item, dict) and item.get(state_key) == value:
+            return True
+    return False
 
 
 def _flatten_values(value: Any) -> list[Any]:

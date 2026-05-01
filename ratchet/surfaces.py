@@ -106,6 +106,7 @@ class ToolSpec:
     name: str
     description: str = ""
     schema: dict[str, Any] = field(default_factory=dict)
+    result_schema: dict[str, Any] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -117,6 +118,7 @@ class ToolSpec:
             name=str(payload["name"]),
             description=str(payload.get("description", "")),
             schema=dict(payload.get("schema", {})),
+            result_schema=dict(payload.get("result_schema", {})),
             metadata=dict(payload.get("metadata", {})),
         )
 
@@ -187,6 +189,7 @@ class SurfaceSpec:
     response: ResponseSurface
     immutable_boundaries: tuple[str, ...]
     safety_constraints: tuple[str, ...]
+    affordances: tuple[dict[str, Any], ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
@@ -207,6 +210,7 @@ class SurfaceSpec:
             "response": self.response.to_dict(),
             "immutable_boundaries": list(self.immutable_boundaries),
             "safety_constraints": list(self.safety_constraints),
+            "affordances": [dict(item) for item in self.affordances],
             "metadata": dict(self.metadata),
         }
 
@@ -401,6 +405,35 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                 },
             )
         )
+        for affordance in surface.affordances:
+            if affordance.get("kind") != "inspect_before_mutate":
+                continue
+            identifier = str(affordance.get("identifier") or "")
+            if not identifier:
+                continue
+            targets.append(
+                SurfaceTarget(
+                    name=f"inspect_before_mutate.{identifier}",
+                    kind="tool",
+                    path=f"affordances.inspect_before_mutate.{identifier}",
+                    current_value=dict(affordance),
+                    allowed_ops=("define_state", "append_state", "render_state_section", "validate", "replan"),
+                    description=(
+                        f"Generic inspect-before-mutate scaffold for {identifier}: collect identifiers from "
+                        "read tool results, expose them in state/context, and validate mutating tool calls "
+                        "before environment execution."
+                    ),
+                    value_schema={
+                        "affordance": dict(affordance),
+                        "safe_patterns": [
+                            "define a state list for observed identifiers",
+                            "append identifiers from real after_tool_result observations",
+                            "render the identifier state before model calls",
+                            "validate mutating tool arguments with tool_arg_in_state and replan on failure",
+                        ],
+                    },
+                )
+            )
     for tool in surface.tools.tools:
         if tool_ops:
             targets.append(
@@ -656,6 +689,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
             validation_checks=tuple(spec.to_dict() for spec in validation_checks_for_hook(name)),
         )
     context_sections = tuple(_tool_loop_context_sections(spec, probe))
+    tool_specs = tuple(_tool_loop_tool_specs(spec, probe))
     return SurfaceSpec(
         agent_id=surface.agent_id,
         context=ContextSurface(
@@ -668,7 +702,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
         hooks=hooks,
         state=surface.state,
         tools=ToolSurface(
-            tools=tuple(_tool_loop_tool_specs(spec, probe)),
+            tools=tool_specs,
             tool_schema_rewrite_allowed=False,
             tool_description_rewrite_allowed=True,
             tool_call_interception_allowed=True,
@@ -690,6 +724,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
         response=surface.response,
         immutable_boundaries=surface.immutable_boundaries,
         safety_constraints=surface.safety_constraints,
+        affordances=tuple(_tool_loop_affordances(tool_specs)),
         metadata={"source": "tool_loop_agent_spec"},
     )
 
@@ -754,6 +789,7 @@ def _tool_loop_context_sections(spec: AgentSpec, probe: dict[str, Any]) -> list[
 def _tool_loop_tool_specs(spec: AgentSpec, probe: dict[str, Any]) -> list[ToolSpec]:
     specs: list[ToolSpec] = []
     static_tools = dict(spec.tools)
+    result_schemas = probe.get("tool_result_schemas") if isinstance(probe.get("tool_result_schemas"), dict) else {}
     for raw_tool in probe.get("tools") or []:
         if not isinstance(raw_tool, dict):
             continue
@@ -764,11 +800,149 @@ def _tool_loop_tool_specs(spec: AgentSpec, probe: dict[str, Any]) -> list[ToolSp
         static_tool = static_tools.get(name)
         description = str(function.get("description") or (static_tool.description if static_tool is not None else ""))
         schema = dict(function.get("parameters") or function.get("schema") or {})
+        result_schema = _tool_result_schema(name, function, result_schemas)
         metadata = _inferred_tool_metadata(name, description, schema)
         if static_tool is not None:
             metadata.update(static_tool.metadata)
-        specs.append(ToolSpec(name=name, description=description, schema=schema, metadata=metadata))
+        result_paths = _schema_leaf_paths(result_schema)
+        if result_paths:
+            metadata["result_paths"] = result_paths
+        specs.append(
+            ToolSpec(
+                name=name,
+                description=description,
+                schema=schema,
+                result_schema=result_schema,
+                metadata=metadata,
+            )
+        )
     return sorted(specs, key=lambda item: item.name)
+
+
+def _tool_result_schema(name: str, function: dict[str, Any], result_schemas: Any) -> dict[str, Any]:
+    for key in ("result_schema", "returns", "output_schema"):
+        raw_schema = function.get(key)
+        if isinstance(raw_schema, dict):
+            return dict(raw_schema)
+    if isinstance(result_schemas, dict):
+        raw_schema = result_schemas.get(name)
+        if isinstance(raw_schema, dict):
+            return dict(raw_schema)
+    return {}
+
+
+def _tool_loop_affordances(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
+    flows = _identifier_flows(tools)
+    affordances: list[dict[str, Any]] = []
+    for identifier, flow in sorted(flows.items()):
+        producers = [
+            producer
+            for producer in flow["produced_by"]
+            if producer.get("side_effect") in {"read", "internal"}
+        ]
+        mutating_consumers = [
+            consumer
+            for consumer in flow["consumed_by"]
+            if consumer.get("side_effect") in {"mutating", "destructive"}
+        ]
+        if not producers or not mutating_consumers:
+            continue
+        affordances.append(
+            {
+                "kind": "inspect_before_mutate",
+                "identifier": identifier,
+                "state_field": f"observed_{identifier.removesuffix('_id')}_ids",
+                "produced_by": producers,
+                "consumed_by": mutating_consumers,
+                "required_surfaces": [
+                    "after_tool_result",
+                    "before_tool_call",
+                    "surface_state",
+                    "surface_context",
+                ],
+            }
+        )
+    return affordances
+
+
+def _identifier_flows(tools: tuple[ToolSpec, ...]) -> dict[str, dict[str, list[dict[str, Any]]]]:
+    flows: dict[str, dict[str, list[dict[str, Any]]]] = {}
+    for tool in tools:
+        side_effect = str(tool.metadata.get("side_effect") or "unknown")
+        for path in _schema_identifier_paths(tool.result_schema):
+            identifier = path.rsplit(".", 1)[-1].replace("[]", "")
+            flow = flows.setdefault(identifier, {"produced_by": [], "consumed_by": []})
+            flow["produced_by"].append(
+                {
+                    "tool": tool.name,
+                    "path": path,
+                    "ref": f"tool_result.parsed.{path}",
+                    "side_effect": side_effect,
+                }
+            )
+        for arg in _schema_identifier_args(tool.schema):
+            flow = flows.setdefault(arg, {"produced_by": [], "consumed_by": []})
+            flow["consumed_by"].append(
+                {
+                    "tool": tool.name,
+                    "arg": arg,
+                    "side_effect": side_effect,
+                }
+            )
+    return flows
+
+
+def _schema_identifier_args(schema: dict[str, Any]) -> list[str]:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    return sorted(
+        str(name)
+        for name, subschema in properties.items()
+        if _is_identifier_field(str(name), subschema)
+    )
+
+
+def _schema_identifier_paths(schema: dict[str, Any]) -> list[str]:
+    return [
+        path
+        for path, subschema in _schema_leaf_path_items(schema)
+        if _is_identifier_field(path.rsplit(".", 1)[-1].replace("[]", ""), subschema)
+    ]
+
+
+def _schema_leaf_paths(schema: dict[str, Any]) -> list[str]:
+    return [path for path, _subschema in _schema_leaf_path_items(schema)]
+
+
+def _schema_leaf_path_items(schema: dict[str, Any], prefix: str = "") -> list[tuple[str, dict[str, Any]]]:
+    if not isinstance(schema, dict) or not schema:
+        return []
+    schema_type = schema.get("type")
+    if schema_type == "object" or isinstance(schema.get("properties"), dict):
+        rows: list[tuple[str, dict[str, Any]]] = []
+        for name, subschema in sorted(schema.get("properties", {}).items()):
+            if not isinstance(subschema, dict):
+                continue
+            child_prefix = f"{prefix}.{name}" if prefix else str(name)
+            child_rows = _schema_leaf_path_items(subschema, child_prefix)
+            rows.extend(child_rows or [(child_prefix, subschema)])
+        return rows
+    if schema_type == "array" or isinstance(schema.get("items"), dict):
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else {}
+        array_prefix = f"{prefix}[]"
+        child_rows = _schema_leaf_path_items(item_schema, array_prefix)
+        return child_rows or [(array_prefix, schema)]
+    return [(prefix, schema)] if prefix else []
+
+
+def _is_identifier_field(name: str, schema: Any) -> bool:
+    if not name.endswith("_id"):
+        return False
+    if not isinstance(schema, dict):
+        return True
+    schema_type = schema.get("type")
+    return schema_type in {None, "string", "integer", "number"}
 
 
 def _tool_instruction_text(raw_tools: list[Any]) -> str:

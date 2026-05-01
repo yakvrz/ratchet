@@ -12,9 +12,9 @@ Current samples:
 
 ## Order Desk Tool Loop
 
-Order Desk is Ratchet's cheap agentic development assessment. It is a local deterministic tool-loop environment with a domain policy, live tool schemas, read and mutating tools, hidden environment state, and final grading from the environment state.
+Order Desk is Ratchet's cheap agentic development assessment. It is a local deterministic tool-loop environment with a domain policy, live tool schemas, declared tool result schemas, read and mutating tools, hidden environment state, and final grading from the environment state.
 
-It exists because BFCL and the intent benchmarks are too single-shot to exercise Ratchet's runtime hooks, while tau-bench is expensive enough that it is a poor inner-loop development vehicle. Order Desk should be used to catch architecture regressions in surface inference, context graph execution, tool-call validation, response interception, and staged measurement before spending tau budget.
+It exists because BFCL and the intent benchmarks are too single-shot to exercise Ratchet's runtime hooks, while tau-bench is expensive enough that it is a poor inner-loop development vehicle. Order Desk should be used to catch architecture regressions in surface inference, identifier-flow affordances, context graph execution, tool-call validation, response interception, and staged measurement before spending tau budget.
 
 Order Desk is not an external benchmark result. It is a controlled development vehicle for agentic surface optimization. A useful run should show the optimizer discovering task-agnostic mechanisms through the same DSL used elsewhere, such as context restructuring, read-before-write behavior, tool-error recovery, state exposure, and response claim guarding.
 

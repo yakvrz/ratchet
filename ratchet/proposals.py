@@ -28,7 +28,7 @@ from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformPatch, TransformProgram
-from ratchet.candidates import CandidateProposal, Intervention
+from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication, Intervention
 from ratchet.surface_search import (
     SearchHypothesis,
     build_search_hypothesis,
@@ -59,7 +59,7 @@ PROPOSER_INSTRUCTIONS = (
     "normalize or validate tool_call at before_tool_call, replan on validation failure, append real tool_result "
     "observations at after_tool_result, rewrite model-facing tool descriptions at before_model_call, and guard final responses at before_user_response. "
     "State updates must be executable: use {\"$ref\":\"tool_result.parsed...\"}, {\"$ref\":\"tool_call.args...\"}, or literal values, never prose like 'update from tool result'. "
-    "Context strings may interpolate refs with {{state.field}} after the state field is defined. Every validate patch "
+    "Context strings may interpolate refs with {{state.field}} after the state field is defined. For inspect-before-mutate mechanisms, compose the scaffold: define a state list, append trusted identifiers after successful read/inspection tool results, expose that list in context when useful, and validate mutating tool args with {\"type\":\"tool_arg_in_state\",\"state_field\":\"...\",\"arg\":\"order_id\"} plus replan on failure. Every validate patch "
     "must use the structured executable checks[] advertised by the cited surface, e.g. {\"type\":\"args_schema_valid\"} or {\"type\":\"not_duplicate_tool_call\"}, plus an executable on_fail "
     "operation such as replan; prose-only validation content is invalid. Never rewrite tool_result, "
     "modify tool implementations, branch on task/case IDs, or use benchmark-specific domain rules. "
@@ -170,6 +170,16 @@ class CandidateImplementer:
             active_mechanisms=search_hypothesis.active_mechanisms,
             evidence=_surface_opportunity_evidence(evidence_packet, diagnosis_context),
         ))
+        structural_proposals = _surface_affordance_proposals(
+            surface=surface,
+            surface_opportunities=active_surface_opportunities,
+            experiment_intents=experiment_intents or [],
+        )
+        proposals.extend(structural_proposals)
+        if structural_proposals:
+            analysis_parts.append(
+                f"Added {len(structural_proposals)} surface-derived composed scaffold candidate(s)."
+            )
         llm_proposals, surface_opportunity_considerations = self._llm_proposals(
             summary,
             surface,
@@ -994,6 +1004,142 @@ def _compact_surface_opportunity(surface_opportunity: SurfaceOpportunity) -> dic
     }
 
 
+def _surface_affordance_proposals(
+    *,
+    surface: SurfaceSpec,
+    surface_opportunities: list[SurfaceOpportunity],
+    experiment_intents: list[ExperimentIntent],
+) -> list[CandidateProposal]:
+    opportunity_by_target = {item.target_name: item for item in surface_opportunities}
+    proposals: list[CandidateProposal] = []
+    for affordance in surface.affordances:
+        if affordance.get("kind") != "inspect_before_mutate":
+            continue
+        identifier = str(affordance.get("identifier") or "")
+        state_field = str(affordance.get("state_field") or "")
+        if not identifier or not state_field:
+            continue
+        opportunity = opportunity_by_target.get(f"inspect_before_mutate.{identifier}")
+        if opportunity is None:
+            continue
+        intent = _intent_for_opportunity(opportunity.surface_opportunity_id, experiment_intents)
+        patches: list[dict[str, Any]] = [
+            {
+                "op": "define_state",
+                "field": state_field,
+                "type": "list[string]",
+                "initial": [],
+            }
+        ]
+        for producer in list(affordance.get("produced_by") or [])[:3]:
+            if not isinstance(producer, dict):
+                continue
+            tool = str(producer.get("tool") or "")
+            ref = str(producer.get("ref") or "")
+            if not tool or not ref:
+                continue
+            patches.append(
+                {
+                    "hook": "after_tool_result",
+                    "op": "append_state",
+                    "field": state_field,
+                    "value": {"$ref": ref},
+                    "extend": "[]" in ref,
+                    "when": {"tool_call.name": tool},
+                }
+            )
+        patches.append(
+            {
+                "hook": "before_model_call",
+                "op": "render_state_section",
+                "section": "observed_identifiers",
+                "fields": [state_field],
+                "position": "before:recent_messages",
+            }
+        )
+        for consumer in list(affordance.get("consumed_by") or [])[:5]:
+            if not isinstance(consumer, dict):
+                continue
+            tool = str(consumer.get("tool") or "")
+            arg = str(consumer.get("arg") or "")
+            if not tool or arg != identifier:
+                continue
+            patches.append(
+                {
+                    "hook": "before_tool_call",
+                    "op": "validate",
+                    "tool": tool,
+                    "target": "tool_call",
+                    "checks": [
+                        {
+                            "type": "tool_arg_in_state",
+                            "state_field": state_field,
+                            "arg": identifier,
+                        }
+                    ],
+                    "on_fail": {
+                        "op": "replan",
+                        "message": (
+                            f"Inspect the relevant record and observe its {identifier} through a tool result "
+                            "before using this mutating tool."
+                        ),
+                    },
+                }
+            )
+        if len(patches) <= 3:
+            continue
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": f"structural_inspect_before_mutate_{identifier}",
+                "patches": patches[:12],
+                "metadata": {
+                    "source": "surface_affordance",
+                    "affordance_kind": "inspect_before_mutate",
+                    "identifier": identifier,
+                },
+            }
+        )
+        proposals.append(
+            CandidateProposal(
+                program=program,
+                applications=[
+                    CandidateSurfaceApplication(
+                        surface_opportunity_id=opportunity.surface_opportunity_id,
+                        rationale=f"Compose observed-{identifier} state tracking with mutating-tool validation.",
+                    )
+                ],
+                experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
+                candidate_role="composed",
+                comparison_group=f"inspect_before_mutate.{identifier}",
+                target_slice="global",
+                hypothesis=(
+                    f"Mutating tool calls that consume {identifier} should be grounded in identifiers "
+                    "previously observed from read tool results."
+                ),
+                expected_effects={
+                    "score": "increase if failures involve ungrounded mutating tool calls",
+                    "cost": "low token overhead from state rendering",
+                    "latency": "low",
+                },
+                evaluation_plan="staged_dev_then_holdout",
+            )
+        )
+    return proposals[:2]
+
+
+def _intent_for_opportunity(
+    surface_opportunity_id: str,
+    experiment_intents: list[ExperimentIntent],
+) -> ExperimentIntent | None:
+    for intent in experiment_intents:
+        if surface_opportunity_id in intent.surface_opportunity_ids:
+            return intent
+    for intent in experiment_intents:
+        if intent.mechanism_class == "surface_tool_loop":
+            return intent
+    return None
+
+
 def _surface_opportunity_evidence(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
     packet = evidence_packet.to_dict()
     runtime = packet.get("runtime_defects") or {}
@@ -1213,7 +1359,7 @@ def _compact_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
         },
         "state": surface.state.to_dict(),
         "tools": {
-            "tools": [tool.to_dict() for tool in surface.tools.tools],
+            "tools": [_compact_tool_spec(tool) for tool in surface.tools.tools],
             "tool_description_rewrite_allowed": surface.tools.tool_description_rewrite_allowed,
             "tool_call_interception_allowed": surface.tools.tool_call_interception_allowed,
             "tool_metadata_allowed": surface.tools.tool_metadata_allowed,
@@ -1222,6 +1368,26 @@ def _compact_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
         "response": surface.response.to_dict(),
         "immutable_boundaries": list(surface.immutable_boundaries),
         "safety_constraints": list(surface.safety_constraints),
+        "affordances": [dict(item) for item in surface.affordances],
+    }
+
+
+def _compact_tool_spec(tool: Any) -> dict[str, Any]:
+    schema = dict(getattr(tool, "schema", {}) or {})
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    metadata = dict(getattr(tool, "metadata", {}) or {})
+    return {
+        "name": tool.name,
+        "description": tool.description,
+        "args": {
+            "properties": sorted(str(key) for key in properties),
+            "required": list(schema.get("required") or []),
+        },
+        "metadata": {
+            key: value
+            for key, value in metadata.items()
+            if key in {"side_effect", "risk", "result_paths", "source"}
+        },
     }
 
 

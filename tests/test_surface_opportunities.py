@@ -78,6 +78,65 @@ class SurfaceOpportunityTests(unittest.TestCase):
         self.assertIn("validate", tool_loop[0].ops)
         self.assertIn("before_tool_call", tool_loop[0].value_schema["hooks"])
 
+    def test_tool_loop_surface_derives_inspect_before_mutate_affordance_from_identifier_flow(self) -> None:
+        surface = tool_loop_surface_from_agent_spec(
+            AgentSpec(name="interactive", model="base"),
+            probe={
+                "domain_policy": "Inspect records before mutation.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "list_orders",
+                            "description": "List orders.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"user_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "cancel_order",
+                            "description": "Cancel an order.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                ],
+                "tool_result_schemas": {
+                    "list_orders": {
+                        "type": "object",
+                        "properties": {
+                            "orders": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"order_id": {"type": "string"}},
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+        )
+
+        opportunities = generate_surface_opportunities(
+            surface,
+            active_mechanisms=["surface_tool_loop"],
+            evidence={"tool_trajectory_defect": True},
+        )
+
+        affordance = surface.affordances[0]
+        self.assertEqual(affordance["identifier"], "order_id")
+        self.assertEqual(affordance["state_field"], "observed_order_ids")
+        self.assertEqual(affordance["produced_by"][0]["ref"], "tool_result.parsed.orders[].order_id")
+        ids = {item.surface_opportunity_id for item in opportunities}
+        self.assertIn("surface.surface_tool_loop.inspect_before_mutate_order_id", ids)
+
 
 if __name__ == "__main__":
     unittest.main()

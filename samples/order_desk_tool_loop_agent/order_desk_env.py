@@ -58,6 +58,10 @@ class OrderDeskEnv:
     def tools_info(self) -> list[dict[str, Any]]:
         return TOOLS_INFO
 
+    @property
+    def tool_result_schemas(self) -> dict[str, dict[str, Any]]:
+        return TOOL_RESULT_SCHEMAS
+
     def reset(self, task_index: int | None = None) -> EnvResponse:
         return EnvResponse(
             observation=str(self.task["user_request"]),
@@ -537,3 +541,91 @@ TOOLS_INFO = [
         },
     },
 ]
+
+
+USER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "user_id": {"type": "string"},
+        "email": {"type": "string"},
+        "first_name": {"type": "string"},
+        "last_name": {"type": "string"},
+        "zip": {"type": "string"},
+    },
+}
+
+ORDER_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "item_id": {"type": "string"},
+        "name": {"type": "string"},
+        "returned": {"type": "boolean"},
+    },
+}
+
+ORDER_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order_id": {"type": "string"},
+        "user_id": {"type": "string"},
+        "status": {"type": "string"},
+        "product_names": {"type": "array", "items": {"type": "string"}},
+        "created_at": {"type": "string"},
+        "items": {"type": "array", "items": ORDER_ITEM_SCHEMA},
+    },
+}
+
+ORDER_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "order_id": {"type": "string"},
+        "status": {"type": "string"},
+        "product_names": {"type": "array", "items": {"type": "string"}},
+        "created_at": {"type": "string"},
+    },
+}
+
+ACTION_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string"},
+        "order_id": {"type": "string"},
+        "item_id": {"type": "string"},
+        "reason": {"type": "string"},
+        "refund_method": {"type": "string"},
+    },
+}
+
+TOOL_RESULT_SCHEMAS = {
+    "find_user_by_email": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "user": USER_SCHEMA},
+    },
+    "find_user_by_name_zip": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "user": USER_SCHEMA},
+    },
+    "list_orders": {
+        "type": "object",
+        "properties": {
+            "status": {"type": "string"},
+            "orders": {"type": "array", "items": ORDER_SUMMARY_SCHEMA},
+        },
+    },
+    "get_order": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "order": ORDER_SCHEMA},
+    },
+    "cancel_order": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "action": ACTION_SCHEMA, "order": ORDER_SCHEMA},
+    },
+    "modify_address": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "action": ACTION_SCHEMA, "order": ORDER_SCHEMA},
+    },
+    "return_item": {
+        "type": "object",
+        "properties": {"status": {"type": "string"}, "action": ACTION_SCHEMA, "order": ORDER_SCHEMA},
+    },
+}

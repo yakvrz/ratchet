@@ -143,7 +143,7 @@ class TransformCompiler:
         self._validate_model_op(index, patch, surface)
         self._validate_response_op(index, patch, surface)
         self._validate_tool_op(index, patch, surface)
-        self._validate_validation_checks(index, patch, hook_name)
+        self._validate_validation_checks(index, patch, hook_name, state_fields)
         self._validate_references(index, patch, hook.available_inputs, state_fields)
 
     def _validate_context_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
@@ -272,7 +272,13 @@ class TransformCompiler:
         if op == "rewrite_tool_result":
             self._reject(index, "tool_result_tampering", "Transform programs may not rewrite tool results.")
 
-    def _validate_validation_checks(self, index: int, patch: TransformPatch, hook_name: str) -> None:
+    def _validate_validation_checks(
+        self,
+        index: int,
+        patch: TransformPatch,
+        hook_name: str,
+        state_fields: set[str],
+    ) -> None:
         if patch.op.op not in {"validate", "validate_claims"}:
             return
         checks = patch.op.params.get("checks")
@@ -286,6 +292,15 @@ class TransformCompiler:
             error = validate_check_payload(check, hook=hook_name)
             if error is not None:
                 self._reject(index, "unsupported_validation_check", error)
+            normalized = normalize_validation_check(check)
+            if isinstance(normalized, dict):
+                state_field = normalized.get("state_field")
+                if isinstance(state_field, str) and state_field and state_field not in state_fields:
+                    self._reject(
+                        index,
+                        "unknown_state_field",
+                        f"Validation check {normalized.get('type')!r} references undefined state field {state_field!r}.",
+                    )
         patch.op.params["checks"] = [normalize_validation_check(check) for check in checks]
 
     def _validate_references(

@@ -193,6 +193,52 @@ class _TwoToolClient:
         )
 
 
+class _MutateAfterLookupClient:
+    def __init__(self, *, order_id: str) -> None:
+        self.calls = 0
+        self.order_id = order_id
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup_order", "arguments": '{"order_id": "A1"}'},
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        if self.calls == 2:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "mutate_order", "arguments": f'{{"order_id": "{self.order_id}"}}'},
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is updated."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
 class _ToolDescriptionClient:
     def __init__(self) -> None:
         self.tool_descriptions: list[str] = []
@@ -419,6 +465,172 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
         self.assertTrue(any(item["op"] == "replan" for item in trace))
         self.assertTrue(any(turn.message == "Use observed identifiers only." for turn in record.diagnostics.turns))
+
+    def test_tool_arg_in_state_guard_composes_with_after_tool_result_state(self) -> None:
+        env = _FakeEnvironment(
+            tools_info=[
+                *_FakeEnvironment.tools_info,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mutate_order",
+                        "description": "Mutate an order.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"order_id": {"type": "string"}},
+                            "required": ["order_id"],
+                        },
+                    },
+                },
+            ]
+        )
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(
+                name="fake-tool-loop",
+                model="gpt-4o",
+                model_options=["gpt-4o"],
+                tools={
+                    "lookup_order": AgentTool(name="lookup_order", metadata={"side_effect": "read"}),
+                    "mutate_order": AgentTool(name="mutate_order", metadata={"side_effect": "mutating"}),
+                },
+            ),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_MutateAfterLookupClient(order_id="A1"),
+        )
+        surface = adapter.surface_spec((self._case(),))
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "state_guard",
+                    "patches": [
+                        {"op": "define_state", "field": "inspected_order_ids", "type": "list[string]", "initial": []},
+                        {
+                            "hook": "after_tool_result",
+                            "op": "append_state",
+                            "field": "inspected_order_ids",
+                            "value": {"$ref": "tool_result.parsed.order.order_id"},
+                            "when": {"tool_call.name": "lookup_order"},
+                        },
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "tool": "mutate_order",
+                            "target": "tool_call",
+                            "checks": [
+                                {"type": "tool_arg_in_state", "state_field": "inspected_order_ids", "arg": "order_id"}
+                            ],
+                            "on_fail": {"op": "replan", "message": "Inspect this order before mutating it."},
+                        },
+                    ],
+                }
+            ),
+            surface,
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "passed" for item in trace))
+        self.assertIn(("mutate_order", {"order_id": "A1"}), env.actions)
+
+    def test_tool_arg_in_state_guard_replans_when_state_lacks_arg(self) -> None:
+        env = _FakeEnvironment(
+            tools_info=[
+                *_FakeEnvironment.tools_info,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mutate_order",
+                        "description": "Mutate an order.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"order_id": {"type": "string"}},
+                            "required": ["order_id"],
+                        },
+                    },
+                },
+            ]
+        )
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(
+                name="fake-tool-loop",
+                model="gpt-4o",
+                model_options=["gpt-4o"],
+                tools={
+                    "lookup_order": AgentTool(name="lookup_order", metadata={"side_effect": "read"}),
+                    "mutate_order": AgentTool(name="mutate_order", metadata={"side_effect": "mutating"}),
+                },
+            ),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_MutateAfterLookupClient(order_id="Z999"),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "state_guard_replan",
+                    "patches": [
+                        {"op": "define_state", "field": "inspected_order_ids", "type": "list[string]", "initial": []},
+                        {
+                            "hook": "after_tool_result",
+                            "op": "append_state",
+                            "field": "inspected_order_ids",
+                            "value": {"$ref": "tool_result.parsed.order.order_id"},
+                            "when": {"tool_call.name": "lookup_order"},
+                        },
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "tool": "mutate_order",
+                            "target": "tool_call",
+                            "checks": [
+                                {"type": "tool_arg_in_state", "state_field": "inspected_order_ids", "arg": "order_id"}
+                            ],
+                            "on_fail": {"op": "replan", "message": "Inspect this order before mutating it."},
+                        },
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
+        self.assertNotIn(("mutate_order", {"order_id": "Z999"}), env.actions)
+        self.assertTrue(any(turn.message == "Inspect this order before mutating it." for turn in record.diagnostics.turns))
+
+    def test_tool_arg_in_state_requires_defined_state_field(self) -> None:
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: _FakeEnvironment(),
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+
+        compiled = TransformCompiler().compile(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "undefined_state_guard",
+                    "patches": [
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "target": "tool_call",
+                            "checks": [
+                                {"type": "tool_arg_in_state", "state_field": "inspected_order_ids", "arg": "order_id"}
+                            ],
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "unknown_state_field")
 
     def test_tool_loop_validation_accepts_structured_schema_check(self) -> None:
         env = _FakeEnvironment()

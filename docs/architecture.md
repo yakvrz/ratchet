@@ -64,9 +64,9 @@ Ratchet owns:
 
 `AdapterGenerator` turns a harness into a runtime adapter. It infers a `SurfaceSpec`, invokes transform hooks, executes model calls, records instrumentation, and exports compiled artifacts.
 
-`SurfaceSpec` is the executable optimization contract. It describes context sections, lifecycle hooks, typed state support, tool interaction capabilities, model-call controls, response interception, immutable boundaries, and safety constraints.
+`SurfaceSpec` is the executable optimization contract. It describes context sections, lifecycle hooks, typed state support, tool interaction capabilities, tool result shapes when adapters expose them, model-call controls, response interception, immutable boundaries, and safety constraints. For tool-loop agents it may also expose structural affordances, such as identifier flows from read-tool results into mutating-tool arguments.
 
-`SurfaceOpportunity` is the deterministic planning view of `SurfaceSpec`. It names an editable target, the DSL operations legal on that target, expected measurement axes, suitability evidence, and cost/risk hints. It is not a recipe and it does not duplicate the surface contract.
+`SurfaceOpportunity` is the deterministic planning view of `SurfaceSpec`. It names an editable target or structural affordance, the DSL operations legal on that target, expected measurement axes, suitability evidence, and cost/risk hints. It is not a benchmark recipe and it does not duplicate the surface contract.
 
 `TransformProgram` is the candidate artifact. It is a typed, hook-based program over the inferred surface, with operations for context construction, state updates, tool-call validation, model configuration, response handling, control flow, and instrumentation.
 
