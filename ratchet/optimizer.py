@@ -65,7 +65,7 @@ from ratchet.results import (
 )
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
-from ratchet.transform_program import CompiledCandidate, TransformPatch, TransformProgram
+from ratchet.transform_program import CompiledCandidate, TransformOp, TransformPatch, TransformProgram
 from ratchet.candidates import CandidateProposal
 from ratchet.surface_search import TransformContextKey
 from ratchet.transform_results import (
@@ -104,7 +104,7 @@ def compose_transform_candidate(
     compiler: TransformCompiler,
     surface: SurfaceSpec,
 ) -> CompiledCandidate:
-    patches = (*((parent.program.patches if parent is not None else ())), *child.patches)
+    patches = _compose_transform_patches(parent.program.patches if parent is not None else (), child.patches)
     metadata = {
         **(dict(parent.program.metadata) if parent is not None else {}),
         **dict(child.metadata),
@@ -117,6 +117,63 @@ def compose_transform_candidate(
         metadata=metadata,
     )
     return compiler.compile_or_raise(program, surface)
+
+
+def _compose_transform_patches(
+    parent_patches: tuple[TransformPatch, ...],
+    child_patches: tuple[TransformPatch, ...],
+) -> tuple[TransformPatch, ...]:
+    patches = list(parent_patches)
+    state_fields = {
+        str(patch.op.params.get("field"))
+        for patch in parent_patches
+        if patch.op.op == "define_state" and patch.op.params.get("field")
+    }
+    context_sections: dict[str, int] = {}
+    for index, patch in enumerate(patches):
+        if patch.op.op not in {"add_context_section", "render_state_section"}:
+            continue
+        section = patch.op.params.get("section")
+        if section:
+            context_sections[str(section)] = index
+    for child_patch in child_patches:
+        if child_patch.op.op == "define_state":
+            field = str(child_patch.op.params.get("field") or "")
+            if field in state_fields:
+                continue
+            state_fields.add(field)
+        if child_patch.op.op in {"add_context_section", "render_state_section"}:
+            section = str(child_patch.op.params.get("section") or "")
+            existing_index = context_sections.get(section)
+            if existing_index is not None:
+                _merge_rendered_state_section(patches, existing_index, child_patch)
+                continue
+            if section:
+                context_sections[section] = len(patches)
+        patches.append(child_patch)
+    return tuple(patches)
+
+
+def _merge_rendered_state_section(patches: list[TransformPatch], existing_index: int, child_patch: TransformPatch) -> None:
+    existing = patches[existing_index]
+    if existing.op.op != "render_state_section" or child_patch.op.op != "render_state_section":
+        return
+    existing_fields = existing.op.params.get("fields")
+    child_fields = child_patch.op.params.get("fields")
+    if not isinstance(existing_fields, list) or not isinstance(child_fields, list):
+        return
+    fields = [str(field) for field in existing_fields]
+    for field in child_fields:
+        text = str(field)
+        if text not in fields:
+            fields.append(text)
+    params = {**existing.op.params, "fields": fields}
+    patches[existing_index] = TransformPatch(
+        op=TransformOp(existing.op.op, params),
+        hook=existing.hook,
+        when=existing.when,
+        unless=existing.unless,
+    )
 
 
 @dataclass

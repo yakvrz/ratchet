@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ratchet.context_graph import ContextGraph
+from ratchet.optimizer import compose_transform_candidate
 from ratchet.runtime import RuntimeContext, TransformRuntime
 from ratchet.surfaces import surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
@@ -266,6 +267,55 @@ class TransformLibraryTests(unittest.TestCase):
         TransformRuntime(candidate).run_hook("on_task_end", ctx)
 
         self.assertEqual(ctx.trace_annotations[-1]["fields"]["prior"][0]["op"], "rewrite_response")
+
+    def test_composed_candidate_deduplicates_parent_state_and_context_definitions(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        compiler = TransformCompiler()
+        parent = compiler.compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "parent",
+                    "patches": [
+                        {"op": "define_state", "field": "observed_ids", "type": "list[string]", "initial": []},
+                        {
+                            "hook": "before_model_call",
+                            "op": "render_state_section",
+                            "section": "observed_identifiers",
+                            "fields": ["observed_ids"],
+                        },
+                    ],
+                }
+            ),
+            surface,
+        )
+        child = TransformProgram.from_dict(
+            {
+                "candidate_id": "child",
+                "patches": [
+                    {"op": "define_state", "field": "observed_ids", "type": "list[string]", "initial": []},
+                    {"op": "define_state", "field": "observed_item_ids", "type": "list[string]", "initial": []},
+                    {
+                        "hook": "before_model_call",
+                        "op": "render_state_section",
+                        "section": "observed_identifiers",
+                        "fields": ["observed_item_ids"],
+                    },
+                ],
+            }
+        )
+
+        composed = compose_transform_candidate(parent, child, compiler=compiler, surface=surface)
+
+        self.assertEqual(composed.report.status, "compiled")
+        define_fields = [
+            patch.op.params["field"]
+            for patch in composed.program.patches
+            if patch.op.op == "define_state"
+        ]
+        self.assertEqual(define_fields, ["observed_ids", "observed_item_ids"])
+        render_patches = [patch for patch in composed.program.patches if patch.op.op == "render_state_section"]
+        self.assertEqual(len(render_patches), 1)
+        self.assertEqual(render_patches[0].op.params["fields"], ["observed_ids", "observed_item_ids"])
 
 
 if __name__ == "__main__":
