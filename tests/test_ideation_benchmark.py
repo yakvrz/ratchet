@@ -38,7 +38,7 @@ class IdeationBenchmarkTests(unittest.TestCase):
                             "raw_candidate_count": 1,
                             "valid_candidate_count": 1,
                         },
-                        "planner": {"intent_mechanisms": {"surface_context": 1}},
+                        "planner": {"brief_mechanisms": {"surface_context": 1}},
                     }
                 )
             )
@@ -56,13 +56,13 @@ class IdeationBenchmarkTests(unittest.TestCase):
                 )
                 + "\n"
             )
-            (root / "research_theories.jsonl").write_text(
+            (root / "search_plans.jsonl").write_text(
                 json.dumps(
                     {
-                        "research_theory": {
-                            "experiment_opportunities": [
-                                {"mechanism_class": "surface_context"}
-                            ]
+                        "search_plan": {
+                            "briefs": [
+                                {"brief_id": "brief-1", "mechanism_class": "surface_context"}
+                            ],
                         }
                     }
                 )

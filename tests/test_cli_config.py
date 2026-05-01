@@ -558,13 +558,9 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     out = "results/run"
                     optimizer_model = "default-model"
                     optimizer_reasoning = "medium"
-                    diagnoser_model = "diagnoser-model"
-                    research_theorist_model = "theorist-model"
-                    research_theorist_reasoning = "high"
-                    research_planner_reasoning = "high"
+                    search_planner_model = "planner-model"
+                    search_planner_reasoning = "high"
                     candidate_implementer_model = "implementer-model"
-                    measurement_selector_model = "selector-model"
-                    measurement_selector_reasoning = "low"
                     """
                 ).strip()
             )
@@ -573,21 +569,15 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 loaded.optimizer_role_models(),
                 {
-                    "diagnoser": "diagnoser-model",
-                    "research_theorist": "theorist-model",
-                    "research_planner": "default-model",
+                    "search_planner": "planner-model",
                     "candidate_implementer": "implementer-model",
-                    "measurement_selector": "selector-model",
                 },
             )
             self.assertEqual(
                 loaded.optimizer_role_reasoning(),
                 {
-                    "diagnoser": "medium",
-                    "research_theorist": "high",
-                    "research_planner": "high",
+                    "search_planner": "high",
                     "candidate_implementer": "medium",
-                    "measurement_selector": "low",
                 },
             )
 
@@ -612,6 +602,26 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 candidate_implementer_model="override-implementer",
             )
             self.assertEqual(overridden.optimizer_role_models()["candidate_implementer"], "override-implementer")
+
+    def test_config_rejects_removed_optimizer_role_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    diagnoser_model = "removed"
+                    """
+                ).strip()
+            )
+
+            with self.assertRaisesRegex(RatchetConfigError, "diagnoser_model"):
+                load_run_config(config_path)
 
     def test_config_rejects_unknown_top_level_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

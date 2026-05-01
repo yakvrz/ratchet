@@ -54,7 +54,7 @@ def assess_ideation_run(
     candidate_metrics = _read_json(root / "candidate_metrics.json")
     ideation_metrics = _read_json(root / "ideation_metrics.json")
     proposals = _read_jsonl(root / "proposals.jsonl")
-    research_theories = _read_jsonl(root / "research_theories.jsonl")
+    search_plans = _read_jsonl(root / "search_plans.jsonl")
 
     candidate_rows = [row for row in proposals if _is_candidate_row(row)]
     valid_rows = [row for row in candidate_rows if row.get("valid") is not False]
@@ -68,7 +68,7 @@ def assess_ideation_run(
         if str(row.get("status") or "") == "validated" and row.get("candidate_id")
     }
     candidate_mechanisms = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
-    opportunity_mechanisms = _opportunity_mechanisms(research_theories)
+    opportunity_mechanisms = _opportunity_mechanisms(search_plans)
     expected_mechanisms = set(spec.mechanisms_of_interest or sorted(opportunity_mechanisms))
     pivotal_mechanisms = set(spec.pivotal_mechanisms)
     mechanisms_discovered = set(candidate_mechanisms)
@@ -81,7 +81,7 @@ def assess_ideation_run(
     holdout_delta = _holdout_delta(candidate_metrics)
     valid_rate = float((ideation_metrics.get("implementer") or {}).get("valid_implementation_rate") or 0.0)
     checks = {
-        "intent_relevance": not expected_mechanisms or bool(expected_mechanisms & set((ideation_metrics.get("planner") or {}).get("intent_mechanisms") or {})),
+        "intent_relevance": not expected_mechanisms or bool(expected_mechanisms & set((ideation_metrics.get("planner") or {}).get("brief_mechanisms") or {})),
         "valid_implementation_rate": valid_rate >= spec.min_valid_implementation_rate,
         "pivotal_mechanism_discovered": not pivotal_mechanisms or bool(pivotal_candidate_hashes),
         "pivotal_reached_full_dev": not pivotal_mechanisms
@@ -162,15 +162,15 @@ def _is_candidate_row(row: dict[str, Any]) -> bool:
     )
 
 
-def _opportunity_mechanisms(research_theories: list[dict[str, Any]]) -> set[str]:
+def _opportunity_mechanisms(search_plans: list[dict[str, Any]]) -> set[str]:
     mechanisms: set[str] = set()
-    for row in research_theories:
-        theory = row.get("research_theory") if "research_theory" in row else row
-        if not isinstance(theory, dict):
+    for row in search_plans:
+        plan = row.get("search_plan") if "search_plan" in row else row
+        if not isinstance(plan, dict):
             continue
-        for opportunity in theory.get("experiment_opportunities") or []:
-            if isinstance(opportunity, dict) and opportunity.get("mechanism_class"):
-                mechanisms.add(str(opportunity["mechanism_class"]))
+        for brief in plan.get("briefs") or []:
+            if isinstance(brief, dict) and brief.get("mechanism_class"):
+                mechanisms.add(str(brief["mechanism_class"]))
     return mechanisms
 
 

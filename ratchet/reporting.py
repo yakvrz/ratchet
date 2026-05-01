@@ -34,12 +34,13 @@ def build_outcome_analysis(
     baseline_dev: CandidateSummary,
     accepted_dev_candidates: list[CandidateSummary],
     holdout_candidates: list[CandidateSummary],
-    decision_log: list[dict[str, Any]],
+    events: list[dict[str, Any]],
     finalist_statuses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    proposal_iterations = [event for event in decision_log if event.get("type") == "proposal_iteration"]
-    proposal_evaluations = [event for event in decision_log if event.get("type") == "proposal_evaluation"]
-    holdout_validations = [event for event in decision_log if event.get("type") == "holdout_validation"]
+    proposal_iterations = [event for event in events if event.get("type") == "proposal_iteration"]
+    proposal_evaluations = [event for event in events if event.get("type") == "proposal_evaluation"]
+    holdout_validations = [event for event in events if event.get("type") == "holdout_validation"]
+    search_plan_events = [event for event in events if event.get("type") == "search_plan"]
     dev_rejection_reasons: Counter[str] = Counter(
         str(event.get("rejection_reason"))
         for event in proposal_evaluations
@@ -57,7 +58,8 @@ def build_outcome_analysis(
     )
     latest_iteration = proposal_iterations[-1] if proposal_iterations else {}
     latest_stats = dict(latest_iteration.get("proposal_stats") or {})
-    diagnosis_analysis = str(latest_iteration.get("diagnosis_analysis", ""))
+    latest_search_plan = search_plan_events[-1].get("search_plan", {}) if search_plan_events else {}
+    search_plan_diagnosis = str(latest_search_plan.get("diagnosis", ""))
     proposal_analysis = str(latest_iteration.get("proposal_analysis", ""))
     finalist_status_rows = list(finalist_statuses or [])
     if not finalist_status_rows:
@@ -103,7 +105,7 @@ def build_outcome_analysis(
             status = "no_valid_model_proposals"
             if "failed" in proposal_analysis.lower():
                 summary = "The optimizing model proposal call failed and Ratchet did not use a fallback."
-            elif "No failing cases" in diagnosis_analysis and objective.mode == "correctness":
+            elif "No failing cases" in search_plan_diagnosis and objective.mode == "correctness":
                 status = "no_failures"
                 summary = "Baseline had no dev failures under the correctness objective."
             else:
@@ -142,7 +144,7 @@ def build_outcome_analysis(
         "proposal_evaluations": len(proposal_evaluations),
         "accepted_dev_candidates": len(accepted_dev_candidates),
         "holdout_validations": len(holdout_validations),
-        "latest_diagnosis_analysis": diagnosis_analysis,
+        "latest_search_plan_diagnosis": search_plan_diagnosis,
         "latest_proposal_analysis": proposal_analysis,
         "latest_proposal_stats": latest_stats,
         "rejection_reasons": dict(sorted(rejection_reasons.items(), key=lambda item: (-item[1], item[0]))),
@@ -171,11 +173,22 @@ class RatchetReporter:
             else None
         )
         write_json(self.out_dir / "run_manifest.json", result.manifest)
-        write_json(self.out_dir / "decision_log.json", result.decision_log)
+        write_jsonl(self.out_dir / "events.jsonl", result.events)
+        write_json(
+            self.out_dir / "run_summary.json",
+            {
+                "selected_candidate_id": result.selected_candidate_id,
+                "promoted": result.promoted,
+                "outcome_analysis": result.outcome_analysis,
+                "search_plan_count": len(result.search_plans),
+                "proposal_count": len(result.proposals),
+                "accepted_dev_count": len(result.accepted_dev_candidates),
+                "holdout_candidate_count": len(result.holdout_candidates),
+            },
+        )
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
         write_json(self.out_dir / "evidence_ledger.json", result.evidence_ledger)
-        write_jsonl(self.out_dir / "diagnoses.jsonl", result.diagnoses)
-        write_jsonl(self.out_dir / "research_theories.jsonl", result.research_theories)
+        write_jsonl(self.out_dir / "search_plans.jsonl", result.search_plans)
         write_jsonl(self.out_dir / "proposals.jsonl", result.proposals)
         write_json(
             self.out_dir / "candidate_metrics.json",
@@ -188,7 +201,7 @@ class RatchetReporter:
                 "holdout_candidates": [summary.to_dict() for summary in result.holdout_candidates],
                 "pareto_frontier": result.pareto_frontier,
                 "generated_surface": result.generated_surface,
-                "research_theories": result.research_theories,
+                "search_plans": result.search_plans,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
                 "transform_summaries": result.transform_summaries,
@@ -221,7 +234,7 @@ class RatchetReporter:
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
-                "research_theories": result.research_theories,
+                "search_plans": result.search_plans,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
@@ -276,7 +289,7 @@ class RatchetReporter:
             "",
             "## Task Theory",
             "",
-            *self._research_theory_rows(result),
+            *self._search_plan_rows(result),
             "",
             "## Frontier Categories",
             "",
@@ -324,14 +337,14 @@ class RatchetReporter:
             f"- Proposal evaluations: {result.outcome_analysis['proposal_evaluations']}",
             f"- Accepted dev candidates: {result.outcome_analysis['accepted_dev_candidates']}",
             f"- Holdout validations: {result.outcome_analysis['holdout_validations']}",
-            f"- Latest diagnosis: {result.outcome_analysis['latest_diagnosis_analysis'] or 'n/a'}",
+            f"- Latest search-plan diagnosis: {result.outcome_analysis['latest_search_plan_diagnosis'] or 'n/a'}",
             f"- Latest proposal: {result.outcome_analysis['latest_proposal_analysis'] or 'n/a'}",
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
             f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
             "",
-            "## Research Steps",
+            "## Search Steps",
             "",
-            *self._research_step_rows(result),
+            *self._search_step_rows(result),
             "",
             "## Ideation Quality",
             "",
@@ -575,35 +588,28 @@ class RatchetReporter:
         return rows
 
     @staticmethod
-    def _research_step_rows(result: RatchetResult) -> list[str]:
+    def _search_step_rows(result: RatchetResult) -> list[str]:
         rows = [
             event
-            for event in result.decision_log
-            if event.get("type") in {"research_plan", "measurement_decision"}
+            for event in result.events
+            if event.get("type") in {"search_plan_call", "search_plan"}
         ]
         if not rows:
-            return ["No research planner or measurement selector decisions were recorded."]
+            return ["No search planner decisions were recorded."]
         table = [
-            "| Iteration | Type | Stage | Output | Rationale |",
+            "| Iteration | Type | Output | Rationale |",
             "| ---: | --- | --- | --- | --- |",
         ]
         for row in rows[-12:]:
             row_type = str(row.get("type") or "")
-            if row_type == "research_plan":
-                intents = row.get("experiment_intents") or []
-                output = ", ".join(str(item.get("intent_id", ""))[:16] for item in intents if isinstance(item, dict))
-                rationale = f"{len(intents)} intent(s)"
-                stage = "planning"
-            else:
-                decision = row.get("decision") or {}
-                output = ", ".join(str(item)[:12] for item in decision.get("selected_candidate_ids", [])) or "none"
-                rationale = _short_reason(decision.get("rationale"))
-                stage = str(row.get("stage") or "")
+            plan = row.get("search_plan") or {}
+            briefs = plan.get("briefs") or []
+            output = ", ".join(str(item.get("brief_id", ""))[:16] for item in briefs if isinstance(item, dict))
+            rationale = f"{len(briefs)} brief(s)"
             table.append(
                 "| "
                 f"{row.get('iteration')} | "
                 f"`{row_type}` | "
-                f"`{stage}` | "
                 f"{output or 'none'} | "
                 f"{rationale} |"
             )
@@ -622,8 +628,8 @@ class RatchetReporter:
         stage_counts = discovery.get("stage_counts") or {}
         invalid_reasons = implementer.get("invalid_reason_counts") or {}
         rows = [
-            f"- Planner intents: {planner.get('intent_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
-            f"- Intents citing surface opportunities: {planner.get('intent_with_surface_opportunity_ids', 0)}.",
+            f"- Planner briefs: {planner.get('brief_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
+            f"- Briefs citing surface opportunities: {planner.get('brief_with_surface_opportunity_ids', 0)}.",
             f"- Implementer candidates: valid={implementer.get('valid_candidate_count', 0)} invalid={implementer.get('invalid_candidate_count', 0)}.",
             f"- Discovery stages: {json.dumps(stage_counts, sort_keys=True)}",
         ]
@@ -631,34 +637,29 @@ class RatchetReporter:
             rows.append(f"- Invalid implementation reasons: {json.dumps(invalid_reasons, sort_keys=True)}")
         missing = planner.get("missing_opportunity_mechanisms") or []
         if missing:
-            rows.append(f"- Task-theory opportunities not covered by intents: {json.dumps(missing[:8])}")
+            rows.append(f"- Planner mechanisms not covered by candidates: {json.dumps(missing[:8])}")
         return rows
 
     @staticmethod
-    def _research_theory_rows(result: RatchetResult) -> list[str]:
-        if not result.research_theories:
-            return ["No research theory snapshots were recorded."]
+    def _search_plan_rows(result: RatchetResult) -> list[str]:
+        if not result.search_plans:
+            return ["No search plan snapshots were recorded."]
         rows = []
-        for item in result.research_theories[-5:]:
-            theory = item.get("research_theory") or {}
-            opportunities = [
-                str(row.get("mechanism_class"))
-                for row in theory.get("experiment_opportunities", [])[:3]
-                if isinstance(row, dict) and row.get("mechanism_class")
-            ]
-            hypotheses = [
-                str(row.get("hypothesis_id"))
-                for row in theory.get("hypotheses", [])[:3]
-                if isinstance(row, dict) and row.get("hypothesis_id")
+        for item in result.search_plans[-5:]:
+            plan = item.get("search_plan") or {}
+            mechanisms = list(plan.get("target_mechanisms") or plan.get("active_mechanisms") or [])[:3]
+            briefs = [
+                str(row.get("brief_id"))
+                for row in plan.get("briefs", [])[:3]
+                if isinstance(row, dict) and row.get("brief_id")
             ]
             rows.append(
                 "- "
                 f"iteration={item.get('iteration')} parent=`{item.get('parent_candidate_id')}` "
-                f"primary=`{theory.get('primary_hypothesis_id') or theory.get('bottleneck_class')}` "
-                f"hypotheses={json.dumps(hypotheses)} "
-                f"residual={json.dumps(theory.get('residual_failure_modes', []))} "
-                f"opportunities={json.dumps(opportunities)} "
-                f"confidence={theory.get('confidence')}"
+                f"plan=`{plan.get('plan_id')}` "
+                f"briefs={json.dumps(briefs)} "
+                f"mechanisms={json.dumps(mechanisms)} "
+                f"confidence={plan.get('confidence')}"
             )
         return rows
 

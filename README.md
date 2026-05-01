@@ -28,26 +28,22 @@ AgentHarness
   -> SurfaceOpportunity[]
   -> BaselineEvaluation
   -> EvidencePacket
-  -> ResearchTheory
-  -> ResearchState
-  -> ExperimentIntent[]
+  -> SearchPlan
   -> CandidateProposal[]
   -> TransformProgram
   -> TransformCompiler
   -> CompiledCandidate
   -> EvidenceLedger
-  -> MeasurementDecision
   -> FrontierUpdate
   -> HoldoutValidation
 ```
 
-Model roles are split deliberately:
+Model roles are intentionally narrow:
 
-- diagnoser: labels failure modes from eval traces
-- research theorist: turns deterministic evidence into causal hypotheses and experiment opportunities
-- research planner: emits experiment intents only
-- candidate implementer: emits typed transform programs citing surface opportunities
-- measurement selector: chooses which already-valid candidates receive more measurement
+- search planner: reads objective, evidence, surface opportunities, prior evidence, and remaining budget, then emits a typed `SearchPlan`
+- candidate implementer: emits typed transform programs citing search briefs and surface opportunities
+
+Measurement selection is deterministic. Smoke evaluates compiled candidates that fit budget, small-dev screens in proposal order by comparison group, full-dev requires positive objective signal, confirmation checks unstable/runtime-sensitive finalists, and holdout is reserved for selected dev finalists.
 
 Ratchet validates every optimizer output. There are no hand-authored proposal recipes, candidate generators, or task-specific rule profiles in the core loop.
 
@@ -134,11 +130,10 @@ Internal optimization artifacts also appear in run outputs:
 
 - `SurfaceOpportunity`
 - `EvidencePacket`
-- `ResearchTheory`
-- `ExperimentIntent`
+- `SearchPlan`
+- `SearchBrief`
 - `CandidateProposal`
 - `EvidenceLedger`
-- `MeasurementDecision`
 
 Helper utilities:
 
@@ -155,7 +150,7 @@ Helper utilities:
 - The adapter describes the current agent and scorer; it does not choose the optimization strategy.
 - Ratchet compiles typed `TransformProgram` candidates against `SurfaceSpec`, then evaluates compiled candidates under the normal evidence and budget loop.
 - Tool/environment traces are evidence. Tool-related surface opportunities are legal moves derived from the inferred agent surface plus observed trajectory failures.
-- The research planner sees surface opportunities, not raw source files or task-specific recipes.
+- The search planner sees surface opportunities, not raw source files or task-specific recipes.
 - Candidate implementations must compile against declared surfaces; unsupported hooks, state references, and boundary violations are rejected before eval.
 - The scorer, including any LLM judge used by an eval, is frozen and outside the optimization surface.
 - `candidate=None` always means the original user-provided agent.
@@ -173,16 +168,10 @@ Helper utilities:
 - `holdout_top_k`
 - `optimizer_model`
 - `optimizer_reasoning`
-- `diagnoser_model`
-- `diagnoser_reasoning`
-- `research_theorist_model`
-- `research_theorist_reasoning`
-- `research_planner_model`
-- `research_planner_reasoning`
+- `search_planner_model`
+- `search_planner_reasoning`
 - `candidate_implementer_model`
 - `candidate_implementer_reasoning`
-- `measurement_selector_model`
-- `measurement_selector_reasoning`
 - `samples_per_case`
 - `max_case_retries`
 - `case_timeout_s`
@@ -250,15 +239,15 @@ Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1
 Each run writes:
 
 - `case_results.jsonl`: resumable per-case cache keyed by candidate, case digest, eval digest, adapter fingerprint, objective, and surface spec
-- `progress.jsonl`: chronological run events, including model-role calls, case execution, cache hits, and stage decisions
+- `progress.jsonl`: chronological run progress, including model-role calls, case execution, cache hits, and stage decisions
+- `events.jsonl`: typed optimizer events for planning, proposals, staged evaluation, frontier updates, holdout validation, and final selection
+- `run_summary.json`: compact selected-candidate and run outcome summary
 - `candidate_metrics.json`: true baseline, best dev candidate, selected holdout candidate, accepted dev candidates, holdout validations, typed surface, and Pareto frontier
-- `decision_log.json`: research state, research theory, planning, implementation, measurement, holdout validation, and final selection
 - `outcome_analysis.json`: explicit reason for promotion or baseline retention
-- `diagnoses.jsonl`: structured diagnosis buckets per iteration
-- `research_theories.jsonl`: causal theory snapshots produced from deterministic evidence and diagnoses
+- `search_plans.jsonl`: typed search plans produced from deterministic evidence and surface opportunities
 - `proposals.jsonl`: candidate transform programs, cited surface opportunities, and acceptance/rejection outcomes
 - `evidence_ledger.json`: paired candidate evidence, reliability signals, and measurement history
-- `ideation_metrics.json`: planner/implementer/measurement discovery quality
+- `ideation_metrics.json`: search-planner and implementer discovery quality
 - `selected_candidate.json`: selected compiled candidate and promotion status
 - `run_manifest.json`: config, timestamps, cache stats, retries, and runtime-error counts
 - `summary.html`: user-facing run summary
@@ -281,4 +270,4 @@ See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, a
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
-Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override individual roles with `diagnoser_*`, `research_theorist_*`, `research_planner_*`, `candidate_implementer_*`, or `measurement_selector_*` when a run should use different optimizer models per role. The agent may move to allowed models through compiled model-configuration transforms.
+Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override `search_planner_*` or `candidate_implementer_*` when a run should use different optimizer models per role. The agent may move to allowed models through compiled model-configuration transforms.

@@ -39,16 +39,10 @@ def run_optimizer(
     allowed_models: list[str] | None = None,
     optimizer_model: str | None = "gpt-5.4",
     optimizer_reasoning: str | None = "medium",
-    diagnoser_model: str | None = None,
-    diagnoser_reasoning: str | None = None,
-    research_theorist_model: str | None = None,
-    research_theorist_reasoning: str | None = None,
-    research_planner_model: str | None = None,
-    research_planner_reasoning: str | None = None,
+    search_planner_model: str | None = None,
+    search_planner_reasoning: str | None = None,
     candidate_implementer_model: str | None = None,
     candidate_implementer_reasoning: str | None = None,
-    measurement_selector_model: str | None = None,
-    measurement_selector_reasoning: str | None = None,
     samples_per_case: int | None = 1,
     case_concurrency: int | None = 1,
     stage_case_concurrency: int | None = None,
@@ -77,16 +71,10 @@ def run_optimizer(
         allowed_models=allowed_models,
         optimizer_model=optimizer_model,
         optimizer_reasoning=optimizer_reasoning,
-        diagnoser_model=diagnoser_model,
-        diagnoser_reasoning=diagnoser_reasoning,
-        research_theorist_model=research_theorist_model,
-        research_theorist_reasoning=research_theorist_reasoning,
-        research_planner_model=research_planner_model,
-        research_planner_reasoning=research_planner_reasoning,
+        search_planner_model=search_planner_model,
+        search_planner_reasoning=search_planner_reasoning,
         candidate_implementer_model=candidate_implementer_model,
         candidate_implementer_reasoning=candidate_implementer_reasoning,
-        measurement_selector_model=measurement_selector_model,
-        measurement_selector_reasoning=measurement_selector_reasoning,
         samples_per_case=samples_per_case,
         case_concurrency=case_concurrency,
         stage_case_concurrency=stage_case_concurrency,
@@ -112,16 +100,10 @@ def run_optimizer(
         objective=config.objective,
         optimizer_model=config.optimizer_model,
         optimizer_reasoning=config.optimizer_reasoning,
-        diagnoser_model=config.diagnoser_model,
-        diagnoser_reasoning=config.diagnoser_reasoning,
-        research_theorist_model=config.research_theorist_model,
-        research_theorist_reasoning=config.research_theorist_reasoning,
-        research_planner_model=config.research_planner_model,
-        research_planner_reasoning=config.research_planner_reasoning,
+        search_planner_model=config.search_planner_model,
+        search_planner_reasoning=config.search_planner_reasoning,
         candidate_implementer_model=config.candidate_implementer_model,
         candidate_implementer_reasoning=config.candidate_implementer_reasoning,
-        measurement_selector_model=config.measurement_selector_model,
-        measurement_selector_reasoning=config.measurement_selector_reasoning,
         samples_per_case=config.samples_per_case,
         case_concurrency=config.case_concurrency,
         stage_case_concurrency=config.stage_case_concurrency,
@@ -214,75 +196,28 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
             f"examining parent #{row.get('parent_rank')} candidate={_short_hash(row.get('parent_candidate_id'))} "
             + _score_brief(row),
         )
-    if event == "diagnosis_started":
-        return "Diagnose", f"inspecting {row.get('failure_count')} failing case(s) for parent #{row.get('parent_rank')}"
-    if event == "diagnosis_completed":
-        diagnostics = row.get("call_diagnostics") or {}
-        cached = " cached" if row.get("cached") else ""
-        return (
-            "Diagnose",
-            " ".join(
-                part
-                for part in (
-                    f"found {row.get('diagnosis_count')} diagnosis item(s){cached}",
-                    _call_summary(diagnostics),
-                    _short_reason(row.get("analysis")),
-                )
-                if part
-            ),
-        )
-    if event == "research_theory_ready":
-        modes = _join_limited(row.get("residual_failure_modes") or [], limit=3)
-        cached = " cached" if row.get("cached") else ""
-        return (
-            "Theory",
-            f"bottleneck={_humanize_key(row.get('bottleneck_class'))} confidence={row.get('confidence')}{cached}; "
-            f"residual={modes or 'none'}",
-        )
-    if event == "search_hypothesis_ready":
-        return "Hypothesis", f"surface contexts={row.get('active_context_count')}"
-    if event == "research_planner_started":
+    if event == "search_planner_started":
         return (
             "Plan",
-            f"choosing experiments for parent #{row.get('parent_rank')} from "
-            f"{row.get('opportunity_count')} opportunity signal(s) and "
+            f"planning for parent #{row.get('parent_rank')} from "
             f"{row.get('surface_opportunity_count')} surface opportunity(s)",
         )
-    if event == "research_planner_completed":
+    if event == "search_planner_completed":
         diagnostics = row.get("call_diagnostics") or {}
-        mechanisms = _join_limited(row.get("mechanisms") or [], limit=4)
         return (
             "Plan",
             " ".join(
                 part
                 for part in (
-                    f"planned {row.get('intent_count')} experiment intent(s): {mechanisms or 'none'}",
+                    f"planned {row.get('brief_count')} brief(s)",
                     _call_summary(diagnostics),
                 )
                 if part
             ),
         )
-    if event == "measurement_selector_started":
-        return (
-            "Measure",
-            f"selecting {row.get('stage')} measurements from {row.get('candidate_count')} candidate(s); "
-            f"limit={row.get('max_select')}",
-        )
-    if event == "measurement_selector_completed":
-        diagnostics = row.get("call_diagnostics") or {}
-        selected = _join_limited([_short_hash(item) for item in row.get("selected_candidate_ids") or []], limit=4)
-        return (
-            "Measure",
-            " ".join(
-                part
-                for part in (
-                    f"selected for {row.get('stage')}: {selected or 'none'}",
-                    _call_summary(diagnostics),
-                    _short_reason(row.get("rationale")),
-                )
-                if part
-            ),
-        )
+    if event == "search_plan_ready":
+        mechanisms = _join_limited(row.get("target_mechanisms") or [], limit=4)
+        return "Plan", f"ready {row.get('brief_count')} brief(s): {mechanisms or 'none'}"
     if event == "proposal_started":
         retry = " retry" if row.get("proposal_retry") else ""
         return (
@@ -665,16 +600,10 @@ def _apply_run_overrides(
         allowed_models=_split_csv(getattr(args, "allowed_models", None)),
         optimizer_model=getattr(args, "optimizer_model", None),
         optimizer_reasoning=getattr(args, "optimizer_reasoning", None),
-        diagnoser_model=getattr(args, "diagnoser_model", None),
-        diagnoser_reasoning=getattr(args, "diagnoser_reasoning", None),
-        research_theorist_model=getattr(args, "research_theorist_model", None),
-        research_theorist_reasoning=getattr(args, "research_theorist_reasoning", None),
-        research_planner_model=getattr(args, "research_planner_model", None),
-        research_planner_reasoning=getattr(args, "research_planner_reasoning", None),
+        search_planner_model=getattr(args, "search_planner_model", None),
+        search_planner_reasoning=getattr(args, "search_planner_reasoning", None),
         candidate_implementer_model=getattr(args, "candidate_implementer_model", None),
         candidate_implementer_reasoning=getattr(args, "candidate_implementer_reasoning", None),
-        measurement_selector_model=getattr(args, "measurement_selector_model", None),
-        measurement_selector_reasoning=getattr(args, "measurement_selector_reasoning", None),
         samples_per_case=getattr(args, "samples_per_case", None),
         case_concurrency=getattr(args, "case_concurrency", None),
         stage_case_concurrency=getattr(args, "stage_case_concurrency", None),
@@ -709,16 +638,10 @@ def add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--allowed-models", help="Comma-separated model allowlist for model-config transforms")
     parser.add_argument("--optimizer-model", help="Model used by Ratchet's research loop")
     parser.add_argument("--optimizer-reasoning", help="Reasoning effort for Ratchet's research loop")
-    parser.add_argument("--diagnoser-model", help="Override model for Ratchet's failure diagnoser")
-    parser.add_argument("--diagnoser-reasoning", help="Override reasoning effort for Ratchet's failure diagnoser")
-    parser.add_argument("--research-theorist-model", help="Override model for Ratchet's research theorist")
-    parser.add_argument("--research-theorist-reasoning", help="Override reasoning effort for Ratchet's research theorist")
-    parser.add_argument("--research-planner-model", help="Override model for Ratchet's research planner")
-    parser.add_argument("--research-planner-reasoning", help="Override reasoning effort for Ratchet's research planner")
+    parser.add_argument("--search-planner-model", help="Override model for Ratchet's search planner")
+    parser.add_argument("--search-planner-reasoning", help="Override reasoning effort for Ratchet's search planner")
     parser.add_argument("--candidate-implementer-model", help="Override model for Ratchet's candidate implementer")
     parser.add_argument("--candidate-implementer-reasoning", help="Override reasoning effort for Ratchet's candidate implementer")
-    parser.add_argument("--measurement-selector-model", help="Override model for Ratchet's measurement selector")
-    parser.add_argument("--measurement-selector-reasoning", help="Override reasoning effort for Ratchet's measurement selector")
     parser.add_argument("--samples-per-case", type=int, help="Number of repeated samples to evaluate per candidate/case")
     parser.add_argument("--case-concurrency", type=int, help="Maximum concurrent case evaluations per candidate")
     parser.add_argument(

@@ -196,11 +196,8 @@ holdout_budget = 3
 optimizer_model = "gpt-5.4"
 optimizer_reasoning = "medium"
 # Optional per-role overrides:
-# diagnoser_model = "gpt-5.4"
-# research_theorist_model = "gpt-5.4"
-# research_planner_model = "gpt-5.4"
+# search_planner_model = "gpt-5.4"
 # candidate_implementer_model = "gpt-5.4"
-# measurement_selector_model = "gpt-5.4"
 samples_per_case = 1
 
 [ratchet.objective]

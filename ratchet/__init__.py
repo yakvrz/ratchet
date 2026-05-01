@@ -7,7 +7,7 @@ from ratchet.surface_opportunities import SurfaceOpportunity, generate_surface_o
 from ratchet.config import RatchetConfigError
 from ratchet.evidence import ProposalExample, ProposalExampleBank, build_behavior_diagnostics, build_proposal_example_bank
 from ratchet.errors import OptimizerModelError
-from ratchet.experiments import ExperimentIntent, ExperimentSpec, MeasurementDecision, ResearchState
+from ratchet.experiments import ExperimentSpec, SearchBrief, SearchPlan
 from ratchet.grading import exact_text_grade, json_field_grade, numeric_tolerance_grade
 from ratchet.ideation_benchmark import IdeationAssessmentSpec, assess_ideation_run
 from ratchet.interactive import InteractionRecorder
@@ -54,7 +54,6 @@ __all__ = [
     "Intervention",
     "InteractionRecorder",
     "ExperimentSpec",
-    "ExperimentIntent",
     "OptimizationConstraints",
     "SurfaceOpportunity",
     "OptimizationObjective",
@@ -65,7 +64,8 @@ __all__ = [
     "ProposalExampleBank",
     "RatchetOptimizer",
     "RatchetConfigError",
-    "ResearchState",
+    "SearchBrief",
+    "SearchPlan",
     "RunRecord",
     "SurfaceSpec",
     "TargetSemantics",
@@ -74,7 +74,6 @@ __all__ = [
     "ToolLoopRunConfig",
     "CandidateImplementer",
     "CompiledCandidate",
-    "MeasurementDecision",
     "ModelRequest",
     "TransformCompiler",
     "TransformProgram",

@@ -12,9 +12,9 @@ from ratchet.errors import OptimizerModelError
 from ratchet.experiments import (
     CANDIDATE_ROLES,
     EvidencePacket,
-    ExperimentIntent,
     ExperimentSpec,
-    ResearchTheory,
+    SearchBrief,
+    SearchPlan,
     build_evidence_packet,
 )
 from ratchet.io import extract_json_object, transform_program_hash
@@ -29,14 +29,10 @@ from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformPatch, TransformProgram
 from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication, Intervention
-from ratchet.surface_search import (
-    SearchHypothesis,
-    build_search_hypothesis,
-)
 from ratchet.transform_validation import (
     validate_candidate_transform,
 )
-from ratchet.types import AgentSpec, FailureDiagnosis, OptimizationObjective
+from ratchet.types import AgentSpec, OptimizationObjective
 from ratchet.types import EvalCase
 from ratchet.capabilities import validation_check_schema
 
@@ -45,8 +41,8 @@ MAX_PROPOSALS_PER_ITERATION = 8
 PROPOSER_MAX_OUTPUT_TOKENS = 8000
 PROPOSER_INSTRUCTIONS = (
     "You are Ratchet's task-agnostic candidate implementer. Return JSON with experiments[]. "
-    "Keep text concise. Implement experiment_intents exactly: they define the research questions, target slices, "
-    "and measurements. Treat research_theory as causal context; opportunities are not candidate recipes. "
+    "Keep text concise. Implement search_plan briefs exactly: they define the research questions, target slices, "
+    "measurements, and legal surface opportunities. "
     "Each candidate must include a typed transform program under candidate.program and applications[] citing "
     "relevant surface_opportunities. "
     "A candidate without program.patches[] is invalid. Programs must use the transform DSL hook/op schema, not untyped candidate operations. "
@@ -131,49 +127,36 @@ class CandidateImplementer:
         seen_hashes: set[str],
         current_spec: AgentSpec | None,
         history: list[dict[str, Any]],
-        search_hypothesis: SearchHypothesis | None = None,
-        diagnosis: FailureDiagnosis | None = None,
-        diagnoses: list[FailureDiagnosis] | None = None,
-        research_theory: ResearchTheory | None = None,
+        search_plan: SearchPlan | None = None,
         evidence_packet: EvidencePacket | None = None,
         proposal_example_bank: ProposalExampleBank | None = None,
         proposal_example_cases: tuple[EvalCase, ...] = (),
         proposal_budget: int = MAX_PROPOSALS_PER_ITERATION,
-        experiment_intents: list[ExperimentIntent] | None = None,
         surface_opportunities: list[SurfaceOpportunity] | None = None,
     ) -> tuple[list[CandidateProposal], str]:
         proposals: list[CandidateProposal] = []
         analysis_parts: list[str] = []
         invalid_reasons: Counter[str] = Counter()
         proposal_budget = max(0, proposal_budget)
-        if search_hypothesis is None:
-            search_hypothesis = build_search_hypothesis(
-                summary=summary,
-                surface=surface,
-                objective=objective,
-                history=history,
-                proposal_example_count=len(proposal_example_bank.examples) if proposal_example_bank else 0,
-            )
-        diagnosis_context = list(diagnoses or ([] if diagnosis is None else [diagnosis]))
         if evidence_packet is None:
             evidence_packet = build_evidence_packet(
                 summary=summary,
-                diagnoses=diagnosis_context,
+                diagnoses=[],
                 objective=objective,
                 proposal_example_bank=proposal_example_bank,
             )
-        if research_theory is None:
-            raise ValueError("CandidateImplementer requires a ResearchTheory from the research planner.")
+        if search_plan is None:
+            raise ValueError("CandidateImplementer requires a SearchPlan from the search planner.")
         active_surface_opportunities = list(surface_opportunities or generate_surface_opportunities(
             surface,
             objective=objective,
-            active_mechanisms=search_hypothesis.active_mechanisms,
-            evidence=_surface_opportunity_evidence(evidence_packet, diagnosis_context),
+            active_mechanisms=search_plan.active_mechanisms,
+            evidence=_surface_opportunity_evidence(evidence_packet),
         ))
         structural_proposals = _surface_affordance_proposals(
             surface=surface,
             surface_opportunities=active_surface_opportunities,
-            experiment_intents=experiment_intents or [],
+            search_plan=search_plan,
             proposal_budget=proposal_budget,
         )
         proposals.extend(structural_proposals)
@@ -187,14 +170,11 @@ class CandidateImplementer:
                 summary,
                 surface,
                 objective=objective,
-                diagnoses=diagnosis_context,
                 history=history,
-                search_hypothesis=search_hypothesis,
-                research_theory=research_theory,
+                search_plan=search_plan,
                 evidence_packet=evidence_packet,
                 proposal_example_bank=proposal_example_bank,
                 proposal_budget=remaining_proposal_budget,
-                experiment_intents=experiment_intents or [],
                 surface_opportunities=active_surface_opportunities,
             )
             raw_count = len(structural_proposals) + self._last_raw_candidate_count
@@ -214,7 +194,6 @@ class CandidateImplementer:
         budget_valid, candidate_rows, validation_invalid_rows, validation_invalid_reasons = self._validate_candidate_proposals(
             proposals,
             surface=surface,
-            search_hypothesis=search_hypothesis,
             active_surface_opportunities=active_surface_opportunities,
             seen_hashes=seen_hashes,
             proposal_example_bank=proposal_example_bank,
@@ -227,14 +206,11 @@ class CandidateImplementer:
                 summary,
                 surface,
                 objective=objective,
-                diagnoses=diagnosis_context,
                 history=history,
-                search_hypothesis=search_hypothesis,
-                research_theory=research_theory,
+                search_plan=search_plan,
                 evidence_packet=evidence_packet,
                 proposal_example_bank=proposal_example_bank,
                 proposal_budget=proposal_budget,
-                experiment_intents=experiment_intents or [],
                 surface_opportunities=active_surface_opportunities,
                 repair_feedback=repair_feedback,
             )
@@ -245,7 +221,6 @@ class CandidateImplementer:
             repaired_valid, repaired_rows, repaired_invalid_rows, repaired_invalid_reasons = self._validate_candidate_proposals(
                 repaired_proposals,
                 surface=surface,
-                search_hypothesis=search_hypothesis,
                 active_surface_opportunities=active_surface_opportunities,
                 seen_hashes=seen_hashes,
                 proposal_example_bank=proposal_example_bank,
@@ -288,7 +263,6 @@ class CandidateImplementer:
         proposals: list[CandidateProposal],
         *,
         surface: SurfaceSpec,
-        search_hypothesis: SearchHypothesis,
         active_surface_opportunities: list[SurfaceOpportunity],
         seen_hashes: set[str],
         proposal_example_bank: ProposalExampleBank | None,
@@ -314,7 +288,6 @@ class CandidateImplementer:
             family_error = validate_candidate_transform(
                 candidate,
                 surface=surface,
-                search_hypothesis=search_hypothesis,
             )
             if family_error is not None:
                 invalid_reasons[family_error] += 1
@@ -381,14 +354,11 @@ class CandidateImplementer:
         surface: SurfaceSpec,
         *,
         objective: OptimizationObjective,
-        diagnoses: list[FailureDiagnosis],
         history: list[dict[str, Any]],
-        search_hypothesis: SearchHypothesis,
-        research_theory: ResearchTheory,
+        search_plan: SearchPlan,
         evidence_packet: EvidencePacket,
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
-        experiment_intents: list[ExperimentIntent],
         surface_opportunities: list[SurfaceOpportunity],
         repair_feedback: list[dict[str, Any]] | None = None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
@@ -402,16 +372,13 @@ class CandidateImplementer:
             "proposal_budget": proposal_budget,
             "transform_library": {"language": "typed hook DSL", "ops_are_validated_by": "transform_compiler"},
             "surface_spec": _compact_surface_spec(surface),
-            "search_hypothesis": _compact_search_hypothesis(search_hypothesis),
-            "research_theory": _research_theory_prompt_view(research_theory),
-            "research_theory": _research_theory_prompt_view(research_theory),
+            "search_plan": _compact_search_plan(search_plan),
             "evidence_packet": _compact_evidence_packet(evidence_packet),
-            "experiment_intents": [_compact_experiment_intent(intent) for intent in experiment_intents],
             "surface_opportunities": [_compact_surface_opportunity(surface_opportunity) for surface_opportunity in surface_opportunities],
             "proposal_policy": {
-                "experiment_intents": (
-                    "If experiment_intents is non-empty, every returned experiment_id must exactly match one "
-                    "intent_id. Each candidate must cite surface_opportunity_ids from that intent and from surface_opportunities."
+                "search_plan": (
+                    "Every returned experiment_id must exactly match a search_plan brief_id. Each candidate must cite "
+                    "surface_opportunity_ids from that brief and from surface_opportunities."
                 ),
                 "empty_patches_allowed": (
                     "Only when no listed surface opportunity can plausibly improve the objective without violating constraints."
@@ -453,7 +420,6 @@ class CandidateImplementer:
                 "mean_total_tokens": summary.mean_total_tokens,
                 "median_latency_s": summary.median_latency_s,
             },
-            "diagnoses": [_compact_diagnosis(diagnosis) for diagnosis in diagnoses[:3]],
             "diagnostic_only_examples": {
                 "usage": (
                     "dev examples for diagnosis only. Do not copy their case IDs, inputs, or expected outputs into patches."
@@ -650,8 +616,8 @@ class CandidateImplementer:
                     f"Candidate implementer returned invalid JSON: {exc}; repair failed: {repair_exc}"
                 ) from repair_exc
         candidates: list[CandidateProposal] = []
-        intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
-        intent_ids = set(intent_by_id)
+        brief_by_id = {brief.brief_id: brief for brief in search_plan.briefs}
+        brief_ids = set(brief_by_id)
         raw_experiments = payload.get("experiments")
         if not isinstance(raw_experiments, list):
             self._last_parse_invalid_reasons["experiments field is not an array"] += 1
@@ -678,14 +644,14 @@ class CandidateImplementer:
                     _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
-            if intent_ids and experiment.experiment_id not in intent_ids:
-                reason = f"experiment_id {experiment.experiment_id!r} does not match any requested experiment_intent"
+            if brief_ids and experiment.experiment_id not in brief_ids:
+                reason = f"experiment_id {experiment.experiment_id!r} does not match any search plan brief_id"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
                     _invalid_raw_candidate_row(raw_experiment, reason)
                 )
                 continue
-            intent = intent_by_id.get(experiment.experiment_id)
+            brief = brief_by_id.get(experiment.experiment_id)
             raw_candidates = raw_experiment.get("candidates")
             if not isinstance(raw_candidates, list):
                 reason = "experiment candidates field is not an array"
@@ -718,12 +684,12 @@ class CandidateImplementer:
                         _invalid_raw_candidate_row(raw_candidate, reason)
                     )
                     continue
-                if intent is not None and intent.surface_opportunity_ids:
-                    unknown_for_intent = sorted(set(candidate.surface_opportunity_ids) - set(intent.surface_opportunity_ids))
-                    if unknown_for_intent:
+                if brief is not None and brief.surface_opportunity_ids:
+                    unknown_for_brief = sorted(set(candidate.surface_opportunity_ids) - set(brief.surface_opportunity_ids))
+                    if unknown_for_brief:
                         reason = (
-                            f"candidate surface_opportunity_ids {unknown_for_intent} are not allowed by experiment intent "
-                            f"{intent.intent_id!r}"
+                            f"candidate surface_opportunity_ids {unknown_for_brief} are not allowed by search brief "
+                            f"{brief.brief_id!r}"
                         )
                         self._last_parse_invalid_reasons[reason] += 1
                         self._last_parse_invalid_candidate_rows.append(
@@ -734,8 +700,7 @@ class CandidateImplementer:
         self._last_plan_audit = _audit_experiment_plan(
             raw_experiments=raw_experiments,
             parsed_candidates=candidates,
-            experiment_intents=experiment_intents,
-            research_theory=research_theory,
+            search_plan=search_plan,
             proposal_budget=proposal_budget,
         )
         considerations = [
@@ -853,102 +818,31 @@ def _compact_surface_mechanism(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _compact_search_hypothesis(search_hypothesis: SearchHypothesis) -> dict[str, Any]:
-    row = search_hypothesis.to_prompt_dict(
-        max_contexts_per_mechanism=1,
-        max_constrained_contexts=2,
-    )
+def _compact_search_plan(search_plan: SearchPlan) -> dict[str, Any]:
+    row = search_plan.to_dict()
     return {
-        "mechanism_states": {
-            name: {
-                "state": value.get("state"),
-                "suitability": value.get("suitability"),
-                "budget_share": value.get("budget_share"),
-                "constraints": list(value.get("constraints") or [])[:3],
-            }
-            for name, value in (row.get("mechanism_states") or {}).items()
-            if isinstance(value, dict)
-        },
-        "active_mechanisms": list(row.get("active_mechanisms") or []),
-        "active_contexts": [
-            _compact_context_prompt_row(context)
-            for context in list(row.get("active_contexts") or [])[:5]
-            if isinstance(context, dict)
-        ],
-        "constrained_or_paused_contexts": [
-            _compact_context_prompt_row(context)
-            for context in list(row.get("constrained_or_paused_contexts") or [])[:3]
-            if isinstance(context, dict)
-        ],
-        "target_slices": list(row.get("target_slices") or [])[:6],
-        "profile": row.get("profile", {}),
-        "budget_allocation": row.get("budget_allocation", {}),
-        "rationale": str(row.get("rationale") or "")[:240],
-    }
-
-
-def _compact_context_prompt_row(row: dict[str, Any]) -> dict[str, Any]:
-    key = row.get("key") if isinstance(row.get("key"), dict) else {}
-    return {
-        "family": key.get("family") or row.get("family"),
-        "targets": list(key.get("target_names") or row.get("target_names") or [])[:3],
-        "ops": list(key.get("ops") or row.get("ops") or [])[:3],
-        "target_slice": key.get("target_slice") or row.get("target_slice"),
-        "state": row.get("state"),
-        "suitability": row.get("suitability"),
-        "constraints": list(row.get("constraints") or [])[:3],
-    }
-
-
-def _research_theory_prompt_view(research_theory: ResearchTheory) -> dict[str, Any]:
-    row = research_theory.to_dict()
-    return {
-        "theory_id": row.get("theory_id"),
-        "summary": str(row.get("summary") or "")[:900],
-        "primary_hypothesis_id": row.get("primary_hypothesis_id"),
-        "hypotheses": [
-            {
-                "hypothesis_id": item.get("hypothesis_id"),
-                "statement": str(item.get("statement") or "")[:700],
-                "mechanism_class": item.get("mechanism_class"),
-                "target_slices": list(item.get("target_slices") or [])[:6],
-                "supporting_evidence": list(item.get("supporting_evidence") or [])[:5],
-                "competing_evidence": list(item.get("competing_evidence") or [])[:4],
-                "disconfirming_result": str(item.get("disconfirming_result") or "")[:320],
-                "confidence": item.get("confidence"),
-            }
-            for item in list(row.get("hypotheses") or [])[:5]
-            if isinstance(item, dict)
-        ],
-        "experiment_opportunities": [
-            {
-                "opportunity_id": item.get("opportunity_id"),
-                "hypothesis_ids": list(item.get("hypothesis_ids") or [])[:4],
-                "mechanism_class": item.get("mechanism_class"),
-                "target_slices": list(item.get("target_slices") or [])[:6],
-                "rationale": str(item.get("rationale") or "")[:600],
-                "measurements": list(item.get("measurements") or [])[:6],
-                "disconfirming_result": str(item.get("disconfirming_result") or "")[:320],
-                "candidate_roles": list(item.get("candidate_roles") or [])[:5],
-                "compatible_mechanisms": list(item.get("compatible_mechanisms") or [])[:5],
-                "surface_opportunity_ids": list(
-                    item.get("surface_opportunity_ids", item.get("surface_opportunity_ids") or [])
-                )[:10],
-                "priority": item.get("priority"),
-            }
-            for item in list(row.get("experiment_opportunities") or [])[:6]
-            if isinstance(item, dict)
-        ],
-        "experiment_opportunity_mechanisms": [
-            str(item.get("mechanism_class"))
-            for item in list(row.get("experiment_opportunities") or [])[:6]
-            if isinstance(item, dict) and item.get("mechanism_class")
-        ],
-        "disconfirmed_explanations": list(row.get("disconfirmed_explanations") or [])[:5],
-        "surprising_observations": list(row.get("surprising_observations") or [])[:5],
-        "prior_lessons": list(row.get("prior_lessons") or [])[:5],
-        "uncertainty": str(row.get("uncertainty") or "")[:500],
+        "plan_id": row.get("plan_id"),
+        "diagnosis": str(row.get("diagnosis") or "")[:1200],
+        "hypotheses": list(row.get("hypotheses") or [])[:6],
+        "target_mechanisms": list(row.get("target_mechanisms") or [])[:6],
+        "active_mechanisms": list(row.get("active_mechanisms") or [])[:6],
+        "briefs": [_compact_search_brief(brief) for brief in search_plan.briefs[:6]],
         "confidence": row.get("confidence"),
+    }
+
+
+def _compact_search_brief(brief: SearchBrief) -> dict[str, Any]:
+    return {
+        "brief_id": brief.brief_id,
+        "mechanism_class": brief.mechanism_class,
+        "hypothesis": brief.hypothesis[:600],
+        "target_slices": list(brief.target_slices)[:5],
+        "candidate_roles": list(brief.candidate_roles)[:5],
+        "measurements": list(brief.measurements)[:5],
+        "surface_opportunity_ids": list(brief.surface_opportunity_ids)[:8],
+        "success_criteria": brief.success_criteria[:240],
+        "disconfirming_result": brief.disconfirming_result[:240],
+        "priority": brief.priority,
     }
 
 
@@ -980,21 +874,6 @@ def _compact_evidence_packet(evidence_packet: EvidencePacket) -> dict[str, Any]:
     }
 
 
-def _compact_experiment_intent(intent: ExperimentIntent) -> dict[str, Any]:
-    return {
-        "intent_id": intent.intent_id,
-        "mechanism_class": intent.mechanism_class,
-        "hypothesis": intent.hypothesis[:360],
-        "target_slices": list(intent.target_slices)[:5],
-        "candidate_roles": list(intent.candidate_roles)[:5],
-        "measurements": list(intent.measurements)[:5],
-        "surface_opportunity_ids": list(intent.surface_opportunity_ids)[:8],
-        "success_criteria": intent.success_criteria[:240],
-        "disconfirming_result": intent.disconfirming_result[:240],
-        "priority": intent.priority,
-    }
-
-
 def _compact_surface_opportunity(surface_opportunity: SurfaceOpportunity) -> dict[str, Any]:
     return {
         "surface_opportunity_id": surface_opportunity.surface_opportunity_id,
@@ -1020,7 +899,7 @@ def _surface_affordance_proposals(
     *,
     surface: SurfaceSpec,
     surface_opportunities: list[SurfaceOpportunity],
-    experiment_intents: list[ExperimentIntent],
+    search_plan: SearchPlan,
     proposal_budget: int,
 ) -> list[CandidateProposal]:
     opportunity_by_target = {item.target_name: item for item in surface_opportunities}
@@ -1036,7 +915,7 @@ def _surface_affordance_proposals(
         opportunity = opportunity_by_target.get(f"inspect_before_mutate.{identifier}")
         if opportunity is None:
             continue
-        intent = _intent_for_opportunity(opportunity.surface_opportunity_id, experiment_intents)
+        brief = _brief_for_opportunity(opportunity.surface_opportunity_id, search_plan.briefs)
         patches: list[dict[str, Any]] = [
             {
                 "op": "define_state",
@@ -1116,7 +995,7 @@ def _surface_affordance_proposals(
         primary_candidate = _affordance_candidate(
             program=program,
             opportunity_id=opportunity.surface_opportunity_id,
-            experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
+            experiment_id=brief.brief_id if brief is not None else f"surface_affordance_{identifier}",
             candidate_role="composed",
             comparison_group=f"inspect_before_mutate.{identifier}",
             identifier=identifier,
@@ -1145,7 +1024,7 @@ def _surface_affordance_proposals(
                 _affordance_candidate(
                     program=ablation_program,
                     opportunity_id=opportunity.surface_opportunity_id,
-                    experiment_id=intent.intent_id if intent is not None else f"surface_affordance_{identifier}",
+                    experiment_id=brief.brief_id if brief is not None else f"surface_affordance_{identifier}",
                     candidate_role="ablation",
                     comparison_group=f"inspect_before_mutate.{identifier}",
                     identifier=identifier,
@@ -1202,20 +1081,20 @@ def _affordance_candidate(
     )
 
 
-def _intent_for_opportunity(
+def _brief_for_opportunity(
     surface_opportunity_id: str,
-    experiment_intents: list[ExperimentIntent],
-) -> ExperimentIntent | None:
-    for intent in experiment_intents:
-        if surface_opportunity_id in intent.surface_opportunity_ids:
-            return intent
-    for intent in experiment_intents:
-        if intent.mechanism_class == "surface_tool_loop":
-            return intent
+    search_briefs: list[SearchBrief],
+) -> SearchBrief | None:
+    for brief in search_briefs:
+        if surface_opportunity_id in brief.surface_opportunity_ids:
+            return brief
+    for brief in search_briefs:
+        if brief.mechanism_class == "surface_tool_loop":
+            return brief
     return None
 
 
-def _surface_opportunity_evidence(evidence_packet: EvidencePacket, diagnoses: list[FailureDiagnosis]) -> dict[str, Any]:
+def _surface_opportunity_evidence(evidence_packet: EvidencePacket) -> dict[str, Any]:
     packet = evidence_packet.to_dict()
     runtime = packet.get("runtime_defects") or {}
     output = packet.get("output_defects") or {}
@@ -1231,7 +1110,6 @@ def _surface_opportunity_evidence(evidence_packet: EvidencePacket, diagnoses: li
             or tool.get("turn_outcome_counts")
         ),
         "example_coverage": bool((packet.get("example_coverage") or {}).get("example_count")),
-        "diagnosis_target_names": sorted({target for diagnosis in diagnoses for target in diagnosis.target_names}),
     }
 
 
@@ -1239,35 +1117,29 @@ def _audit_experiment_plan(
     *,
     raw_experiments: list[Any],
     parsed_candidates: list[CandidateProposal],
-    experiment_intents: list[ExperimentIntent],
-    research_theory: ResearchTheory,
+    search_plan: SearchPlan,
     proposal_budget: int,
 ) -> dict[str, Any]:
     experiment_count = sum(1 for item in raw_experiments if isinstance(item, dict))
     mechanism_counts = Counter(candidate.mechanism_class for candidate in parsed_candidates)
     role_counts = Counter(candidate.candidate_role for candidate in parsed_candidates)
-    primary_mechanisms = [intent.mechanism_class for intent in experiment_intents]
-    opportunity_mechanisms = [
-        str(item.get("mechanism_class"))
-        for item in research_theory.to_dict().get("experiment_opportunities", [])
-        if isinstance(item, dict) and item.get("mechanism_class")
-    ]
+    primary_mechanisms = [brief.mechanism_class for brief in search_plan.briefs]
     candidate_mechanisms = set(mechanism_counts)
-    requested_intent_ids = {intent.intent_id for intent in experiment_intents}
-    returned_intent_ids = {
+    requested_brief_ids = {brief.brief_id for brief in search_plan.briefs}
+    returned_brief_ids = {
         str(item.get("experiment_id") or "")
         for item in raw_experiments
         if isinstance(item, dict)
     }
-    intent_by_id = {intent.intent_id: intent for intent in experiment_intents}
+    brief_by_id = {brief.brief_id: brief for brief in search_plan.briefs}
     mechanism_mismatch_ids = sorted(
         str(item.get("experiment_id") or "")
         for item in raw_experiments
         if isinstance(item, dict)
-        and str(item.get("experiment_id") or "") in intent_by_id
+        and str(item.get("experiment_id") or "") in brief_by_id
         and str(item.get("mechanism_class") or "")
         and str(item.get("mechanism_class") or "")
-        != intent_by_id[str(item.get("experiment_id") or "")].mechanism_class
+        != brief_by_id[str(item.get("experiment_id") or "")].mechanism_class
     )
     missing_primary = [
         mechanism for mechanism in primary_mechanisms if mechanism not in candidate_mechanisms
@@ -1282,23 +1154,11 @@ def _audit_experiment_plan(
         warnings.append("no candidate used a primary mechanism from planner guidance")
     if parsed_candidates and len(distinct_primary_mechanisms) > 1 and missing_primary:
         warnings.append("candidate portfolio missed requested mechanism diversity")
-    missing_opportunities = [
-        mechanism for mechanism in opportunity_mechanisms[:2] if mechanism not in candidate_mechanisms
-    ]
-    if parsed_candidates and missing_opportunities and len(missing_opportunities) == min(2, len(opportunity_mechanisms)):
-        warnings.append("no candidate directly tested a top experiment opportunity")
-    missing_intents = sorted(requested_intent_ids - returned_intent_ids)
-    if requested_intent_ids and not (requested_intent_ids & returned_intent_ids):
-        warnings.append("candidate implementer did not return any requested experiment intent IDs")
+    missing_briefs = sorted(requested_brief_ids - returned_brief_ids)
+    if requested_brief_ids and not (requested_brief_ids & returned_brief_ids):
+        warnings.append("candidate implementer did not return any requested search brief IDs")
     if mechanism_mismatch_ids:
-        warnings.append("returned experiment mechanism differed from requested intent mechanism")
-    if research_theory.bottleneck_class == "surface_context":
-        has_examples = "surface_examples" in candidate_mechanisms
-        has_context = "surface_context" in candidate_mechanisms
-        if has_examples and not has_context:
-            warnings.append("example-surface experiment lacks a context-surface control")
-        if _context_opportunity_has_examples(research_theory) and has_context and not has_examples:
-            warnings.append("context-surface plan did not test available example anchoring")
+        warnings.append("returned experiment mechanism differed from requested search brief mechanism")
     if role_counts.get("composed", 0) and not (role_counts.get("control", 0) or role_counts.get("ablation", 0)):
         warnings.append("composed candidate lacks a control or ablation in the returned plan")
     return {
@@ -1311,25 +1171,14 @@ def _audit_experiment_plan(
         "parsed_candidate_count": len(parsed_candidates),
         "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
         "candidate_roles": dict(sorted(role_counts.items())),
-        "requested_intent_ids": sorted(requested_intent_ids),
-        "returned_intent_ids": sorted(item for item in returned_intent_ids if item),
-        "missing_intent_ids": missing_intents,
-        "mechanism_mismatch_intent_ids": mechanism_mismatch_ids,
+        "requested_brief_ids": sorted(requested_brief_ids),
+        "returned_brief_ids": sorted(item for item in returned_brief_ids if item),
+        "missing_brief_ids": missing_briefs,
+        "mechanism_mismatch_brief_ids": mechanism_mismatch_ids,
         "primary_mechanisms": primary_mechanisms,
-        "opportunity_mechanisms": opportunity_mechanisms,
         "missing_primary_mechanisms": missing_primary,
         "warnings": warnings,
     }
-
-
-def _context_opportunity_has_examples(research_theory: ResearchTheory) -> bool:
-    for row in research_theory.to_dict().get("experiment_opportunities", []):
-        if row.get("mechanism_class") != "surface_context":
-            continue
-        source_ids = row.get("source_case_ids_by_label")
-        if isinstance(source_ids, dict) and any(source_ids.values()):
-            return True
-    return False
 
 
 def _compact_behavior_diagnostics(diagnostics: dict[str, Any]) -> dict[str, Any]:
@@ -1391,16 +1240,6 @@ def _compact_runtime_reliability(row: dict[str, Any]) -> dict[str, Any]:
         "length_finish_case_ids": list(row.get("length_finish_case_ids") or [])[:4],
         "parser_fallback_case_ids": list(row.get("parser_fallback_case_ids") or [])[:4],
         "low_output_token_length_case_ids": list(row.get("low_output_token_length_case_ids") or [])[:4],
-    }
-
-
-def _compact_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
-    return {
-        "case_ids": diagnosis.case_ids[:8],
-        "category": diagnosis.category,
-        "root_cause": diagnosis.root_cause[:500],
-        "target_names": diagnosis.target_names[:8],
-        "evidence": diagnosis.evidence[:4],
     }
 
 

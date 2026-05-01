@@ -5,7 +5,7 @@ from typing import Any
 
 
 DISCOVERY_STAGES = {
-    "no_intent",
+    "no_brief",
     "no_valid_implementation",
     "planned_not_attempted",
     "screened_at_smoke",
@@ -22,16 +22,16 @@ DISCOVERY_STAGES = {
 
 def build_ideation_metrics(
     *,
-    decision_log: list[dict[str, Any]],
+    events: list[dict[str, Any]],
     proposals: list[dict[str, Any]],
     finalist_statuses: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    plans = [row for row in decision_log if row.get("type") == "research_plan"]
-    intents = [
-        intent
+    plans = [row for row in events if row.get("type") in {"search_plan", "search_plan_call"}]
+    briefs = [
+        brief
         for plan in plans
-        for intent in plan.get("experiment_intents", [])
-        if isinstance(intent, dict)
+        for brief in (plan.get("search_plan") or {}).get("briefs", [])
+        if isinstance(brief, dict)
     ]
     proposal_rows = [row for row in proposals if _is_candidate_row(row)]
     valid_rows = [row for row in proposal_rows if row.get("valid") is not False]
@@ -49,8 +49,8 @@ def build_ideation_metrics(
             stage_counts["failed_holdout"] += 1
         elif status == "unstable":
             stage_counts["unstable_confirmation"] += 1
-    intent_ids = {str(intent.get("intent_id")) for intent in intents if intent.get("intent_id")}
-    implemented_intent_ids = {
+    brief_ids = {str(brief.get("brief_id")) for brief in briefs if brief.get("brief_id")}
+    implemented_brief_ids = {
         str(_proposal_candidate(row).get("experiment_id") or row.get("experiment_id"))
         for row in valid_rows
         if _proposal_candidate(row).get("experiment_id") or row.get("experiment_id")
@@ -58,33 +58,33 @@ def build_ideation_metrics(
     mechanism_counts = Counter(str(row.get("mechanism_class") or "unknown") for row in valid_rows)
     family_counts = Counter(str(row.get("surface_mechanism") or "unknown") for row in valid_rows)
     invalid_reasons = Counter(str(row.get("reason") or row.get("invalid_reason") or "unknown") for row in invalid_rows)
-    by_intent: dict[str, dict[str, Any]] = {}
-    for intent_id in sorted(intent_ids):
+    by_brief: dict[str, dict[str, Any]] = {}
+    for brief_id in sorted(brief_ids):
         rows = [
             row
             for row in proposal_rows
-            if str(_proposal_candidate(row).get("experiment_id") or row.get("experiment_id")) == intent_id
+            if str(_proposal_candidate(row).get("experiment_id") or row.get("experiment_id")) == brief_id
         ]
-        by_intent[intent_id] = {
+        by_brief[brief_id] = {
             "candidate_count": len(rows),
             "valid_candidate_count": sum(1 for row in rows if row.get("valid") is not False),
             "evaluated_candidate_count": sum(1 for row in rows if "accepted" in row),
-            "best_stage": _best_intent_stage(rows),
+            "best_stage": _best_brief_stage(rows),
         }
     return {
         "planner": {
             "plan_count": len(plans),
-            "intent_count": len(intents),
-            "intent_mechanisms": dict(Counter(str(intent.get("mechanism_class") or "unknown") for intent in intents)),
-            "intent_with_surface_opportunity_ids": sum(1 for intent in intents if intent.get("surface_opportunity_ids")),
+            "brief_count": len(briefs),
+            "brief_mechanisms": dict(Counter(str(brief.get("mechanism_class") or "unknown") for brief in briefs)),
+            "brief_with_surface_opportunity_ids": sum(1 for brief in briefs if brief.get("surface_opportunity_ids")),
         },
         "implementer": {
             "raw_candidate_count": len(proposal_rows),
             "valid_candidate_count": len(valid_rows),
             "invalid_candidate_count": len(invalid_rows),
             "valid_implementation_rate": (len(valid_rows) / len(proposal_rows) if proposal_rows else 0.0),
-            "implemented_intent_count": len(intent_ids & implemented_intent_ids),
-            "missing_intent_count": len(intent_ids - implemented_intent_ids),
+            "implemented_brief_count": len(brief_ids & implemented_brief_ids),
+            "missing_brief_count": len(brief_ids - implemented_brief_ids),
             "candidate_mechanisms": dict(sorted(mechanism_counts.items())),
             "candidate_families": dict(sorted(family_counts.items())),
             "invalid_reasons": dict(invalid_reasons.most_common(12)),
@@ -92,7 +92,7 @@ def build_ideation_metrics(
         "discovery": {
             "stage_counts": dict(sorted(stage_counts.items())),
             "finalist_status_counts": dict(sorted(finalist_counts.items())),
-            "by_intent": by_intent,
+            "by_brief": by_brief,
         },
     }
 
@@ -127,7 +127,7 @@ def _proposal_candidate(row: dict[str, Any]) -> dict[str, Any]:
     return candidate if isinstance(candidate, dict) else {}
 
 
-def _best_intent_stage(rows: list[dict[str, Any]]) -> str:
+def _best_brief_stage(rows: list[dict[str, Any]]) -> str:
     if not rows:
         return "planned_not_attempted"
     ordered = [

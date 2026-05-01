@@ -11,15 +11,12 @@ AgentHarness
   -> SurfaceOpportunity[]
   -> BaselineEvaluation
   -> EvidencePacket
-  -> ResearchTheory
-  -> ResearchState
-  -> ExperimentIntent[]
+  -> SearchPlan
   -> CandidateProposal[]
   -> TransformProgram
   -> TransformCompiler
   -> CompiledCandidate
   -> EvidenceLedger
-  -> MeasurementDecision
   -> FrontierUpdate
   -> HoldoutValidation
 ```
@@ -74,44 +71,37 @@ Ratchet owns:
 
 `CompiledCandidate` is what adapters execute. It contains the original program, operations grouped by hook, compiler report, candidate diff, and runtime instrumentation plan.
 
-`EvidencePacket` is deterministic symptom evidence extracted from eval results and diagnostics. It records observed runtime, output, tool, label, example-coverage, and cost/latency signals without deciding the causal theory.
+`EvidencePacket` is deterministic symptom evidence extracted from eval results and diagnostics. It records observed runtime, output, tool, label, example-coverage, and cost/latency signals without deciding the search plan.
 
-`ResearchTheory` is model-authored causal state for the branch. It preserves the primary hypothesis, competing hypotheses, disconfirmed explanations, surprising observations, experiment opportunities, and falsification criteria.
+`SearchPlan` is the single model-authored planning artifact for a parent branch. It contains diagnosis summary, hypotheses, target mechanisms, cited surface opportunity IDs, prior evidence context, and candidate briefs. It must not contain transform program content.
 
-`ResearchState` is the branch-local planning packet. It includes research theory, behavior profile, active surface opportunities, budget state, prior experiment outcomes, and frontier context.
-
-`ExperimentIntent` is planner output. It defines a research question, mechanism, target slices, required surfaces, measurements, success criteria, and disconfirming result. It must not contain transform program content.
+`SearchBrief` is a typed candidate brief inside a `SearchPlan`. It names the mechanism, target slice, required surfaces, expected measurements, success criteria, and disconfirming result for one proposal path.
 
 `CandidateProposal` is implementer output. It contains a proposed `TransformProgram`, citations to the surface opportunities it uses, and metadata about hypothesis, expected cost, risk, and targeted failures.
 
 `EvidenceLedger` is the measurement source of truth. It records paired candidate-vs-reference deltas, pass flips, invalid-output changes, cost/latency/token deltas, sample sizes, reliability signals, measurement cost, and baseline-instability flags.
 
-`MeasurementDecision` is selector output. It chooses which already-valid candidates receive more measurement. It must not create candidates or alter experiment intents.
-
 `DiagnosticTrace` is the adapter-owned behavior trace. For single-call tasks it may contain only raw output text and metadata. For interactive tasks it should contain `InteractionTurn`, `ToolCallTrace`, terminal state, and terminal reason. Ratchet treats these traces as evidence; it does not infer tool behavior from final text alone.
 
 ## Division of Labor
 
-The architecture has one ownership chain: surface inference defines what can be changed, research decides what is worth trying, candidate implementation expresses the change as a typed program, compilation decides legality, runtime executes only compiled middleware, and measurement decides whether evidence justifies more budget or holdout validation. Components should not cross those boundaries.
+The architecture has one ownership chain: surface inference defines what can be changed, search planning decides what is worth trying, candidate implementation expresses the change as a typed program, compilation decides legality, runtime executes only compiled middleware, and deterministic staged evaluation decides whether evidence justifies more budget or holdout validation. Components should not cross those boundaries.
 
 The main modules follow that split:
 
 - `surfaces.py`, `surface_opportunities.py`: inferred editable substrate and deterministic opportunity view
-- `experiments.py`, `research.py`, `research_payloads.py`: evidence packets, causal theory, experiment intents, and model-facing research payloads
+- `experiments.py`, `research.py`, `research_payloads.py`: evidence packets, search plans, search briefs, and model-facing planner payloads
 - `candidates.py`, `proposals.py`: candidate data model and implementer role
 - `transform_program.py`, `transform_compiler.py`, `transform_validation.py`, `runtime.py`: typed DSL, legality checks, compilation, and hook execution
-- `surface_search.py`, `transform_results.py`, `evidence_ledger.py`, `objectives.py`: branch-local search state, result summaries, paired evidence, and promotion gates
+- `surface_search.py`, `transform_results.py`, `evidence_ledger.py`, `objectives.py`: transform context identity, result summaries, paired evidence, and promotion gates
 - `optimizer.py`, `reporting.py`, `results.py`: orchestration, artifacts, and reporting
 
 ## Model Roles
 
-The optimizer uses separate model roles even when they share the same configured model:
+The optimizer uses two model roles even when they share the same configured model:
 
-- diagnoser: labels failure modes from eval traces
-- research theorist: turns deterministic evidence into causal hypotheses and experiment opportunities
-- research planner: emits experiment intents only
-- candidate implementer: emits typed transform programs citing surface opportunities
-- measurement selector: chooses measurements from evidence summaries
+- search planner: reads objective, parent summary, evidence packet, surface opportunities, prior proposal/evidence summaries, and remaining budget, then emits a typed `SearchPlan`
+- candidate implementer: emits typed transform programs that cite `SearchPlan` briefs and surface opportunities
 
 Role separation is a design invariant. If a role starts needing retries, repairs, or prompt patches to do another role's job, the architecture should be reconsidered rather than patched around.
 
@@ -131,10 +121,10 @@ Deterministic code should enforce invariants:
 
 Model calls should provide judgment:
 
-- failure interpretation
-- research questions worth testing
+- failure interpretation and search questions worth testing
 - concrete transform programs within legal surfaces
-- measurement value tradeoffs under evidence uncertainty
+
+Measurement selection is deterministic rather than model-authored. `smoke` evaluates compiled candidates that fit budget, `small_dev` screens in proposal order with one candidate per comparison group, `full_dev` requires positive objective signal from small-dev, `confirmation` checks unstable or runtime-sensitive finalists, and `holdout` is protected validation for selected dev finalists only.
 
 ## Tool-Call Tasks
 

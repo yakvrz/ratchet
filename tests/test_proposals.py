@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from ratchet.experiments import ExperimentIntent
+from ratchet.experiments import SearchBrief, SearchPlan
 from ratchet.proposals import _surface_affordance_proposals
 from ratchet.surface_opportunities import generate_surface_opportunities
 from ratchet.surfaces import tool_loop_surface_from_agent_spec
@@ -54,24 +54,32 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
         )
         opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
         affordance_id = "surface.surface_tool_loop.inspect_before_mutate_order_id"
-        intent = ExperimentIntent(
-            intent_id="intent_tool_loop",
-            mechanism_class="surface_tool_loop",
-            hypothesis="Ground mutating calls in observed identifiers.",
-            surface_opportunity_ids=[affordance_id],
-            candidate_roles=["composed"],
+        search_plan = SearchPlan(
+            plan_id="plan_tool_loop",
+            diagnosis="Tool calls are not grounded in observed identifiers.",
+            hypotheses=["Ground mutating calls in observed identifiers."],
+            target_mechanisms=["surface_tool_loop"],
+            briefs=[
+                SearchBrief(
+                    brief_id="brief_tool_loop",
+                    mechanism_class="surface_tool_loop",
+                    hypothesis="Ground mutating calls in observed identifiers.",
+                    surface_opportunity_ids=[affordance_id],
+                    candidate_roles=["composed"],
+                )
+            ],
         )
 
         proposals = _surface_affordance_proposals(
             surface=surface,
             surface_opportunities=opportunities,
-            experiment_intents=[intent],
+            search_plan=search_plan,
             proposal_budget=1,
         )
 
         self.assertEqual(len(proposals), 1)
         candidate = proposals[0]
-        self.assertEqual(candidate.experiment_id, "intent_tool_loop")
+        self.assertEqual(candidate.experiment_id, "brief_tool_loop")
         self.assertEqual(candidate.candidate_role, "composed")
         patches = [patch.to_dict() for patch in candidate.program.patches]
         self.assertIn(
@@ -139,11 +147,26 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
             },
         )
         opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
+        search_plan = SearchPlan(
+            plan_id="plan_tool_loop",
+            diagnosis="Tool calls are not grounded in observed identifiers.",
+            hypotheses=["Ground mutating calls in observed identifiers."],
+            target_mechanisms=["surface_tool_loop"],
+            briefs=[
+                SearchBrief(
+                    brief_id="brief_tool_loop",
+                    mechanism_class="surface_tool_loop",
+                    hypothesis="Ground mutating calls in observed identifiers.",
+                    surface_opportunity_ids=["surface.surface_tool_loop.inspect_before_mutate_order_id"],
+                    candidate_roles=["composed", "ablation"],
+                )
+            ],
+        )
 
         proposals = _surface_affordance_proposals(
             surface=surface,
             surface_opportunities=opportunities,
-            experiment_intents=[],
+            search_plan=search_plan,
             proposal_budget=2,
         )
 

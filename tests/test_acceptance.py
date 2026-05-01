@@ -355,7 +355,7 @@ class AcceptanceGateTests(unittest.TestCase):
             baseline_dev=baseline,
             accepted_dev_candidates=[],
             holdout_candidates=[],
-            decision_log=[],
+            events=[],
         )
         self.assertEqual(outcome["status"], "no_failures")
 

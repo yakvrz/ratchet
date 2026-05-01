@@ -43,246 +43,117 @@ class EvidencePacket:
 
 
 @dataclass(frozen=True)
-class CausalHypothesis:
-    hypothesis_id: str
-    statement: str
-    mechanism_class: str
-    target_slices: list[str] = field(default_factory=list)
-    supporting_evidence: list[str] = field(default_factory=list)
-    competing_evidence: list[str] = field(default_factory=list)
-    disconfirming_result: str = ""
-    confidence: str = "low"
-
-    def __post_init__(self) -> None:
-        if not self.hypothesis_id:
-            raise ValueError("hypothesis_id must be non-empty")
-        if not self.statement:
-            raise ValueError("hypothesis statement must be non-empty")
-        if self.mechanism_class not in MECHANISM_CLASSES:
-            raise ValueError(f"unknown hypothesis mechanism_class {self.mechanism_class!r}")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "CausalHypothesis":
-        return cls(
-            hypothesis_id=str(payload.get("hypothesis_id") or payload.get("id") or ""),
-            statement=str(payload.get("statement") or ""),
-            mechanism_class=str(payload.get("mechanism_class") or ""),
-            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
-            supporting_evidence=[str(item) for item in payload.get("supporting_evidence", []) if item],
-            competing_evidence=[str(item) for item in payload.get("competing_evidence", []) if item],
-            disconfirming_result=str(payload.get("disconfirming_result") or ""),
-            confidence=str(payload.get("confidence") or "low"),
-        )
-
-
-@dataclass(frozen=True)
-class ResearchOpportunity:
-    opportunity_id: str
-    hypothesis_ids: list[str]
-    mechanism_class: str
-    target_slices: list[str]
-    rationale: str
-    measurements: list[str] = field(default_factory=list)
-    disconfirming_result: str = ""
-    candidate_roles: list[str] = field(default_factory=list)
-    compatible_mechanisms: list[str] = field(default_factory=list)
-    surface_opportunity_ids: list[str] = field(default_factory=list)
-    priority: int = 1
-
-    def __post_init__(self) -> None:
-        if not self.opportunity_id:
-            raise ValueError("opportunity_id must be non-empty")
-        if self.mechanism_class not in MECHANISM_CLASSES:
-            raise ValueError(f"unknown opportunity mechanism_class {self.mechanism_class!r}")
-        if not self.hypothesis_ids:
-            raise ValueError("opportunity hypothesis_ids must be non-empty")
-        if not self.rationale:
-            raise ValueError("opportunity rationale must be non-empty")
-        unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
-        if unknown_roles:
-            raise ValueError(f"unknown opportunity candidate_roles: {unknown_roles}")
-        if self.priority < 1:
-            raise ValueError("opportunity priority must be positive")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ResearchOpportunity":
-        return cls(
-            opportunity_id=str(payload.get("opportunity_id") or payload.get("id") or ""),
-            hypothesis_ids=[str(item) for item in payload.get("hypothesis_ids", []) if item],
-            mechanism_class=str(payload.get("mechanism_class") or ""),
-            target_slices=[str(item) for item in payload.get("target_slices", []) if item],
-            rationale=str(payload.get("rationale") or ""),
-            measurements=[str(item) for item in payload.get("measurements", []) if item],
-            disconfirming_result=str(payload.get("disconfirming_result") or ""),
-            candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
-            compatible_mechanisms=[str(item) for item in payload.get("compatible_mechanisms", []) if item],
-            surface_opportunity_ids=[str(item) for item in payload.get("surface_opportunity_ids", []) if item],
-            priority=int(payload.get("priority") or 1),
-        )
-
-
-@dataclass(frozen=True)
-class TheoryUpdate:
-    update_id: str
-    hypothesis_id: str
-    status: str
-    evidence: list[str] = field(default_factory=list)
-    implication: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "TheoryUpdate":
-        return cls(
-            update_id=str(payload.get("update_id") or payload.get("id") or ""),
-            hypothesis_id=str(payload.get("hypothesis_id") or ""),
-            status=str(payload.get("status") or ""),
-            evidence=[str(item) for item in payload.get("evidence", []) if item],
-            implication=str(payload.get("implication") or ""),
-        )
-
-
-@dataclass(frozen=True)
-class ResearchTheory:
-    theory_id: str
-    summary: str
-    primary_hypothesis_id: str
-    hypotheses: list[CausalHypothesis]
-    experiment_opportunities: list[ResearchOpportunity]
-    disconfirmed_explanations: list[str] = field(default_factory=list)
-    surprising_observations: list[str] = field(default_factory=list)
-    prior_lessons: list[str] = field(default_factory=list)
-    uncertainty: str = ""
-    confidence: str = "low"
-
-    def __post_init__(self) -> None:
-        if not self.theory_id:
-            raise ValueError("theory_id must be non-empty")
-        if not self.summary:
-            raise ValueError("research theory summary must be non-empty")
-        if not self.hypotheses:
-            raise ValueError("research theory hypotheses must be non-empty")
-        hypothesis_ids = [hypothesis.hypothesis_id for hypothesis in self.hypotheses]
-        if len(hypothesis_ids) != len(set(hypothesis_ids)):
-            raise ValueError("research theory hypothesis_ids must be unique")
-        if self.primary_hypothesis_id not in set(hypothesis_ids):
-            raise ValueError("primary_hypothesis_id must reference a hypothesis")
-        opportunity_ids = [opportunity.opportunity_id for opportunity in self.experiment_opportunities]
-        if len(opportunity_ids) != len(set(opportunity_ids)):
-            raise ValueError("research theory opportunity_ids must be unique")
-        known_hypotheses = set(hypothesis_ids)
-        for opportunity in self.experiment_opportunities:
-            unknown = sorted(set(opportunity.hypothesis_ids) - known_hypotheses)
-            if unknown:
-                raise ValueError(f"opportunity {opportunity.opportunity_id!r} cites unknown hypothesis_ids: {unknown}")
-
-    @property
-    def bottleneck_class(self) -> str:
-        primary = next(
-            (hypothesis for hypothesis in self.hypotheses if hypothesis.hypothesis_id == self.primary_hypothesis_id),
-            self.hypotheses[0],
-        )
-        return primary.mechanism_class
-
-    @property
-    def residual_failure_modes(self) -> list[str]:
-        return sorted({hypothesis.mechanism_class for hypothesis in self.hypotheses})
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "theory_id": self.theory_id,
-            "summary": self.summary,
-            "primary_hypothesis_id": self.primary_hypothesis_id,
-            "hypotheses": [hypothesis.to_dict() for hypothesis in self.hypotheses],
-            "experiment_opportunities": [opportunity.to_dict() for opportunity in self.experiment_opportunities],
-            "disconfirmed_explanations": list(self.disconfirmed_explanations),
-            "surprising_observations": list(self.surprising_observations),
-            "prior_lessons": list(self.prior_lessons),
-            "uncertainty": self.uncertainty,
-            "confidence": self.confidence,
-            "bottleneck_class": self.bottleneck_class,
-            "residual_failure_modes": self.residual_failure_modes,
-        }
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ResearchTheory":
-        hypotheses = [
-            CausalHypothesis.from_dict(item)
-            for item in payload.get("hypotheses", [])
-            if isinstance(item, dict)
-        ]
-        opportunities = [
-            ResearchOpportunity.from_dict(item)
-            for item in payload.get("experiment_opportunities", [])
-            if isinstance(item, dict)
-        ]
-        return cls(
-            theory_id=str(payload.get("theory_id") or payload.get("id") or ""),
-            summary=str(payload.get("summary") or ""),
-            primary_hypothesis_id=str(payload.get("primary_hypothesis_id") or ""),
-            hypotheses=hypotheses,
-            experiment_opportunities=opportunities,
-            disconfirmed_explanations=[str(item) for item in payload.get("disconfirmed_explanations", []) if item],
-            surprising_observations=[str(item) for item in payload.get("surprising_observations", []) if item],
-            prior_lessons=[str(item) for item in payload.get("prior_lessons", []) if item],
-            uncertainty=str(payload.get("uncertainty") or ""),
-            confidence=str(payload.get("confidence") or "low"),
-        )
-
-
-@dataclass(frozen=True)
-class ExperimentIntent:
-    intent_id: str
+class SearchBrief:
+    brief_id: str
     mechanism_class: str
     hypothesis: str
+    surface_opportunity_ids: list[str]
     target_slices: list[str] = field(default_factory=list)
     candidate_roles: list[str] = field(default_factory=list)
     measurements: list[str] = field(default_factory=list)
-    surface_opportunity_ids: list[str] = field(default_factory=list)
     success_criteria: str = ""
     disconfirming_result: str = ""
     priority: int = 1
 
     def __post_init__(self) -> None:
-        if not self.intent_id:
-            raise ValueError("intent_id must be non-empty")
-        if not self.mechanism_class:
-            raise ValueError("intent mechanism_class must be non-empty")
+        if not self.brief_id:
+            raise ValueError("brief_id must be non-empty")
+        if self.mechanism_class not in MECHANISM_CLASSES:
+            raise ValueError(f"unknown brief mechanism_class {self.mechanism_class!r}")
+        if not self.hypothesis:
+            raise ValueError("brief hypothesis must be non-empty")
+        if not self.surface_opportunity_ids:
+            raise ValueError("brief surface_opportunity_ids must be non-empty")
         unknown_roles = sorted(set(self.candidate_roles) - CANDIDATE_ROLES)
         if unknown_roles:
-            raise ValueError(f"unknown intent candidate_roles: {unknown_roles}")
-        if not self.surface_opportunity_ids:
-            raise ValueError("intent surface opportunity ids must be non-empty")
+            raise ValueError(f"unknown brief candidate_roles: {unknown_roles}")
         if self.priority < 1:
-            raise ValueError("intent priority must be positive")
+            raise ValueError("brief priority must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> "ExperimentIntent":
+    def from_dict(cls, payload: dict[str, Any]) -> "SearchBrief":
         return cls(
-            intent_id=str(payload.get("intent_id") or ""),
-            mechanism_class=str(payload.get("mechanism_class") or ""),
-            hypothesis=str(payload.get("hypothesis") or ""),
+            brief_id=str(payload.get("brief_id") or payload.get("id") or ""),
+            mechanism_class=str(payload.get("mechanism_class") or payload.get("mechanism") or ""),
+            hypothesis=str(payload.get("hypothesis") or payload.get("rationale") or ""),
+            surface_opportunity_ids=[str(item) for item in payload.get("surface_opportunity_ids", []) if item],
             target_slices=[str(item) for item in payload.get("target_slices", []) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
-            measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
-            surface_opportunity_ids=[
-                str(item)
-                for item in payload.get("surface_opportunity_ids", [])
-                if item
-            ],
+            measurements=[str(item) for item in payload.get("measurements", []) if item],
             success_criteria=str(payload.get("success_criteria") or ""),
             disconfirming_result=str(payload.get("disconfirming_result") or ""),
             priority=int(payload.get("priority") or 1),
+        )
+
+
+@dataclass(frozen=True)
+class SearchPlan:
+    plan_id: str
+    diagnosis: str
+    hypotheses: list[str]
+    target_mechanisms: list[str]
+    briefs: list[SearchBrief]
+    confidence: str = "low"
+
+    def __post_init__(self) -> None:
+        if not self.plan_id:
+            raise ValueError("plan_id must be non-empty")
+        if not self.diagnosis:
+            raise ValueError("search plan diagnosis must be non-empty")
+        if len({brief.brief_id for brief in self.briefs}) != len(self.briefs):
+            raise ValueError("search plan brief_id values must be unique")
+        unknown = sorted(set(self.target_mechanisms) - MECHANISM_CLASSES)
+        if unknown:
+            raise ValueError(f"unknown target mechanisms: {unknown}")
+
+    @property
+    def active_mechanisms(self) -> list[str]:
+        if self.target_mechanisms:
+            return list(self.target_mechanisms)
+        return sorted({brief.mechanism_class for brief in self.briefs})
+
+    @property
+    def surface_opportunity_ids(self) -> list[str]:
+        seen: list[str] = []
+        for brief in self.briefs:
+            for opportunity_id in brief.surface_opportunity_ids:
+                if opportunity_id not in seen:
+                    seen.append(opportunity_id)
+        return seen
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "plan_id": self.plan_id,
+            "diagnosis": self.diagnosis,
+            "hypotheses": list(self.hypotheses),
+            "target_mechanisms": list(self.target_mechanisms),
+            "briefs": [brief.to_dict() for brief in self.briefs],
+            "confidence": self.confidence,
+            "active_mechanisms": self.active_mechanisms,
+            "surface_opportunity_ids": self.surface_opportunity_ids,
+        }
+
+    @classmethod
+    def from_dict(cls, payload: dict[str, Any]) -> "SearchPlan":
+        briefs = [
+            SearchBrief.from_dict(item)
+            for item in payload.get("briefs", payload.get("candidate_briefs", []))
+            if isinstance(item, dict)
+        ]
+        return cls(
+            plan_id=str(payload.get("plan_id") or payload.get("id") or ""),
+            diagnosis=str(payload.get("diagnosis") or payload.get("diagnosis_summary") or ""),
+            hypotheses=[str(item) for item in payload.get("hypotheses", []) if item],
+            target_mechanisms=[
+                str(item)
+                for item in payload.get("target_mechanisms", payload.get("active_mechanisms", []))
+                if item
+            ],
+            briefs=briefs,
+            confidence=str(payload.get("confidence") or "low"),
         )
 
 
@@ -318,34 +189,6 @@ class ExperimentSpec:
             measurements=[str(item) for item in payload.get("measurements", payload.get("expected_measurements", [])) if item],
             candidate_roles=[str(item) for item in payload.get("candidate_roles", []) if item],
         )
-
-
-@dataclass(frozen=True)
-class ResearchState:
-    objective: dict[str, Any]
-    budget: dict[str, Any]
-    parent: dict[str, Any]
-    research_theory: dict[str, Any]
-    behavior_profile: dict[str, Any]
-    surface_opportunities: list[dict[str, Any]]
-    prior_experiment_outcomes: list[dict[str, Any]] = field(default_factory=list)
-    frontier: dict[str, Any] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class MeasurementDecision:
-    stage: str
-    selected_candidate_ids: list[str]
-    rationale: str
-    expected_information: str = ""
-    risks: str = ""
-    skipped_candidate_reasons: dict[str, str] = field(default_factory=dict)
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
 
 
 def build_evidence_packet(

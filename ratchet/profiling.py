@@ -157,16 +157,6 @@ def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
                 if row.get("event") == "case_cache_hit" and row.get("cache_source") == "shared"
             ),
             "case_completed": sum(1 for row in progress_rows if row.get("event") == "case_completed"),
-            "diagnosis_cache_hits": sum(
-                1
-                for row in progress_rows
-                if row.get("event") == "diagnosis_completed" and row.get("cached")
-            ),
-            "research_theory_cache_hits": sum(
-                1
-                for row in progress_rows
-                if row.get("event") == "research_theory_ready" and row.get("cached")
-            ),
         },
         "cache_hit_rate": _cache_hit_rate(progress_rows),
     }
@@ -351,7 +341,7 @@ def _phase_intervals(rows: list[dict[str, Any]]) -> dict[str, list[tuple[float, 
     pairings = [
         ("baseline_dev", "baseline_dev_started", "baseline_dev_completed"),
         ("baseline_holdout", "baseline_holdout_started", "baseline_holdout_completed"),
-        ("diagnosis", "diagnosis_started", "diagnosis_completed"),
+        ("search_planning", "search_planner_started", "search_planner_completed"),
         ("proposal", "proposal_started", "proposal_completed"),
         ("candidate_evaluation", "candidate_evaluation_started", "candidate_evaluated"),
         ("confirmation", "confirmation_started", "confirmation_completed"),

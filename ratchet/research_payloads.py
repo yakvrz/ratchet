@@ -5,7 +5,6 @@ from typing import Any
 from ratchet.experiments import EvidencePacket
 from ratchet.surface_opportunities import SurfaceOpportunity
 from ratchet.surfaces import SurfaceSpec
-from ratchet.types import FailureDiagnosis
 
 
 def top_counter_dict(values: dict[str, int], *, limit: int) -> dict[str, int]:
@@ -19,7 +18,7 @@ def truncate_text(value: Any, *, limit: int) -> str:
     return text[: max(0, limit - 3)].rstrip() + "..."
 
 
-def theorist_evidence_packet(packet: EvidencePacket) -> dict[str, Any]:
+def planner_evidence_packet(packet: EvidencePacket) -> dict[str, Any]:
     raw = packet.to_dict()
     diagnostics = raw.get("behavior_diagnostics") or {}
     runtime = raw.get("runtime_defects") or {}
@@ -80,79 +79,7 @@ def theorist_evidence_packet(packet: EvidencePacket) -> dict[str, Any]:
     }
 
 
-def theorist_diagnosis(diagnosis: FailureDiagnosis) -> dict[str, Any]:
-    return {
-        "case_ids": list(diagnosis.case_ids)[:8],
-        "category": diagnosis.category,
-        "root_cause": truncate_text(diagnosis.root_cause, limit=500),
-        "target_names": list(diagnosis.target_names)[:8],
-        "evidence": [
-            {
-                str(key): (
-                    truncate_text(value, limit=240)
-                    if isinstance(value, str)
-                    else value
-                )
-                for key, value in row.items()
-                if key in {"case_id", "expected", "actual", "score", "passed", "notes", "labels"}
-            }
-            for row in diagnosis.evidence[:6]
-            if isinstance(row, dict)
-        ],
-    }
-
-
-def theorist_search_hypothesis(search_hypothesis: Any) -> dict[str, Any]:
-    prompt = search_hypothesis.to_prompt_dict(
-        max_contexts_per_mechanism=1,
-        max_constrained_contexts=3,
-    )
-    mechanism_states = {}
-    for name, row in (prompt.get("mechanism_states") or {}).items():
-        if not isinstance(row, dict):
-            continue
-        mechanism_states[name] = {
-            "state": row.get("state"),
-            "suitability": row.get("suitability"),
-            "budget_share": row.get("budget_share"),
-            "constraints": list(row.get("constraints") or [])[:3],
-        }
-    return {
-        "active_mechanisms": list(prompt.get("active_mechanisms") or [])[:8],
-        "target_slices": list(prompt.get("target_slices") or [])[:8],
-        "mechanism_states": mechanism_states,
-        "active_contexts": [
-            theorist_context_row(row)
-            for row in list(prompt.get("active_contexts") or [])[:8]
-            if isinstance(row, dict)
-        ],
-        "constrained_or_paused_contexts": [
-            theorist_context_row(row)
-            for row in list(prompt.get("constrained_or_paused_contexts") or [])[:3]
-            if isinstance(row, dict)
-        ],
-        "profile": prompt.get("profile") or {},
-        "budget_allocation": prompt.get("budget_allocation") or {},
-        "rationale": truncate_text(prompt.get("rationale"), limit=500),
-    }
-
-
-def theorist_context_row(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "id": row.get("id"),
-        "family": row.get("family"),
-        "state": row.get("state"),
-        "target_names": list(row.get("target_names") or [])[:4],
-        "target_slice": row.get("target_slice"),
-        "ops": list(row.get("ops") or [])[:4],
-        "suitability": row.get("suitability"),
-        "accepted_count": row.get("accepted_count"),
-        "rejected_count": row.get("rejected_count"),
-        "constraints": list(row.get("constraints") or [])[:3],
-    }
-
-
-def theorist_surface_opportunities(
+def planner_surface_opportunities(
     surface_opportunities: list[SurfaceOpportunity],
     *,
     limit: int = 36,
@@ -205,7 +132,7 @@ def theorist_surface_opportunities(
     ]
 
 
-def theorist_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
+def planner_surface_spec(surface: SurfaceSpec) -> dict[str, Any]:
     return {
         "agent_id": surface.agent_id,
         "context_sections": [
