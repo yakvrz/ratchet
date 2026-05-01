@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from ratchet.errors import OptimizerModelError
+from ratchet.optimizer import _compact_recent_history_for_planner
 from ratchet.research import SearchPlanner
 
 
@@ -82,6 +83,28 @@ class SearchPlannerTests(unittest.TestCase):
         self.assertEqual(plan.diagnosis, "The baseline is failing before using the tool-loop surface.")
         self.assertEqual(plan.briefs[0].brief_id, "tool_loop_brief")
         self.assertEqual(plan.briefs[0].mechanism_class, "surface_tool_loop")
+
+    def test_compacts_recent_history_for_planner(self) -> None:
+        rows = _compact_recent_history_for_planner(
+            [
+                {
+                    "candidate": {"candidate_id": "c1"},
+                    "candidate_id": "c1",
+                    "hypothesis": "h",
+                    "evaluation_stages": [
+                        {
+                            "stage": "small_dev",
+                            "case_count": 2,
+                            "comparison_to_parent": {"score_delta": 0.25},
+                        }
+                    ],
+                }
+            ],
+            limit=3,
+        )
+
+        self.assertEqual(rows[0]["candidate_id"], "c1")
+        self.assertEqual(rows[0]["latest_stage"]["score_delta"], 0.25)
 
 
 if __name__ == "__main__":

@@ -2264,7 +2264,7 @@ def _compact_prior_stage_results(
     return rows
 
 
-def _compact_recent_history_for_theory(
+def _compact_recent_history_for_planner(
     proposals_log: list[dict[str, Any]],
     *,
     limit: int,
