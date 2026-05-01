@@ -172,6 +172,7 @@ class CandidateProposal:
             "hypothesis": str(payload.get("hypothesis", "")),
             "expected_effects": dict(payload.get("expected_effects", {})),
         }
+        program_payload = _normalize_program_payload(program_payload)
         program_payload["metadata"] = metadata
         program = TransformProgram.from_dict(program_payload)
         raw_applications = payload.get("applications")
@@ -195,3 +196,18 @@ class CandidateProposal:
             expected_effects=dict(payload.get("expected_effects", {})),
             evaluation_plan=str(payload.get("evaluation_plan", "full_dev") or "full_dev"),
         )
+
+
+def _normalize_program_payload(program_payload: dict[str, Any]) -> dict[str, Any]:
+    patches = program_payload.get("patches")
+    if not isinstance(patches, list):
+        return program_payload
+    normalized_patches: list[Any] = []
+    for patch in patches:
+        if isinstance(patch, dict):
+            patch = dict(patch)
+            if patch.get("op") in {"add_context_section", "replace_context_section", "render_state_section"}:
+                if not patch.get("section") and patch.get("name"):
+                    patch["section"] = patch["name"]
+        normalized_patches.append(patch)
+    return {**program_payload, "patches": normalized_patches}

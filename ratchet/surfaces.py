@@ -420,16 +420,18 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                     allowed_ops=("define_state", "append_state", "render_state_section", "validate", "replan"),
                     description=(
                         f"Generic inspect-before-mutate scaffold for {identifier}: collect identifiers from "
-                        "read tool results, expose them in state/context, and validate mutating tool calls "
-                        "before environment execution."
+                        "inspection/read-detail tool results, optionally track broader listed identifiers "
+                        "separately, and validate mutating tool calls against inspected identifiers before "
+                        "environment execution."
                     ),
                     value_schema={
                         "affordance": dict(affordance),
                         "safe_patterns": [
-                            "define a state list for observed identifiers",
-                            "append identifiers from real after_tool_result observations",
-                            "render the identifier state before model calls",
-                            "validate mutating tool arguments with tool_arg_in_state and replan on failure",
+                            "define a state list for inspected identifiers",
+                            "append inspected identifiers from real after_tool_result inspection/read-detail observations",
+                            "track listed/discovered identifiers in a separate state field when useful",
+                            "render identifier state before model calls",
+                            "validate mutating tool arguments against inspected identifiers with tool_arg_in_state and replan on failure",
                         ],
                     },
                 )
@@ -851,7 +853,8 @@ def _tool_loop_affordances(tools: tuple[ToolSpec, ...]) -> list[dict[str, Any]]:
             {
                 "kind": "inspect_before_mutate",
                 "identifier": identifier,
-                "state_field": f"observed_{identifier.removesuffix('_id')}_ids",
+                "inspected_state_field": f"inspected_{identifier.removesuffix('_id')}_ids",
+                "listed_state_field": f"listed_{identifier.removesuffix('_id')}_ids",
                 "produced_by": producers,
                 "consumed_by": mutating_consumers,
                 "required_surfaces": [

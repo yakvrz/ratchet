@@ -172,40 +172,39 @@ class AcceptanceGateTests(unittest.TestCase):
         reason = objective_rejection_reason(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
         self.assertIsNone(reason)
 
-    def test_small_uncertain_holdout_gain_fails_final_gate(self) -> None:
+    def test_small_holdout_gain_passes_deterministic_final_gate(self) -> None:
         baseline = make_summary("baseline", [1.0, 1.0, 0.0, 0.0], [0.002] * 4, [100] * 4, [1.0] * 4)
         candidate_summary = make_summary("candidate_summary", [1.0, 1.0, 1.0, 0.0], [0.004] * 4, [300] * 4, [1.0] * 4)
         comparison = compare_summaries(baseline, candidate_summary)
         self.assertEqual(comparison.score_ci[0], 0.0)
         passed, _ = final_gate(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
-        self.assertFalse(passed)
+        self.assertTrue(passed)
 
-    def test_underpowered_holdout_gain_is_directional_not_validated(self) -> None:
+    def test_underpowered_holdout_gain_is_validated_by_objective_gate(self) -> None:
         baseline = make_summary("baseline", [1.0] * 18 + [0.0] * 6, [0.002] * 24, [100] * 24, [1.0] * 24)
         candidate_summary = make_summary("candidate_summary", [1.0] * 20 + [0.0] * 4, [0.002] * 24, [100] * 24, [1.0] * 24)
         gate = final_gate_status(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
-        self.assertEqual(gate.status, "directional")
-        self.assertTrue(gate.directional)
-        self.assertFalse(gate.validated)
-        self.assertIn("paired pass-flip p-value", gate.reason or "")
+        self.assertEqual(gate.status, "validated")
+        self.assertTrue(gate.validated)
+        self.assertIsNone(gate.reason)
 
-    def test_score_only_holdout_gain_is_directional_not_validated(self) -> None:
+    def test_score_only_holdout_gain_is_validated_by_objective_gate(self) -> None:
         baseline = make_summary("baseline", [0.4] * 8, [0.002] * 8, [100] * 8, [1.0] * 8)
         candidate_summary = make_summary("candidate_summary", [0.8] * 8, [0.002] * 8, [100] * 8, [1.0] * 8)
         comparison = compare_summaries(baseline, candidate_summary)
         self.assertGreater(comparison.score_ci[0], 0.0)
         gate = final_gate_status(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
-        self.assertEqual(gate.status, "directional")
-        self.assertFalse(gate.validated)
+        self.assertEqual(gate.status, "validated")
+        self.assertTrue(gate.validated)
         self.assertEqual(gate.comparison.pass_significance.fixed_count, 0)
         self.assertEqual(gate.comparison.pass_significance.regressed_count, 0)
 
-    def test_score_gain_with_pass_regression_is_directional_not_failed(self) -> None:
+    def test_score_gain_with_pass_regression_is_validated_by_objective_gate(self) -> None:
         baseline = make_summary("baseline", [1.0, 0.0, 0.0, 0.0], [0.002] * 4, [100] * 4, [1.0] * 4)
         candidate_summary = make_summary("candidate_summary", [0.9, 0.9, 0.9, 0.9], [0.002] * 4, [100] * 4, [1.0] * 4)
         gate = final_gate_status(baseline, candidate_summary, OptimizationObjective(mode="correctness"))
-        self.assertEqual(gate.status, "directional")
-        self.assertIn("paired pass-flip p-value", gate.reason or "")
+        self.assertEqual(gate.status, "validated")
+        self.assertIsNone(gate.reason)
 
     def test_repeated_sample_pass_flip_significance_uses_case_majorities(self) -> None:
         baseline = make_repeated_summary("baseline", [[0.0, 0.0, 1.0]] * 4)

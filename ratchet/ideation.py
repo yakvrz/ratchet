@@ -15,7 +15,6 @@ DISCOVERY_STAGES = {
     "unstable_confirmation",
     "failed_holdout",
     "validated",
-    "directional_holdout",
     "promotable_dev",
 }
 
@@ -43,8 +42,6 @@ def build_ideation_metrics(
         status = str(row.get("status") or "")
         if status == "validated":
             stage_counts["validated"] += 1
-        elif status == "directional":
-            stage_counts["directional_holdout"] += 1
         elif status == "failed":
             stage_counts["failed_holdout"] += 1
         elif status == "unstable":
@@ -132,7 +129,6 @@ def _best_brief_stage(rows: list[dict[str, Any]]) -> str:
         return "planned_not_attempted"
     ordered = [
         "validated",
-        "directional_holdout",
         "unstable_confirmation",
         "promotable_dev",
         "failed_full_dev",

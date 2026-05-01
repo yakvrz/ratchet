@@ -2688,10 +2688,10 @@ def _transform_final_status_summaries(finalist_statuses: list[dict[str, Any]]) -
             family_name = str(family)
             summary = summaries.setdefault(
                 family_name,
-                {"validated": 0, "directional": 0, "failed": 0, "unstable": 0, "finalist_count": 0, "candidate_ids": []},
+                {"validated": 0, "failed": 0, "unstable": 0, "finalist_count": 0, "candidate_ids": []},
             )
             status = str(row.get("status") or "failed")
-            if status not in {"validated", "directional", "failed", "unstable"}:
+            if status not in {"validated", "failed", "unstable"}:
                 status = "failed"
             summary[status] += 1
             summary["finalist_count"] += 1

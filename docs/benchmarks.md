@@ -57,7 +57,7 @@ It is useful for:
 
 It is not a flagship Ratchet benchmark. Single-label intent classification over a fixed taxonomy can often be better served by a fine-tuned encoder model than by an LLM agent. BANKING77 should not be overinterpreted as proof that Ratchet is useful for agent policy optimization.
 
-Good Ratchet behavior on BANKING77 means clear evidence accounting, cautious promotion, and honest reporting when gains are directional, unstable, or too sample-sensitive.
+Good Ratchet behavior on BANKING77 means clear evidence accounting, deterministic objective-based promotion, and honest reporting when gains are unstable or too sample-sensitive.
 
 ## CLINC150
 

@@ -121,13 +121,7 @@ def build_outcome_analysis(
                 status = "holdout_not_run_budget_exhausted"
                 summary = "At least one dev candidate improved, but holdout validation budget was zero."
         elif holdout_validations and not any(event.get("passed_final_gate") for event in holdout_validations):
-            if finalist_status_counts.get("directional", 0) > 0:
-                status = "directional_holdout_gain"
-                summary = "A dev finalist improved holdout directionally, but the uncertainty gate did not validate it."
-            elif any("uncertainty rejected" in reason for reason in holdout_rejection_reasons):
-                status = "holdout_gain_uncertain"
-                summary = "A dev finalist reached holdout, but its measured gain was not statistically supported."
-            elif any("tradeoff" in reason or "constraint rejected" in reason for reason in holdout_rejection_reasons):
+            if any("tradeoff" in reason or "constraint rejected" in reason for reason in holdout_rejection_reasons):
                 status = "objective_tradeoff_rejected"
                 summary = "A dev finalist reached holdout but was rejected by objective constraints or tradeoff guards."
             else:
@@ -216,6 +210,7 @@ class RatchetReporter:
                 "run_cost": (result.run_profile or {}).get("run_cost", {}),
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "ideation_metrics": result.ideation_metrics,
+                "transform_trace_attribution": _transform_trace_attribution(result),
                 "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
             },
@@ -319,13 +314,17 @@ class RatchetReporter:
             "",
             *holdout_rows,
             "",
-            "## Holdout Uncertainty",
+            "## Holdout Paired Evidence",
             "",
-            *self._holdout_uncertainty_rows(comparison),
+            *self._holdout_paired_evidence_rows(comparison),
             "",
             "## Selected Candidate",
             "",
             *(changes or ["No transform operations; original baseline selected."]),
+            "",
+            "## Transform Attribution",
+            "",
+            *self._transform_attribution_rows(result),
             "",
             "## Generated Surface",
             "",
@@ -491,15 +490,50 @@ class RatchetReporter:
         ]
 
     @staticmethod
-    def _holdout_uncertainty_rows(comparison: Any | None) -> list[str]:
+    def _holdout_paired_evidence_rows(comparison: Any | None) -> list[str]:
         if comparison is None:
-            return ["Holdout uncertainty was not computed."]
-        return [
+            return ["Holdout paired evidence was not computed."]
+        rows = [
             f"- Score delta: {comparison.score_delta:.4f} CI [{comparison.score_ci[0]:.4f}, {comparison.score_ci[1]:.4f}]",
             f"- Cost delta: ${comparison.cost_delta:.6f} CI [${comparison.cost_ci[0]:.6f}, ${comparison.cost_ci[1]:.6f}]",
             f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
             f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
         ]
+        if comparison.pass_significance is not None:
+            sig = comparison.pass_significance
+            rows.append(
+                f"- Pass flips: fixed={sig.fixed_count}, regressed={sig.regressed_count}, paired p={sig.p_value:.4f}"
+            )
+        return rows
+
+    @staticmethod
+    def _transform_attribution_rows(result: RatchetResult) -> list[str]:
+        attribution = _transform_trace_attribution(result)
+        candidates = attribution.get("candidates") or {}
+        if not candidates:
+            return ["No transform trace attribution was recorded."]
+        rows = [
+            "| Candidate | Split | Trace events | Top operations | Skipped-tool mismatches |",
+            "| --- | --- | ---: | --- | --- |",
+        ]
+        for candidate_id_value, item in sorted(candidates.items()):
+            operation_counts = item.get("operation_counts") or {}
+            skipped_tools = item.get("skipped_tool_counts") or {}
+            top_ops = ", ".join(
+                f"`{name}` x{count}" for name, count in list(operation_counts.items())[:4]
+            ) or "none"
+            skipped = ", ".join(
+                f"`{name}` x{count}" for name, count in list(skipped_tools.items())[:3]
+            ) or "none"
+            rows.append(
+                "| "
+                f"`{candidate_id_value}` | "
+                f"{', '.join(item.get('splits') or []) or 'n/a'} | "
+                f"{int(item.get('trace_event_count') or 0)} | "
+                f"{top_ops} | "
+                f"{skipped} |"
+            )
+        return rows
 
     def _write_scorecard_svg(self, path: Path, result: RatchetResult) -> None:
         if result.baseline_holdout is None or result.selected_holdout is None:
@@ -1188,6 +1222,52 @@ def _frontier_status_summaries(proposals: list[dict[str, Any]]) -> dict[str, dic
         if candidate_id_value and candidate_id_value not in item["candidate_ids"]:
             item["candidate_ids"].append(str(candidate_id_value))
     return summaries
+
+
+def _transform_trace_attribution(result: RatchetResult) -> dict[str, Any]:
+    summaries = [*result.accepted_dev_candidates, *result.holdout_candidates]
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for summary in summaries:
+        if summary.candidate is None:
+            continue
+        item = by_candidate.setdefault(
+            summary.candidate_id,
+            {
+                "candidate_id": summary.candidate_id,
+                "splits": set(),
+                "trace_event_count": 0,
+                "operation_counts": Counter(),
+                "skipped_tool_counts": Counter(),
+            },
+        )
+        item["splits"].add(summary.split)
+        for evaluation in summary.evaluations:
+            trace = evaluation.record.diagnostics.metadata.get("transform_trace", [])
+            if not isinstance(trace, list):
+                continue
+            for event in trace:
+                if not isinstance(event, dict):
+                    continue
+                hook = str(event.get("hook") or "unknown")
+                op = str(event.get("op") or "unknown")
+                trace_result = str(event.get("result") or "applied")
+                item["trace_event_count"] += 1
+                item["operation_counts"][f"{hook}:{op}:{trace_result}"] += 1
+                fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
+                if trace_result == "skipped_tool":
+                    expected = str(fields.get("tool") or "unknown")
+                    actual = str(fields.get("actual") or "unknown")
+                    item["skipped_tool_counts"][f"{expected}->{actual}"] += 1
+    candidates: dict[str, dict[str, Any]] = {}
+    for candidate_id_value, item in by_candidate.items():
+        candidates[candidate_id_value] = {
+            "candidate_id": candidate_id_value,
+            "splits": sorted(item["splits"]),
+            "trace_event_count": int(item["trace_event_count"]),
+            "operation_counts": dict(sorted(item["operation_counts"].items(), key=lambda pair: (-pair[1], pair[0]))),
+            "skipped_tool_counts": dict(sorted(item["skipped_tool_counts"].items(), key=lambda pair: (-pair[1], pair[0]))),
+        }
+    return {"candidates": candidates}
 
 
 def _small_dev_signal(row: dict[str, Any]) -> dict[str, Any]:

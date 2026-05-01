@@ -909,8 +909,9 @@ def _surface_affordance_proposals(
         if affordance.get("kind") != "inspect_before_mutate":
             continue
         identifier = str(affordance.get("identifier") or "")
-        state_field = str(affordance.get("state_field") or "")
-        if not identifier or not state_field:
+        inspected_state_field = _inspected_state_field(identifier)
+        listed_state_field = _listed_state_field(identifier)
+        if not identifier:
             continue
         opportunity = opportunity_by_target.get(f"inspect_before_mutate.{identifier}")
         if opportunity is None:
@@ -919,11 +920,12 @@ def _surface_affordance_proposals(
         patches: list[dict[str, Any]] = [
             {
                 "op": "define_state",
-                "field": state_field,
+                "field": inspected_state_field,
                 "type": "list[string]",
                 "initial": [],
             }
         ]
+        listed_patches: list[dict[str, Any]] = []
         for producer in list(affordance.get("produced_by") or [])[:3]:
             if not isinstance(producer, dict):
                 continue
@@ -931,22 +933,47 @@ def _surface_affordance_proposals(
             ref = str(producer.get("ref") or "")
             if not tool or not ref:
                 continue
-            patches.append(
+            if _producer_is_inspection(producer):
+                field = inspected_state_field
+                target_patches = patches
+            else:
+                field = listed_state_field
+                target_patches = listed_patches
+            target_patches.append(
                 {
                     "hook": "after_tool_result",
                     "op": "append_state",
-                    "field": state_field,
+                    "field": field,
                     "value": {"$ref": ref},
                     "extend": "[]" in ref,
                     "when": {"tool_call.name": tool},
                 }
             )
+        if listed_patches:
+            patches.insert(
+                1,
+                {
+                    "op": "define_state",
+                    "field": listed_state_field,
+                    "type": "list[string]",
+                    "initial": [],
+                },
+            )
+            patches.extend(listed_patches)
+        if not any(
+            patch.get("op") == "append_state" and patch.get("field") == inspected_state_field
+            for patch in patches
+        ):
+            continue
+        rendered_fields = [inspected_state_field]
+        if listed_patches:
+            rendered_fields.append(listed_state_field)
         patches.append(
             {
                 "hook": "before_model_call",
                 "op": "render_state_section",
-                "section": "observed_identifiers",
-                "fields": [state_field],
+                "section": "inspected_identifiers",
+                "fields": rendered_fields,
                 "position": "before:recent_messages",
             }
         )
@@ -966,7 +993,7 @@ def _surface_affordance_proposals(
                     "checks": [
                         {
                             "type": "tool_arg_in_state",
-                            "state_field": state_field,
+                            "state_field": inspected_state_field,
                             "arg": identifier,
                         }
                     ],
@@ -999,10 +1026,10 @@ def _surface_affordance_proposals(
             candidate_role="composed",
             comparison_group=f"inspect_before_mutate.{identifier}",
             identifier=identifier,
-            rationale=f"Compose observed-{identifier} state tracking with mutating-tool validation.",
+            rationale=f"Compose inspected-{identifier} state tracking with mutating-tool validation.",
             hypothesis=(
                 f"Mutating tool calls that consume {identifier} should be grounded in identifiers "
-                "previously observed from read tool results."
+                "previously observed from inspection tool results."
             ),
         )
         primary.append(primary_candidate)
@@ -1033,7 +1060,7 @@ def _surface_affordance_proposals(
                     ),
                     hypothesis=(
                         f"Stateful validation for {identifier} may account for most of the benefit without "
-                        "rendering observed identifiers into model context."
+                        "rendering inspected identifiers into model context."
                     ),
                 )
             )
@@ -1092,6 +1119,24 @@ def _brief_for_opportunity(
         if brief.mechanism_class == "surface_tool_loop":
             return brief
     return None
+
+
+def _inspected_state_field(identifier: str) -> str:
+    return f"inspected_{identifier.removesuffix('_id')}_ids"
+
+
+def _listed_state_field(identifier: str) -> str:
+    return f"listed_{identifier.removesuffix('_id')}_ids"
+
+
+def _producer_is_inspection(producer: dict[str, Any]) -> bool:
+    tool = str(producer.get("tool") or "").lower()
+    path = str(producer.get("path") or "").lower()
+    if tool.startswith(("get_", "inspect_", "retrieve_")):
+        return True
+    if tool.startswith(("list_", "search_", "find_")):
+        return False
+    return "[]" not in path
 
 
 def _surface_opportunity_evidence(evidence_packet: EvidencePacket) -> dict[str, Any]:

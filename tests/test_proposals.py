@@ -27,6 +27,17 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                     {
                         "type": "function",
                         "function": {
+                            "name": "get_order",
+                            "description": "Inspect one order.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
                             "name": "cancel_order",
                             "description": "Cancel an order.",
                             "parameters": {
@@ -48,7 +59,16 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                                 },
                             }
                         },
-                    }
+                    },
+                    "get_order": {
+                        "type": "object",
+                        "properties": {
+                            "order": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            }
+                        },
+                    },
                 },
             },
         )
@@ -56,14 +76,14 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
         affordance_id = "surface.surface_tool_loop.inspect_before_mutate_order_id"
         search_plan = SearchPlan(
             plan_id="plan_tool_loop",
-            diagnosis="Tool calls are not grounded in observed identifiers.",
-            hypotheses=["Ground mutating calls in observed identifiers."],
+            diagnosis="Tool calls are not grounded in inspected identifiers.",
+            hypotheses=["Ground mutating calls in inspected identifiers."],
             target_mechanisms=["surface_tool_loop"],
             briefs=[
                 SearchBrief(
                     brief_id="brief_tool_loop",
                     mechanism_class="surface_tool_loop",
-                    hypothesis="Ground mutating calls in observed identifiers.",
+                    hypothesis="Ground mutating calls in inspected identifiers.",
                     surface_opportunity_ids=[affordance_id],
                     candidate_roles=["composed"],
                 )
@@ -86,7 +106,18 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
             {
                 "hook": "after_tool_result",
                 "op": "append_state",
-                "field": "observed_order_ids",
+                "field": "inspected_order_ids",
+                "value": {"$ref": "tool_result.parsed.order.order_id"},
+                "extend": False,
+                "when": {"tool_call.name": "get_order"},
+            },
+            patches,
+        )
+        self.assertIn(
+            {
+                "hook": "after_tool_result",
+                "op": "append_state",
+                "field": "listed_order_ids",
                 "value": {"$ref": "tool_result.parsed.orders[].order_id"},
                 "extend": True,
                 "when": {"tool_call.name": "list_orders"},
@@ -98,8 +129,15 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                 patch.get("op") == "validate"
                 and patch.get("tool") == "cancel_order"
                 and patch.get("checks") == [
-                    {"type": "tool_arg_in_state", "state_field": "observed_order_ids", "arg": "order_id"}
+                    {"type": "tool_arg_in_state", "state_field": "inspected_order_ids", "arg": "order_id"}
                 ]
+                for patch in patches
+            )
+        )
+        self.assertTrue(
+            any(
+                patch.get("op") == "render_state_section"
+                and patch.get("fields") == ["inspected_order_ids", "listed_order_ids"]
                 for patch in patches
             )
         )
@@ -116,6 +154,17 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                             "name": "list_orders",
                             "description": "List orders.",
                             "parameters": {"type": "object"},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_order",
+                            "description": "Inspect one order.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            },
                         },
                     },
                     {
@@ -142,21 +191,30 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
                                 },
                             }
                         },
-                    }
+                    },
+                    "get_order": {
+                        "type": "object",
+                        "properties": {
+                            "order": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            }
+                        },
+                    },
                 },
             },
         )
         opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
         search_plan = SearchPlan(
             plan_id="plan_tool_loop",
-            diagnosis="Tool calls are not grounded in observed identifiers.",
-            hypotheses=["Ground mutating calls in observed identifiers."],
+            diagnosis="Tool calls are not grounded in inspected identifiers.",
+            hypotheses=["Ground mutating calls in inspected identifiers."],
             target_mechanisms=["surface_tool_loop"],
             briefs=[
                 SearchBrief(
                     brief_id="brief_tool_loop",
                     mechanism_class="surface_tool_loop",
-                    hypothesis="Ground mutating calls in observed identifiers.",
+                    hypothesis="Ground mutating calls in inspected identifiers.",
                     surface_opportunity_ids=["surface.surface_tool_loop.inspect_before_mutate_order_id"],
                     candidate_roles=["composed", "ablation"],
                 )
@@ -174,6 +232,74 @@ class SurfaceAffordanceProposalTests(unittest.TestCase):
         ablation_ops = [patch.op.op for patch in proposals[1].program.patches]
         self.assertNotIn("render_state_section", ablation_ops)
         self.assertIn("validate", ablation_ops)
+
+    def test_identifier_flow_affordance_requires_inspection_producer(self) -> None:
+        surface = tool_loop_surface_from_agent_spec(
+            AgentSpec(name="interactive", model="base"),
+            probe={
+                "domain_policy": "Inspect records before mutation.",
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "list_records",
+                            "description": "List records.",
+                            "parameters": {"type": "object"},
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "update_record",
+                            "description": "Update a record.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"record_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                ],
+                "tool_result_schemas": {
+                    "list_records": {
+                        "type": "object",
+                        "properties": {
+                            "records": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {"record_id": {"type": "string"}},
+                                },
+                            }
+                        },
+                    }
+                },
+            },
+        )
+        opportunities = generate_surface_opportunities(surface, active_mechanisms=["surface_tool_loop"])
+        search_plan = SearchPlan(
+            plan_id="plan_tool_loop",
+            diagnosis="Mutating calls need stronger identifier grounding.",
+            hypotheses=["Validate mutations only against inspected identifiers."],
+            target_mechanisms=["surface_tool_loop"],
+            briefs=[
+                SearchBrief(
+                    brief_id="brief_tool_loop",
+                    mechanism_class="surface_tool_loop",
+                    hypothesis="Validate mutations only against inspected identifiers.",
+                    surface_opportunity_ids=["surface.surface_tool_loop.inspect_before_mutate_record_id"],
+                    candidate_roles=["composed"],
+                )
+            ],
+        )
+
+        proposals = _surface_affordance_proposals(
+            surface=surface,
+            surface_opportunities=opportunities,
+            search_plan=search_plan,
+            proposal_budget=1,
+        )
+
+        self.assertEqual(proposals, [])
 
 
 if __name__ == "__main__":

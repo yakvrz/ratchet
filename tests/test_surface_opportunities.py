@@ -98,6 +98,17 @@ class SurfaceOpportunityTests(unittest.TestCase):
                     {
                         "type": "function",
                         "function": {
+                            "name": "get_order",
+                            "description": "Inspect one order.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
                             "name": "cancel_order",
                             "description": "Cancel an order.",
                             "parameters": {
@@ -119,7 +130,16 @@ class SurfaceOpportunityTests(unittest.TestCase):
                                 },
                             }
                         },
-                    }
+                    },
+                    "get_order": {
+                        "type": "object",
+                        "properties": {
+                            "order": {
+                                "type": "object",
+                                "properties": {"order_id": {"type": "string"}},
+                            }
+                        },
+                    },
                 },
             },
         )
@@ -132,8 +152,11 @@ class SurfaceOpportunityTests(unittest.TestCase):
 
         affordance = surface.affordances[0]
         self.assertEqual(affordance["identifier"], "order_id")
-        self.assertEqual(affordance["state_field"], "observed_order_ids")
-        self.assertEqual(affordance["produced_by"][0]["ref"], "tool_result.parsed.orders[].order_id")
+        self.assertEqual(affordance["inspected_state_field"], "inspected_order_ids")
+        self.assertEqual(affordance["listed_state_field"], "listed_order_ids")
+        producer_refs = {producer["ref"] for producer in affordance["produced_by"]}
+        self.assertIn("tool_result.parsed.orders[].order_id", producer_refs)
+        self.assertIn("tool_result.parsed.order.order_id", producer_refs)
         ids = {item.surface_opportunity_id for item in opportunities}
         self.assertIn("surface.surface_tool_loop.inspect_before_mutate_order_id", ids)
 

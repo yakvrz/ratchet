@@ -16,8 +16,7 @@ DEFAULT_COST_MODE_LATENCY_GUARD = 1.15
 SCORE_EQUIVALENCE_FLOOR = 0.05
 COST_EQUIVALENCE_FRACTION = 0.0
 LATENCY_EQUIVALENCE_FRACTION = 0.0
-SIGNIFICANCE_ALPHA = 0.10
-FINALIST_STATUSES = {"validated", "directional", "failed", "unstable"}
+FINALIST_STATUSES = {"validated", "failed", "unstable"}
 
 
 @dataclass(frozen=True)
@@ -30,16 +29,11 @@ class FinalGateResult:
     def validated(self) -> bool:
         return self.status == "validated"
 
-    @property
-    def directional(self) -> bool:
-        return self.status == "directional"
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
             "reason": self.reason,
             "validated": self.validated,
-            "directional": self.directional,
             "comparison": self.comparison.to_dict(),
         }
 
@@ -247,44 +241,6 @@ class GatePredicate:
             return None
         raise ValueError(f"Unsupported optimization mode: {self.mode}")
 
-    def confidence_reason(self, comparison: Comparison) -> str | None:
-        if self.mode == "correctness":
-            sig = comparison.pass_significance
-            if sig is None:
-                return "correctness uncertainty rejected candidate (missing paired pass-flip significance)"
-            if sig.p_value > SIGNIFICANCE_ALPHA:
-                return (
-                    "correctness uncertainty rejected candidate "
-                    f"(fixed {sig.fixed_count}, regressed {sig.regressed_count}, "
-                    f"paired pass-flip p-value {sig.p_value:.4f} > alpha {SIGNIFICANCE_ALPHA:.2f})"
-                )
-            return None
-        if self.mode == "cost":
-            if comparison.score_ci[0] < -NON_INFERIORITY_MARGIN:
-                return (
-                    "cost uncertainty rejected correctness tradeoff "
-                    f"(score CI lower {comparison.score_ci[0]:.4f} < {-NON_INFERIORITY_MARGIN:.4f})"
-                )
-            if comparison.cost_ci[1] >= 0.0:
-                return (
-                    "cost uncertainty rejected candidate "
-                    f"(cost CI upper {comparison.cost_ci[1]:.6f} >= 0.000000)"
-                )
-            return None
-        if self.mode == "latency":
-            if comparison.score_ci[0] < -NON_INFERIORITY_MARGIN:
-                return (
-                    "latency uncertainty rejected correctness tradeoff "
-                    f"(score CI lower {comparison.score_ci[0]:.4f} < {-NON_INFERIORITY_MARGIN:.4f})"
-                )
-            if comparison.latency_ci[1] >= 0.0:
-                return (
-                    "latency uncertainty rejected candidate "
-                    f"(latency CI upper {comparison.latency_ci[1]:.4f} >= 0.0000)"
-                )
-            return None
-        raise ValueError(f"Unsupported optimization mode: {self.mode}")
-
     def dev_gate_reason(
         self,
         *,
@@ -326,9 +282,6 @@ class GatePredicate:
         improvement_reason = self.improvement_reason(baseline, candidate)
         if improvement_reason is not None:
             return FinalGateResult(status="failed", reason=improvement_reason, comparison=comparison)
-        confidence_reason = self.confidence_reason(comparison)
-        if confidence_reason is not None:
-            return FinalGateResult(status="directional", reason=confidence_reason, comparison=comparison)
         return FinalGateResult(status="validated", reason=None, comparison=comparison)
 
     def sort_key(self, summary: CandidateSummary) -> tuple[Any, ...]:
@@ -652,13 +605,6 @@ def final_gate_status(
     objective: OptimizationObjective | None = None,
 ) -> FinalGateResult:
     return _predicate(objective).final_gate(baseline, candidate_summary)
-
-
-def uncertainty_rejection_reason(
-    comparison: Comparison,
-    objective: OptimizationObjective,
-) -> str | None:
-    return _predicate(objective).confidence_reason(comparison)
 
 
 def select_recommended_candidate(
