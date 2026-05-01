@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import copy
+from hashlib import sha256
+import inspect
 import json
 import os
 from pathlib import Path
@@ -185,6 +187,17 @@ class GeneratedToolLoopAdapter:
     def agent_spec(self) -> AgentSpec:
         return self._agent_spec
 
+    def fingerprint(self) -> dict[str, Any]:
+        return {
+            "adapter_kind": "generated_tool_loop",
+            "agent_spec": self._agent_spec.to_dict(),
+            "respond_action_name": self._respond_action_name,
+            "environment_factory": _callable_fingerprint(self._environment_factory),
+            "action_factory": _callable_fingerprint(self._action_factory),
+            "case_config": _callable_fingerprint(self._case_config),
+            "grade": _callable_fingerprint(self._grade),
+        }
+
     def surface_spec(self, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
         if self._surface is None:
             _load_env_file(self.env_path)
@@ -206,7 +219,7 @@ class GeneratedToolLoopAdapter:
         tools = [dict(item) for item in getattr(env, "tools_info", [])]
         schema_by_name = _schema_by_tool_name(tools)
         metadata_by_name = _metadata_by_tool_name(self._agent_spec)
-        base_context = context_graph_from_spec(self._agent_spec)
+        base_context = self._base_context_graph()
         ctx = RuntimeContext(
             case=case,
             context=base_context,
@@ -301,6 +314,7 @@ class GeneratedToolLoopAdapter:
                 status = "error" if str(observation).startswith("Error:") else "ok"
                 ctx.tool_result = {
                     "observation": observation,
+                    "parsed": _parse_observation(observation),
                     "reward": reward,
                     "done": done,
                     "info": _info_dict(getattr(env_response, "info", None)),
@@ -379,6 +393,11 @@ class GeneratedToolLoopAdapter:
             raise RuntimeError("surface_spec(cases) must be inferred before exporting a tool-loop adapter.")
         (out_dir / "surface_spec.json").write_text(json.dumps(self._surface.to_dict(), indent=2, sort_keys=True))
 
+    def _base_context_graph(self) -> Any:
+        if self._surface is not None:
+            return copy.deepcopy(self._surface.context.graph)
+        return context_graph_from_spec(self._agent_spec)
+
 
 def _default_case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
     runtime = dict(spec.runtime)
@@ -451,7 +470,7 @@ def _system_message(env: Any, context: Any) -> dict[str, Any]:
 
 
 def _system_prompt(env: Any, context: Any) -> str:
-    wiki = str(getattr(env, "wiki", "") or "").strip()
+    wiki = "" if context.has_section("domain_policy") else str(getattr(env, "wiki", "") or "").strip()
     extra = context.render_text()
     if wiki and extra:
         return f"{wiki}\n\n{extra}"
@@ -506,6 +525,15 @@ def _info_dict(value: Any) -> dict[str, Any]:
     return {"value": str(value)}
 
 
+def _parse_observation(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
+
+
 def _with_retries(
     call: Callable[[], Any],
     *,
@@ -547,3 +575,45 @@ def _with_hard_timeout(call: Callable[[], Any], *, timeout_s: float | None) -> A
 def _is_transient_provider_error(exc: Exception) -> bool:
     text = f"{type(exc).__name__}: {exc}".lower()
     return any(marker in text for marker in ("503", "serviceunavailable", "unavailable", "rate limit", "429"))
+
+
+def _callable_fingerprint(function: Callable[..., Any]) -> dict[str, Any]:
+    module = getattr(function, "__module__", "")
+    qualname = getattr(function, "__qualname__", repr(function))
+    source_path = None
+    source_sha256 = None
+    source_tree_sha256 = None
+    try:
+        source = inspect.getsourcefile(function)
+    except TypeError:
+        source = None
+    if source:
+        path = Path(source)
+        if path.exists():
+            source_path = str(path.resolve())
+            source_sha256 = sha256(path.read_bytes()).hexdigest()
+            source_tree_sha256 = _source_tree_digest(path.parent)
+    return {
+        "module": module,
+        "qualname": qualname,
+        "source_path": source_path,
+        "source_sha256": source_sha256,
+        "source_tree_sha256": source_tree_sha256,
+    }
+
+
+def _source_tree_digest(root: Path) -> str:
+    digest = sha256()
+    for path in sorted(item for item in root.rglob("*") if _should_fingerprint_file(root, item)):
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _should_fingerprint_file(root: Path, path: Path) -> bool:
+    if not path.is_file() or path.name.startswith(".") or path.suffix not in {".json", ".jsonl", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}:
+        return False
+    relative = path.relative_to(root)
+    return not any(part.startswith(".") or part in {"__pycache__", "results"} for part in relative.parts)

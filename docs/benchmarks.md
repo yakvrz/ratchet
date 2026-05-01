@@ -5,13 +5,22 @@ Ratchet's sample suite is intentionally limited to public, trusted assessment ve
 Current samples:
 
 - `samples/bfcl_function_calling_agent/`
+- `samples/order_desk_tool_loop_agent/`
 - `samples/taubench_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
 
+## Order Desk Tool Loop
+
+Order Desk is Ratchet's cheap agentic development assessment. It is a local deterministic tool-loop environment with a domain policy, live tool schemas, read and mutating tools, hidden environment state, and final grading from the environment state.
+
+It exists because BFCL and the intent benchmarks are too single-shot to exercise Ratchet's runtime hooks, while tau-bench is expensive enough that it is a poor inner-loop development vehicle. Order Desk should be used to catch architecture regressions in surface inference, context graph execution, tool-call validation, response interception, and staged measurement before spending tau budget.
+
+Order Desk is not an external benchmark result. It is a controlled development vehicle for agentic surface optimization. A useful run should show the optimizer discovering task-agnostic mechanisms through the same DSL used elsewhere, such as context restructuring, read-before-write behavior, tool-error recovery, state exposure, and response claim guarding.
+
 ## BFCL Function Calling
 
-BFCL is the primary Ratchet development benchmark.
+BFCL is the primary function-calling development benchmark.
 
 It is useful because it exercises behavior that a policy optimizer should actually improve:
 

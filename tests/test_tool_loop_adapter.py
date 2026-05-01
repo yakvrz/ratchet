@@ -44,7 +44,7 @@ class _FakeEnvironment:
     def step(self, action: dict[str, object]) -> _Response:
         self.actions.append((str(action["name"]), dict(action["kwargs"])))
         if action["name"] == "lookup_order":
-            return _Response("Order A1 is delivered.")
+            return _Response('{"status": "success", "order": {"order_id": "A1", "status": "delivered"}}')
         return _Response("###STOP###", reward=1.0, done=True)
 
 
@@ -66,6 +66,42 @@ class _FakeClient:
                             "function": {
                                 "name": "lookup_order",
                                 "arguments": '{"order_id": " A1 "}',
+                            },
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is delivered."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
+class _CaptureToolThenResponseClient:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.system_prompts: list[str] = []
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        self.calls += 1
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.system_prompts.append(str(messages[0]["content"]))
+        if self.calls == 1:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "lookup_order",
+                                "arguments": '{"order_id": "A1"}',
                             },
                         }
                     ],
@@ -112,6 +148,51 @@ class _RepeatingToolClient:
         )
 
 
+class _TwoToolClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        self.calls += 1
+        if self.calls == 1:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "lookup_order", "arguments": '{"order_id": "A1"}'},
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        if self.calls == 2:
+            return ToolLoopModelResponse(
+                message={
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "other_tool", "arguments": '{"order_id": "Z999"}'},
+                        }
+                    ],
+                },
+                input_tokens=10,
+                output_tokens=5,
+            )
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is delivered."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
 class _ToolDescriptionClient:
     def __init__(self) -> None:
         self.tool_descriptions: list[str] = []
@@ -121,6 +202,21 @@ class _ToolDescriptionClient:
         assert isinstance(tools, list)
         function = tools[0]["function"]
         self.tool_descriptions.append(str(function["description"]))
+        return ToolLoopModelResponse(
+            message={"role": "assistant", "content": "The order is delivered."},
+            input_tokens=12,
+            output_tokens=6,
+        )
+
+
+class _CaptureSystemClient:
+    def __init__(self) -> None:
+        self.system_prompts: list[str] = []
+
+    def complete(self, **kwargs: object) -> ToolLoopModelResponse:
+        messages = kwargs["messages"]
+        assert isinstance(messages, list)
+        self.system_prompts.append(str(messages[0]["content"]))
         return ToolLoopModelResponse(
             message={"role": "assistant", "content": "The order is delivered."},
             input_tokens=12,
@@ -179,6 +275,50 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("normalize_tool_args", trace_ops)
         self.assertIn("append_state", trace_ops)
 
+    def test_tool_loop_state_can_use_parsed_tool_result_and_context_templates(self) -> None:
+        env = _FakeEnvironment()
+        client = _CaptureToolThenResponseClient()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(
+                name="fake-tool-loop",
+                model="gpt-4o",
+                model_options=["gpt-4o"],
+                tools={"lookup_order": AgentTool(name="lookup_order", metadata={"side_effect": "read"})},
+            ),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=client,
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "parsed_state",
+                    "patches": [
+                        {"op": "define_state", "field": "last_status", "type": "string", "initial": "unknown"},
+                        {
+                            "hook": "after_tool_result",
+                            "op": "set_state",
+                            "field": "last_status",
+                            "value": {"$ref": "tool_result.parsed.status"},
+                        },
+                        {
+                            "hook": "before_model_call",
+                            "op": "add_context_section",
+                            "section": "status_state",
+                            "content": "Last observed status: {{state.last_status}}",
+                        },
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        adapter.run_case(self._case(), candidate)
+
+        self.assertEqual(len(client.system_prompts), 2)
+        self.assertIn("Last observed status: unknown", client.system_prompts[0])
+        self.assertIn("Last observed status: success", client.system_prompts[1])
+
     def test_tool_loop_validation_can_replan_duplicate_tool_calls(self) -> None:
         env = _FakeEnvironment()
         adapter = GeneratedToolLoopAdapter(
@@ -216,6 +356,69 @@ class ToolLoopAdapterTests(unittest.TestCase):
         trace = record.diagnostics.metadata["transform_trace"]
         self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
         self.assertTrue(any(item["op"] == "replan" for item in trace))
+
+    def test_before_tool_call_patch_can_target_specific_tool(self) -> None:
+        env = _FakeEnvironment(
+            tools_info=[
+                *_FakeEnvironment.tools_info,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "other_tool",
+                        "description": "Another tool.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"order_id": {"type": "string"}},
+                            "required": ["order_id"],
+                        },
+                    },
+                },
+            ]
+        )
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(
+                name="fake-tool-loop",
+                model="gpt-4o",
+                model_options=["gpt-4o"],
+                tools={
+                    "lookup_order": AgentTool(name="lookup_order", metadata={"side_effect": "read"}),
+                    "other_tool": AgentTool(name="other_tool", metadata={"side_effect": "read"}),
+                },
+            ),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_TwoToolClient(),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "tool_specific_guard",
+                    "patches": [
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "tool": "other_tool",
+                            "target": "tool_call",
+                            "checks": [{"type": "referenced_args_observed"}],
+                            "on_fail": {
+                                "hook": "before_tool_call",
+                                "op": "replan",
+                                "content": "Use observed identifiers only.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "skipped_tool" for item in trace))
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "failed" for item in trace))
+        self.assertTrue(any(item["op"] == "replan" for item in trace))
+        self.assertTrue(any(turn.message == "Use observed identifiers only." for turn in record.diagnostics.turns))
 
     def test_tool_loop_validation_accepts_structured_schema_check(self) -> None:
         env = _FakeEnvironment()
@@ -364,6 +567,53 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("not_duplicate_tool_call", check_names)
         self.assertEqual(surface.tools.tools[0].name, "lookup_order")
         self.assertEqual(surface.tools.tools[0].metadata["side_effect"], "read")
+
+    def test_tool_loop_fingerprint_includes_environment_source(self) -> None:
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: _FakeEnvironment(),
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+
+        fingerprint = adapter.fingerprint()
+
+        self.assertEqual(fingerprint["adapter_kind"], "generated_tool_loop")
+        self.assertIn("source_tree_sha256", fingerprint["environment_factory"])
+        self.assertTrue(fingerprint["environment_factory"]["source_tree_sha256"])
+
+    def test_tool_loop_runtime_uses_inferred_surface_context_graph(self) -> None:
+        client = _CaptureSystemClient()
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=lambda case, config: _FakeEnvironment(),
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=client,
+        )
+        surface = adapter.surface_spec((self._case(),))
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "replace_domain_policy",
+                    "patches": [
+                        {
+                            "hook": "before_model_call",
+                            "op": "replace_context_section",
+                            "section": "domain_policy",
+                            "content": "Replacement policy text.",
+                        }
+                    ],
+                }
+            ),
+            surface,
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        self.assertIsNone(record.metrics.error)
+        self.assertTrue(client.system_prompts)
+        self.assertIn("[domain_policy]\nReplacement policy text.", client.system_prompts[0])
+        self.assertNotIn("Use tools to inspect state before responding.", client.system_prompts[0])
 
     def test_tool_metadata_inference_uses_tool_action_not_return_text(self) -> None:
         adapter = GeneratedToolLoopAdapter(

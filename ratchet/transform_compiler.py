@@ -248,6 +248,11 @@ class TransformCompiler:
 
     def _validate_tool_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
         op = patch.op.op
+        if patch.hook == "before_tool_call" and "tool" in patch.op.params:
+            tool_name = self._required_string(index, patch, "tool")
+            known_tools = {tool.name for tool in surface.tools.tools}
+            if known_tools and tool_name not in known_tools:
+                self._reject(index, "unknown_tool", f"Tool {tool_name!r} is not part of this surface.")
         if op == "rewrite_tool_description" and not surface.tools.tool_description_rewrite_allowed:
             self._reject(index, "tool_description_rewrite_unsupported", "Surface does not allow tool description rewrites.")
         if op == "rewrite_tool_description":

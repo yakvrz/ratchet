@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import copy
 import json
+import re
 from typing import Any
 
 from ratchet.capabilities import run_validation_check
@@ -61,6 +62,12 @@ class TransformRuntime:
     def _apply_patch(self, hook: str, patch: TransformPatch, ctx: RuntimeContext) -> None:
         op = patch.op.op
         params = patch.op.params
+        if hook == "before_tool_call" and "tool" in params:
+            selected_tool = str(params["tool"])
+            actual_tool = str((ctx.tool_call or {}).get("name") or "")
+            if selected_tool != actual_tool:
+                ctx.annotate(hook=hook, op=op, result="skipped_tool", fields={"tool": selected_tool, "actual": actual_tool})
+                return
         if op == "define_state":
             field = str(params["field"])
             ctx.state[field] = copy.deepcopy(resolve_value(params.get("initial"), ctx))
@@ -196,7 +203,7 @@ class TransformRuntime:
             ctx.annotate(hook=hook, op=op)
             return
         if op in {"block", "replan", "ask_user", "terminate", "retry"}:
-            ctx.state["_control"] = {"op": op, "message": params.get("message")}
+            ctx.state["_control"] = {"op": op, "message": params.get("message", params.get("content"))}
             ctx.annotate(hook=hook, op=op)
             return
         raise NotImplementedError(f"Runtime op {op!r} is not implemented.")
@@ -210,7 +217,26 @@ def resolve_value(value: Any, ctx: RuntimeContext) -> Any:
         return {key: resolve_value(item, ctx) for key, item in value.items()}
     if isinstance(value, list):
         return [resolve_value(item, ctx) for item in value]
+    if isinstance(value, str):
+        return _resolve_template(value, ctx)
     return value
+
+
+TEMPLATE_REF_PATTERN = re.compile(r"\{\{\s*([A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)*)\s*\}\}")
+
+
+def _resolve_template(value: str, ctx: RuntimeContext) -> str:
+    def replace(match: re.Match[str]) -> str:
+        resolved = _resolve_ref(match.group(1), ctx)
+        if resolved is None:
+            return ""
+        if isinstance(resolved, str):
+            return resolved
+        if isinstance(resolved, (dict, list)):
+            return json.dumps(resolved, sort_keys=True, default=str)
+        return str(resolved)
+
+    return TEMPLATE_REF_PATTERN.sub(replace, value)
 
 
 def _resolve_ref(ref: str, ctx: RuntimeContext) -> Any:
