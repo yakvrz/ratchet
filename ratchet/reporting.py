@@ -338,6 +338,7 @@ class RatchetReporter:
             f"- Holdout validations: {result.outcome_analysis['holdout_validations']}",
             f"- Latest search-plan diagnosis: {result.outcome_analysis['latest_search_plan_diagnosis'] or 'n/a'}",
             f"- Latest proposal: {result.outcome_analysis['latest_proposal_analysis'] or 'n/a'}",
+            f"- Latest proposal coverage: {_proposal_coverage_text(result.outcome_analysis.get('latest_proposal_stats', {}))}",
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
             f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
             "",
@@ -1309,6 +1310,28 @@ def _top_failure_label_delta(delta: Any) -> str:
 def _short_reason(reason: Any) -> str:
     text = str(reason or "screened")
     return text.split(":", 1)[0] if ":" in text else text
+
+
+def _proposal_coverage_text(stats: Any) -> str:
+    if not isinstance(stats, dict):
+        return "n/a"
+    audit = stats.get("plan_audit")
+    if not isinstance(audit, dict):
+        return "n/a"
+    valid = audit.get("valid_covered_brief_ids") or []
+    invalid = audit.get("unrepaired_invalid_brief_ids") or []
+    missed = (
+        audit["unattempted_brief_ids"]
+        if "unattempted_brief_ids" in audit
+        else audit.get("missing_brief_ids") or []
+    )
+    lost = audit.get("mechanisms_lost_to_transform_errors") or []
+    return (
+        f"valid={len(valid)} "
+        f"contract_failed={len(invalid)} "
+        f"unattempted={len(missed)} "
+        f"lost_mechanisms={json.dumps(lost[:5])}"
+    )
 
 
 def _selected_finalist_status(

@@ -1,13 +1,306 @@
 from __future__ import annotations
 
+import json
 import unittest
 
 from ratchet.experiments import SearchBrief, SearchPlan
-from ratchet.proposals import _surface_affordance_proposals
+from ratchet.model_client import CompatResponse, CompatUsage
+from ratchet.proposals import CandidateImplementer, _surface_affordance_proposals
+from ratchet.results import CandidateSummary, CaseEvaluation
 from ratchet.surface_opportunities import generate_surface_opportunities
-from ratchet.surfaces import tool_loop_surface_from_agent_spec
+from ratchet.surfaces import surface_from_agent_spec, tool_loop_surface_from_agent_spec
 from ratchet.transform_compiler import TransformCompiler
-from ratchet.types import AgentSpec
+from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+
+
+class _FakeProposalClient:
+    def __init__(self, payloads: list[dict[str, object]]) -> None:
+        self.payloads = list(payloads)
+        self.calls: list[dict[str, object]] = []
+
+    def create_response(self, **kwargs: object) -> CompatResponse:
+        self.calls.append(kwargs)
+        payload = self.payloads.pop(0)
+        return CompatResponse(
+            id=f"fake-{len(self.calls)}",
+            output=[],
+            output_text=json.dumps(payload),
+            usage=CompatUsage(input_tokens=10, output_tokens=10),
+            finish_reason="stop",
+        )
+
+
+def _summary(candidate=None) -> CandidateSummary:
+    return CandidateSummary(
+        candidate_id="baseline",
+        candidate=candidate,
+        split="dev",
+        evaluations=[
+            CaseEvaluation(
+                case=EvalCase(id="case-1", split="dev", input="x"),
+                record=RunRecord(
+                    output="ok",
+                    metrics=OperationalMetrics(
+                        latency_s=1.0,
+                        input_tokens=10,
+                        output_tokens=10,
+                        total_tokens=20,
+                        cost_usd=0.001,
+                    ),
+                    diagnostics=DiagnosticTrace(),
+                ),
+                grade=GradeResult(score=0.0, passed=False, labels=["needs_contract"]),
+            )
+        ],
+    )
+
+
+class CandidateImplementerContractTests(unittest.TestCase):
+    def test_repairs_invalid_uncovered_brief_even_when_other_candidate_is_valid(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(
+                name="sample",
+                model="base",
+                model_options=["base", "larger"],
+                instructions={"system_prompt": "Answer."},
+            )
+        )
+        opportunities = generate_surface_opportunities(surface)
+        context_opp = next(item for item in opportunities if item.mechanism == "surface_context")
+        model_opp = next(item for item in opportunities if item.mechanism == "surface_model")
+        search_plan = SearchPlan(
+            plan_id="plan",
+            diagnosis="Need context and model candidates.",
+            hypotheses=["Cover both mechanisms."],
+            target_mechanisms=["surface_context", "surface_model"],
+            briefs=[
+                SearchBrief(
+                    brief_id="context_brief",
+                    mechanism_class="surface_context",
+                    hypothesis="Improve context.",
+                    surface_opportunity_ids=[context_opp.surface_opportunity_id],
+                ),
+                SearchBrief(
+                    brief_id="model_brief",
+                    mechanism_class="surface_model",
+                    hypothesis="Try a stronger allowed model.",
+                    surface_opportunity_ids=[model_opp.surface_opportunity_id],
+                ),
+            ],
+        )
+        first_payload = {
+            "experiments": [
+                {
+                    "experiment_id": "context_brief",
+                    "mechanism_class": "surface_context",
+                    "hypothesis": "Improve context.",
+                    "candidates": [
+                        {
+                            "candidate_role": "atomic",
+                            "hypothesis": "Wrong hook but right mechanism.",
+                            "applications": [{"surface_opportunity_id": context_opp.surface_opportunity_id}],
+                            "program": {
+                                "candidate_id": "bad_context",
+                                "patches": [
+                                    {
+                                        "hook": "on_task_start",
+                                        "op": "replace_context_section",
+                                        "section": "system_prompt",
+                                        "content": "Clarify constraints.",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+                {
+                    "experiment_id": "model_brief",
+                    "mechanism_class": "surface_model",
+                    "hypothesis": "Try a stronger allowed model.",
+                    "candidates": [
+                        {
+                            "candidate_role": "atomic",
+                            "hypothesis": "Use allowed model.",
+                            "applications": [{"surface_opportunity_id": model_opp.surface_opportunity_id}],
+                            "program": {
+                                "candidate_id": "model_candidate",
+                                "patches": [
+                                    {
+                                        "hook": "before_model_call",
+                                        "op": "set_model_config",
+                                        "field": "model_name",
+                                        "value": "larger",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                },
+            ]
+        }
+        repair_payload = {
+            "experiments": [
+                {
+                    "experiment_id": "context_brief",
+                    "mechanism_class": "surface_context",
+                    "hypothesis": "Improve context.",
+                    "candidates": [
+                        {
+                            "candidate_role": "atomic",
+                            "hypothesis": "Legal context edit.",
+                            "applications": [{"surface_opportunity_id": context_opp.surface_opportunity_id}],
+                            "program": {
+                                "candidate_id": "fixed_context",
+                                "patches": [
+                                    {
+                                        "hook": "before_model_call",
+                                        "op": "replace_context_section",
+                                        "section": "system_prompt",
+                                        "content": "Clarify constraints.",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        implementer = CandidateImplementer(env_path="", model="fake-model", reasoning_effort="low")
+        implementer._client = _FakeProposalClient([first_payload, repair_payload])
+
+        proposals, _analysis = implementer.propose(
+            _summary(),
+            surface,
+            objective=OptimizationObjective(),
+            seen_hashes=set(),
+            current_spec=None,
+            history=[],
+            search_plan=search_plan,
+            proposal_budget=2,
+            surface_opportunities=opportunities,
+        )
+
+        self.assertEqual({proposal.experiment_id for proposal in proposals}, {"context_brief", "model_brief"})
+        self.assertEqual(len(implementer._client.calls), 2)
+        audit = implementer.last_stats.plan_audit or {}
+        self.assertEqual(audit["valid_covered_brief_ids"], ["context_brief", "model_brief"])
+        self.assertEqual(audit["unrepaired_invalid_brief_ids"], [])
+        self.assertIn("context_brief", audit["invalid_covered_brief_ids"])
+        self.assertTrue(
+            any(
+                "unsupported_operation" in row.get("invalid_reason", "")
+                for row in implementer.last_invalid_candidate_rows
+            )
+        )
+
+    def test_repair_cannot_escape_to_different_brief(self) -> None:
+        surface = surface_from_agent_spec(
+            AgentSpec(
+                name="sample",
+                model="base",
+                model_options=["base", "larger"],
+                instructions={"system_prompt": "Answer."},
+            )
+        )
+        opportunities = generate_surface_opportunities(surface)
+        context_opp = next(item for item in opportunities if item.mechanism == "surface_context")
+        model_opp = next(item for item in opportunities if item.mechanism == "surface_model")
+        search_plan = SearchPlan(
+            plan_id="plan",
+            diagnosis="Need context candidate.",
+            hypotheses=["Cover context mechanism."],
+            target_mechanisms=["surface_context", "surface_model"],
+            briefs=[
+                SearchBrief(
+                    brief_id="context_brief",
+                    mechanism_class="surface_context",
+                    hypothesis="Improve context.",
+                    surface_opportunity_ids=[context_opp.surface_opportunity_id],
+                ),
+                SearchBrief(
+                    brief_id="model_brief",
+                    mechanism_class="surface_model",
+                    hypothesis="Try a stronger allowed model.",
+                    surface_opportunity_ids=[model_opp.surface_opportunity_id],
+                ),
+            ],
+        )
+        first_payload = {
+            "experiments": [
+                {
+                    "experiment_id": "context_brief",
+                    "mechanism_class": "surface_context",
+                    "hypothesis": "Improve context.",
+                    "candidates": [
+                        {
+                            "candidate_role": "atomic",
+                            "hypothesis": "Wrong hook.",
+                            "applications": [{"surface_opportunity_id": context_opp.surface_opportunity_id}],
+                            "program": {
+                                "candidate_id": "bad_context",
+                                "patches": [
+                                    {
+                                        "hook": "on_task_start",
+                                        "op": "replace_context_section",
+                                        "section": "system_prompt",
+                                        "content": "Clarify constraints.",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        escaping_repair_payload = {
+            "experiments": [
+                {
+                    "experiment_id": "model_brief",
+                    "mechanism_class": "surface_model",
+                    "hypothesis": "Escape repair.",
+                    "candidates": [
+                        {
+                            "candidate_role": "atomic",
+                            "hypothesis": "Wrong brief.",
+                            "applications": [{"surface_opportunity_id": model_opp.surface_opportunity_id}],
+                            "program": {
+                                "candidate_id": "escaped_model",
+                                "patches": [
+                                    {
+                                        "hook": "before_model_call",
+                                        "op": "set_model_config",
+                                        "field": "model_name",
+                                        "value": "larger",
+                                    }
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ]
+        }
+        implementer = CandidateImplementer(env_path="", model="fake-model", reasoning_effort="low")
+        implementer._client = _FakeProposalClient([first_payload, escaping_repair_payload])
+
+        proposals, _analysis = implementer.propose(
+            _summary(),
+            surface,
+            objective=OptimizationObjective(),
+            seen_hashes=set(),
+            current_spec=None,
+            history=[],
+            search_plan=search_plan,
+            proposal_budget=1,
+            surface_opportunities=opportunities,
+        )
+
+        self.assertEqual(proposals, [])
+        self.assertTrue(
+            any(
+                row.get("invalid_reason") == "repair changed experiment_id outside requested invalid brief"
+                for row in implementer.last_invalid_candidate_rows
+            )
+        )
 
 
 class SurfaceAffordanceProposalTests(unittest.TestCase):

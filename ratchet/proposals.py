@@ -27,6 +27,7 @@ from ratchet.model_client import (
 from ratchet.results import CandidateSummary
 from ratchet.surfaces import SurfaceSpec
 from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_contract import TransformContract, build_transform_contract, transform_patch_schema_for_contract
 from ratchet.transform_program import CompiledCandidate, TransformPatch, TransformProgram
 from ratchet.candidates import CandidateProposal, CandidateSurfaceApplication, Intervention
 from ratchet.transform_validation import (
@@ -153,6 +154,7 @@ class CandidateImplementer:
             active_mechanisms=search_plan.active_mechanisms,
             evidence=_surface_opportunity_evidence(evidence_packet),
         ))
+        transform_contract = build_transform_contract(surface, active_surface_opportunities)
         structural_proposals = _surface_affordance_proposals(
             surface=surface,
             surface_opportunities=active_surface_opportunities,
@@ -177,6 +179,7 @@ class CandidateImplementer:
                 proposal_example_bank=proposal_example_bank,
                 proposal_budget=remaining_proposal_budget,
                 surface_opportunities=active_surface_opportunities,
+                transform_contract=transform_contract,
             )
             raw_count = len(structural_proposals) + self._last_raw_candidate_count
         else:
@@ -201,8 +204,14 @@ class CandidateImplementer:
         )
         invalid_candidate_rows.extend(validation_invalid_rows)
         invalid_reasons.update(validation_invalid_reasons)
-        if not budget_valid and invalid_candidate_rows and proposal_budget > 0:
-            repair_feedback = _repair_feedback_rows(invalid_candidate_rows)
+        base_plan_audit = dict(self._last_plan_audit or {})
+        repair_targets = _repair_targets_for_uncovered_briefs(
+            invalid_candidate_rows,
+            valid_candidates=budget_valid,
+            search_plan=search_plan,
+        )
+        if repair_targets and proposal_budget > 0:
+            repair_feedback = _repair_feedback_rows(repair_targets)
             repaired_proposals, repaired_considerations = self._llm_proposals(
                 summary,
                 surface,
@@ -213,12 +222,19 @@ class CandidateImplementer:
                 proposal_example_bank=proposal_example_bank,
                 proposal_budget=proposal_budget,
                 surface_opportunities=active_surface_opportunities,
+                transform_contract=transform_contract,
                 repair_feedback=repair_feedback,
             )
             raw_count += self._last_raw_candidate_count
             surface_opportunity_considerations.extend(repaired_considerations)
             invalid_reasons.update(self._last_parse_invalid_reasons)
             invalid_candidate_rows.extend(self._last_parse_invalid_candidate_rows)
+            repaired_proposals, escaped_repair_rows, escaped_repair_reasons = _filter_repaired_proposals(
+                repaired_proposals,
+                repair_targets=repair_targets,
+            )
+            invalid_candidate_rows.extend(escaped_repair_rows)
+            invalid_reasons.update(escaped_repair_reasons)
             repaired_valid, repaired_rows, repaired_invalid_rows, repaired_invalid_reasons = self._validate_candidate_proposals(
                 repaired_proposals,
                 surface=surface,
@@ -232,6 +248,12 @@ class CandidateImplementer:
             candidate_rows.extend(repaired_rows)
             invalid_candidate_rows.extend(repaired_invalid_rows)
             invalid_reasons.update(repaired_invalid_reasons)
+        plan_audit = _coverage_audit(
+            search_plan=search_plan,
+            valid_rows=candidate_rows,
+            invalid_rows=invalid_candidate_rows,
+            base_audit=base_plan_audit,
+        )
         self.last_candidate_rows = candidate_rows
         self.last_invalid_candidate_rows = invalid_candidate_rows
         self.last_stats = ProposalStats(
@@ -243,7 +265,7 @@ class CandidateImplementer:
             error=None,
             invalid_reasons=dict(sorted(invalid_reasons.items())),
             surface_opportunity_considerations=surface_opportunity_considerations,
-            plan_audit=self._last_plan_audit,
+            plan_audit=plan_audit,
             raw_output_text=self._last_raw_output_text,
             call_diagnostics=self.last_call_diagnostics,
         )
@@ -361,6 +383,7 @@ class CandidateImplementer:
         proposal_example_bank: ProposalExampleBank | None,
         proposal_budget: int,
         surface_opportunities: list[SurfaceOpportunity],
+        transform_contract: TransformContract,
         repair_feedback: list[dict[str, Any]] | None = None,
     ) -> tuple[list[CandidateProposal], list[dict[str, Any]]]:
         if self._client is None:
@@ -371,7 +394,12 @@ class CandidateImplementer:
         prompt = {
             "objective": objective.to_dict(),
             "proposal_budget": proposal_budget,
-            "transform_library": {"language": "typed hook DSL", "ops_are_validated_by": "transform_compiler"},
+            "transform_library": {
+                "language": "typed hook DSL",
+                "ops_are_validated_by": "transform_compiler",
+                "contract_is_derived_from": "SurfaceSpec hooks, operation rules, refs, and validation checks",
+            },
+            "transform_contract": transform_contract.to_dict(),
             "surface_spec": _compact_surface_spec(surface),
             "search_plan": _compact_search_plan(search_plan),
             "evidence_packet": _compact_evidence_packet(evidence_packet),
@@ -507,10 +535,10 @@ class CandidateImplementer:
                                                         "hypothesis": {"type": "string", "maxLength": 360},
                                                         "expected_effects": {"type": "object"},
                                                         "evaluation_plan": {"type": "string", "maxLength": 240},
-                                                        "program": _program_schema(),
+                                                        "program": _program_schema(transform_contract),
                                                         "patches": {
                                                             "type": "array",
-                                                            "items": _transform_patch_schema(),
+                                                            "items": _transform_patch_schema(transform_contract),
                                                             "minItems": 1,
                                                             "maxItems": 12,
                                                         },
@@ -529,7 +557,7 @@ class CandidateImplementer:
                                     },
                                 },
                             },
-                            "required": ["experiments"],
+                        "required": ["experiments"],
                         },
                     }
                 },
@@ -642,14 +670,14 @@ class CandidateImplementer:
                 reason = f"malformed experiment: {exc}"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
-                    _invalid_raw_candidate_row(raw_experiment, reason)
+                    _invalid_raw_candidate_row(raw_experiment, reason, raw_experiment=raw_experiment)
                 )
                 continue
             if brief_ids and experiment.experiment_id not in brief_ids:
                 reason = f"experiment_id {experiment.experiment_id!r} does not match any search plan brief_id"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
-                    _invalid_raw_candidate_row(raw_experiment, reason)
+                    _invalid_raw_candidate_row(raw_experiment, reason, raw_experiment=raw_experiment)
                 )
                 continue
             brief = brief_by_id.get(experiment.experiment_id)
@@ -658,7 +686,7 @@ class CandidateImplementer:
                 reason = "experiment candidates field is not an array"
                 self._last_parse_invalid_reasons[reason] += 1
                 self._last_parse_invalid_candidate_rows.append(
-                    _invalid_raw_candidate_row(raw_experiment, reason)
+                    _invalid_raw_candidate_row(raw_experiment, reason, raw_experiment=raw_experiment)
                 )
                 continue
             for raw_candidate in raw_candidates:
@@ -666,7 +694,7 @@ class CandidateImplementer:
                     reason = "candidate entry is not an object"
                     self._last_parse_invalid_reasons[reason] += 1
                     self._last_parse_invalid_candidate_rows.append(
-                        _invalid_raw_candidate_row(raw_candidate, reason)
+                        _invalid_raw_candidate_row(raw_candidate, reason, experiment=experiment)
                     )
                     continue
                 candidate_payload = {
@@ -682,7 +710,7 @@ class CandidateImplementer:
                     reason = f"malformed candidate: {exc}"
                     self._last_parse_invalid_reasons[reason] += 1
                     self._last_parse_invalid_candidate_rows.append(
-                        _invalid_raw_candidate_row(raw_candidate, reason)
+                        _invalid_raw_candidate_row(raw_candidate, reason, experiment=experiment, candidate_payload=candidate_payload)
                     )
                     continue
                 if brief is not None and brief.surface_opportunity_ids:
@@ -694,7 +722,7 @@ class CandidateImplementer:
                         )
                         self._last_parse_invalid_reasons[reason] += 1
                         self._last_parse_invalid_candidate_rows.append(
-                            _invalid_raw_candidate_row(raw_candidate, reason)
+                            _invalid_raw_candidate_row(raw_candidate, reason, experiment=experiment, candidate_payload=candidate_payload)
                         )
                         continue
                 candidates.append(candidate)
@@ -744,7 +772,7 @@ def _application_schema() -> dict[str, Any]:
     }
 
 
-def _program_schema() -> dict[str, Any]:
+def _program_schema(transform_contract: TransformContract | None = None) -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
@@ -753,7 +781,7 @@ def _program_schema() -> dict[str, Any]:
             "metadata": {"type": "object", "additionalProperties": True, "maxProperties": 12},
             "patches": {
                 "type": "array",
-                "items": _transform_patch_schema(),
+                "items": _transform_patch_schema(transform_contract),
                 "minItems": 1,
                 "maxItems": 12,
             },
@@ -762,7 +790,9 @@ def _program_schema() -> dict[str, Any]:
     }
 
 
-def _transform_patch_schema() -> dict[str, Any]:
+def _transform_patch_schema(transform_contract: TransformContract | None = None) -> dict[str, Any]:
+    if transform_contract is not None:
+        return transform_patch_schema_for_contract(transform_contract)
     return {
         "type": "object",
         "properties": {
@@ -1554,6 +1584,9 @@ def _invalid_candidate_row(
         "applications": [application.to_dict() for application in candidate.applications],
         "surface_mechanism": candidate.surface_mechanism,
         "mechanism_class": candidate.mechanism_class,
+        "experiment_id": candidate.experiment_id,
+        "candidate_role": candidate.candidate_role,
+        "comparison_group": candidate.comparison_group,
         "surface_opportunity_ids": list(candidate.surface_opportunity_ids),
         "transform_instance": candidate.transform_instance,
         "transform_parameters": candidate.transform_parameters,
@@ -1566,22 +1599,175 @@ def _invalid_candidate_row(
     }
 
 
-def _invalid_raw_candidate_row(raw_candidate: Any, reason: str) -> dict[str, Any]:
+def _invalid_raw_candidate_row(
+    raw_candidate: Any,
+    reason: str,
+    *,
+    experiment: ExperimentSpec | None = None,
+    raw_experiment: dict[str, Any] | None = None,
+    candidate_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    candidate_payload = dict(candidate_payload or {}) if isinstance(candidate_payload, dict) else {}
+    raw_experiment = dict(raw_experiment or {}) if isinstance(raw_experiment, dict) else {}
+    experiment_id = (
+        candidate_payload.get("experiment_id")
+        or (experiment.experiment_id if experiment is not None else None)
+        or raw_experiment.get("experiment_id")
+    )
+    mechanism_class = (
+        experiment.mechanism
+        if experiment is not None
+        else raw_experiment.get("mechanism_class") or raw_experiment.get("mechanism")
+    )
+    raw_applications = candidate_payload.get("applications")
+    surface_opportunity_ids = [
+        str(application.get("surface_opportunity_id"))
+        for application in (raw_applications if isinstance(raw_applications, list) else [])
+        if isinstance(application, dict) and application.get("surface_opportunity_id")
+    ]
     return {
         "proposal_program_hash": None,
-        "proposal": {},
-        "candidate": {},
+        "proposal": dict(candidate_payload.get("program") or {}),
+        "candidate": dict(candidate_payload) if candidate_payload else {},
         "raw_candidate": _value_summary(raw_candidate),
         "surface_mechanism": None,
+        "mechanism_class": str(mechanism_class or ""),
+        "experiment_id": str(experiment_id or ""),
+        "candidate_role": str(candidate_payload.get("candidate_role") or ""),
+        "comparison_group": str(candidate_payload.get("comparison_group") or ""),
+        "surface_opportunity_ids": surface_opportunity_ids,
         "transform_instance": None,
         "transform_parameters": {},
-        "target_slice": None,
-        "hypothesis": "",
-        "evaluation_plan": "",
+        "target_slice": candidate_payload.get("target_slice"),
+        "hypothesis": str(candidate_payload.get("hypothesis") or raw_experiment.get("hypothesis") or ""),
+        "evaluation_plan": str(candidate_payload.get("evaluation_plan") or ""),
+        "applications": list(raw_applications or []) if isinstance(raw_applications, list) else [],
         "materialization": {},
         "valid": False,
         "invalid_reason": reason,
     }
+
+
+def _repair_targets_for_uncovered_briefs(
+    invalid_rows: list[dict[str, Any]],
+    *,
+    valid_candidates: list[CandidateProposal],
+    search_plan: SearchPlan,
+) -> list[dict[str, Any]]:
+    if not invalid_rows:
+        return []
+    valid_brief_ids = {
+        candidate.experiment_id
+        for candidate in valid_candidates
+        if candidate.experiment_id
+    }
+    requested_brief_ids = {brief.brief_id for brief in search_plan.briefs}
+    if not valid_brief_ids:
+        return invalid_rows
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in invalid_rows:
+        brief_id = str(row.get("experiment_id") or "")
+        if brief_id not in requested_brief_ids or brief_id in valid_brief_ids:
+            continue
+        key = (brief_id, str(row.get("invalid_reason") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append(row)
+    return targets
+
+
+def _filter_repaired_proposals(
+    proposals: list[CandidateProposal],
+    *,
+    repair_targets: list[dict[str, Any]],
+) -> tuple[list[CandidateProposal], list[dict[str, Any]], Counter[str]]:
+    allowed_opportunities_by_brief: dict[str, set[str]] = {}
+    for row in repair_targets:
+        brief_id = str(row.get("experiment_id") or "")
+        if not brief_id:
+            continue
+        allowed = allowed_opportunities_by_brief.setdefault(brief_id, set())
+        allowed.update(str(item) for item in row.get("surface_opportunity_ids") or [] if item)
+        applications = row.get("applications") if isinstance(row.get("applications"), list) else []
+        for application in applications:
+            if isinstance(application, dict) and application.get("surface_opportunity_id"):
+                allowed.add(str(application["surface_opportunity_id"]))
+    valid: list[CandidateProposal] = []
+    invalid_rows: list[dict[str, Any]] = []
+    invalid_reasons: Counter[str] = Counter()
+    for proposal in proposals:
+        allowed = allowed_opportunities_by_brief.get(proposal.experiment_id)
+        if allowed is None:
+            reason = "repair changed experiment_id outside requested invalid brief"
+        elif allowed and not set(proposal.surface_opportunity_ids).issubset(allowed):
+            reason = "repair changed surface opportunity outside requested invalid candidate"
+        else:
+            valid.append(proposal)
+            continue
+        invalid_reasons[reason] += 1
+        invalid_rows.append(_invalid_candidate_row(proposal, reason))
+    return valid, invalid_rows, invalid_reasons
+
+
+def _coverage_audit(
+    *,
+    search_plan: SearchPlan,
+    valid_rows: list[dict[str, Any]],
+    invalid_rows: list[dict[str, Any]],
+    base_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    audit = dict(base_audit or {})
+    requested_brief_ids = {brief.brief_id for brief in search_plan.briefs}
+    valid_brief_ids = {
+        str(row.get("experiment_id"))
+        for row in valid_rows
+        if row.get("experiment_id")
+    }
+    invalid_brief_ids = {
+        str(row.get("experiment_id"))
+        for row in invalid_rows
+        if row.get("experiment_id")
+    }
+    invalid_only = (requested_brief_ids & invalid_brief_ids) - valid_brief_ids
+    missed = requested_brief_ids - valid_brief_ids - invalid_brief_ids
+    lost_mechanisms = sorted(
+        {
+            brief.mechanism_class
+            for brief in search_plan.briefs
+            if brief.brief_id in invalid_only
+        }
+    )
+    invalid_reasons_by_brief: dict[str, list[str]] = {}
+    for row in invalid_rows:
+        brief_id = str(row.get("experiment_id") or "")
+        if not brief_id:
+            continue
+        invalid_reasons_by_brief.setdefault(brief_id, [])
+        reason = str(row.get("invalid_reason") or "unknown")
+        if reason not in invalid_reasons_by_brief[brief_id]:
+            invalid_reasons_by_brief[brief_id].append(reason)
+    warnings = list(audit.get("warnings") or [])
+    if invalid_only:
+        warnings.append("candidate implementer attempted mechanisms that failed transform contract validation")
+    if missed:
+        warnings.append("candidate implementer did not attempt some requested search briefs")
+    audit.update(
+        {
+            "valid_covered_brief_ids": sorted(requested_brief_ids & valid_brief_ids),
+            "invalid_covered_brief_ids": sorted(requested_brief_ids & invalid_brief_ids),
+            "unrepaired_invalid_brief_ids": sorted(invalid_only),
+            "unattempted_brief_ids": sorted(missed),
+            "mechanisms_lost_to_transform_errors": lost_mechanisms,
+            "invalid_reasons_by_brief": {
+                key: sorted(value)
+                for key, value in sorted(invalid_reasons_by_brief.items())
+            },
+            "warnings": sorted(set(warnings)),
+        }
+    )
+    return audit
 
 
 def _repair_feedback_rows(rows: list[dict[str, Any]], *, limit: int = 4, max_chars: int = 5000) -> list[dict[str, Any]]:
