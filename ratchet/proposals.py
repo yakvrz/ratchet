@@ -57,8 +57,8 @@ PROPOSER_INSTRUCTIONS = (
     "observations at after_tool_result, rewrite model-facing tool descriptions at before_model_call, and guard final responses at before_user_response. "
     "State updates must be executable: use {\"$ref\":\"tool_result.parsed...\"}, {\"$ref\":\"tool_call.args...\"}, or literal values, never prose like 'update from tool result'. "
     "Context strings may interpolate refs with {{state.field}} after the state field is defined. For inspect-before-mutate mechanisms, compose the scaffold: define a state list, append trusted identifiers after successful read/inspection tool results, expose that list in context when useful, and validate mutating tool args with {\"type\":\"tool_arg_in_state\",\"state_field\":\"...\",\"arg\":\"order_id\"} plus replan on failure. Every validate patch "
-    "must use the structured executable checks[] advertised by the cited surface, e.g. {\"type\":\"args_schema_valid\"} or {\"type\":\"not_duplicate_tool_call\"}, plus an executable on_fail "
-    "operation such as replan; prose-only validation content is invalid. Never rewrite tool_result, "
+    "must use the structured executable checks[] advertised by the cited surface, e.g. {\"type\":\"args_schema_valid\"}, {\"type\":\"not_duplicate_tool_call\"}, or {\"type\":\"clarification_response\"}, plus an executable on_fail "
+    "operation such as replan or rewrite_response. For ambiguity or missing-information failures, prefer a response guard using clarification_response with rewrite_response over benchmark-specific wording. Prose-only validation content is invalid. Never rewrite tool_result, "
     "modify tool implementations, branch on task/case IDs, or use benchmark-specific domain rules. "
     "Never mention simulator control tokens, evaluator sentinels, hidden labels, gold answers, or trace-only stop markers in candidate content, even as examples of what not to do. "
     "Do not copy diagnostic_only_examples into candidate values; only proposal-safe train examples may be copied, "
@@ -825,6 +825,8 @@ def _transform_patch_schema(transform_contract: TransformContract | None = None)
                     {"type": "boolean"},
                 ]
             },
+            "message": {"type": "string", "minLength": 1, "maxLength": 1200},
+            "replacement": {},
             "value": {},
             "initial": {},
             "type": {"type": "string", "maxLength": 160},

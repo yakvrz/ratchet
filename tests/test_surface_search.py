@@ -166,6 +166,107 @@ class TransformLibraryTests(unittest.TestCase):
 
         self.assertEqual(compiled.report.status, "compiled")
 
+    def test_compiler_rejects_operator_tree_conditions_before_runtime(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-condition",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "validate",
+                        "target": "draft_response",
+                        "checks": [{"type": "json_object"}],
+                        "when": {"==": [{"$ref": "draft_response"}, "lookup_order"]},
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "invalid_condition")
+
+    def test_compiler_rejects_unavailable_condition_references(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-condition-ref",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "validate",
+                        "target": "draft_response",
+                        "checks": [{"type": "json_object"}],
+                        "when": {"tool_call.name": "lookup_order"},
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "unavailable_reference")
+
+    def test_compiler_validates_on_fail_runtime_operation_shape(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        program = TransformProgram.from_dict(
+            {
+                "candidate_id": "bad-on-fail",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "validate",
+                        "target": "draft_response",
+                        "checks": [{"type": "clarification_response"}],
+                        "on_fail": {"op": "replan", "message": "Try again."},
+                    }
+                ],
+            }
+        )
+
+        compiled = TransformCompiler().compile(program, surface)
+
+        self.assertEqual(compiled.report.status, "rejected")
+        self.assertEqual(compiled.report.rejection.code, "invalid_on_fail")
+
+    def test_response_clarification_guard_can_rewrite_implicit_choice_prompt(self) -> None:
+        surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "clarify-response",
+                    "patches": [
+                        {
+                            "hook": "before_user_response",
+                            "op": "validate",
+                            "target": "draft_response",
+                            "checks": [{"type": "clarification_response"}],
+                            "on_fail": {
+                                "op": "rewrite_response",
+                                "message": "Please clarify which option you want me to use before I continue.",
+                            },
+                        }
+                    ],
+                }
+            ),
+            surface,
+        )
+        ctx = RuntimeContext(
+            case=EvalCase(id="case-1", split="dev", input="x"),
+            context=ContextGraph(),
+            model_config={},
+            draft_response="Do you want the mug or the lamp?",
+            output="Do you want the mug or the lamp?",
+        )
+
+        TransformRuntime(candidate).run_hook("before_user_response", ctx)
+
+        self.assertIn("Please clarify which option", ctx.output)
+        self.assertTrue(any(item["op"] == "rewrite_response" for item in ctx.trace_annotations))
+
     def test_candidate_validation_rejects_log_only_control_candidate(self) -> None:
         surface = surface_from_agent_spec(AgentSpec(name="sample", model="base"))
         candidate = CandidateProposal(

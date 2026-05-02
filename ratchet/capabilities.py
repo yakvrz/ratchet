@@ -95,6 +95,21 @@ VALIDATION_CHECKS: dict[str, ValidationCheckSpec] = {
         description="Completion-like final responses require a successful completed action in transform state.",
         parameters_schema={"properties": {"state_field": {"type": "string"}}},
     ),
+    "clarification_response": ValidationCheckSpec(
+        name="clarification_response",
+        hooks=("before_user_response",),
+        required_inputs=("draft_response",),
+        description=(
+            "Draft response must be an explicit clarification request rather than an implicit choice prompt "
+            "or unsupported completion."
+        ),
+        parameters_schema={
+            "properties": {
+                "markers": {"type": "array", "items": {"type": "string"}},
+                "allow_question_only": {"type": "boolean"},
+            }
+        },
+    ),
 }
 
 
@@ -111,6 +126,8 @@ def validation_check_schema() -> dict[str, Any]:
             "state_field": {"type": "string", "maxLength": 120},
             "arg": {"type": "string", "maxLength": 120},
             "state_key": {"type": "string", "maxLength": 120},
+            "markers": {"type": "array", "items": {"type": "string", "maxLength": 80}, "maxItems": 20},
+            "allow_question_only": {"type": "boolean"},
         },
         "required": ["type"],
         "additionalProperties": True,
@@ -158,6 +175,15 @@ def validate_check_payload(raw: Any, *, hook: str) -> str | None:
             return "tool_arg_in_state requires non-empty arg."
         if state_key is not None and (not isinstance(state_key, str) or not state_key):
             return "tool_arg_in_state state_key must be a non-empty string when provided."
+    if check_type == "clarification_response":
+        markers = check.get("markers")
+        if markers is not None and (
+            not isinstance(markers, list) or not markers or not all(isinstance(item, str) and item.strip() for item in markers)
+        ):
+            return "clarification_response markers must be a non-empty string array when provided."
+        allow_question_only = check.get("allow_question_only")
+        if allow_question_only is not None and not isinstance(allow_question_only, bool):
+            return "clarification_response allow_question_only must be boolean when provided."
     return None
 
 
@@ -192,6 +218,13 @@ def run_validation_check(raw: Any, ctx: Any) -> bool:
         )
     if check_type == "completion_claims_supported":
         return _completion_claims_supported(ctx, state_field=str(check.get("state_field") or "completed_actions"))
+    if check_type == "clarification_response":
+        markers = check.get("markers")
+        return _clarification_response(
+            ctx,
+            markers=[str(item) for item in markers] if isinstance(markers, list) else None,
+            allow_question_only=bool(check.get("allow_question_only", False)),
+        )
     raise ValueError(f"Unsupported validation check: {check_type!r}")
 
 
@@ -375,3 +408,51 @@ def _completion_claims_supported(ctx: Any, *, state_field: str) -> bool:
     if isinstance(completed, list):
         return bool(completed)
     return bool(completed)
+
+
+DEFAULT_CLARIFICATION_MARKERS = (
+    "which",
+    "what",
+    "clarify",
+    "confirm",
+    "specify",
+    "provide",
+    "choose",
+    "select",
+)
+
+
+def _clarification_response(ctx: Any, *, markers: list[str] | None, allow_question_only: bool) -> bool:
+    text = str(ctx.draft_response or "").strip().lower()
+    if not text:
+        return False
+    if _completion_claim_text(text):
+        return False
+    marker_set = tuple(marker.strip().lower() for marker in (markers or list(DEFAULT_CLARIFICATION_MARKERS)) if marker.strip())
+    has_marker = any(re.search(rf"\b{re.escape(marker)}\b", text) for marker in marker_set)
+    has_question_shape = "?" in text or any(
+        re.search(rf"\b{re.escape(marker)}\b", text) for marker in ("please", "need", "missing", "unclear")
+    )
+    if allow_question_only:
+        return has_question_shape
+    return has_marker and has_question_shape
+
+
+def _completion_claim_text(text: str) -> bool:
+    return any(
+        marker in text
+        for marker in (
+            "done",
+            "completed",
+            "submitted",
+            "cancelled",
+            "canceled",
+            "modified",
+            "created",
+            "processed",
+            "updated",
+            "changed",
+            "return has been",
+            "refund has been",
+        )
+    )

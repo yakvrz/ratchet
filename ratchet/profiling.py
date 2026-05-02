@@ -26,6 +26,7 @@ def runtime_reliability_diagnostics(
     reference_by_id = _representative_evaluations(reference)
     candidate_by_id = _representative_evaluations(candidate)
     fixed_invalid: list[str] = []
+    fixed_tool_problem: list[str] = []
     low_token_fixed: list[str] = []
     finish_reason_changed: list[str] = []
     finish_reasons: dict[str, list[str]] = defaultdict(list)
@@ -43,6 +44,8 @@ def runtime_reliability_diagnostics(
             continue
         if _invalid_output(reference_eval):
             fixed_invalid.append(case_id)
+        if _has_tool_problem(reference_eval) and not _has_tool_problem(candidate_eval):
+            fixed_tool_problem.append(case_id)
         cap = _requested_output_cap(reference_eval) or _requested_output_cap(candidate_eval)
         output_tokens = reference_eval.record.metrics.output_tokens
         if cap and output_tokens <= max(1, int(cap * LOW_OUTPUT_TOKEN_RATIO)):
@@ -52,23 +55,30 @@ def runtime_reliability_diagnostics(
             if finish_reason:
                 finish_reasons[case_id].append(finish_reason)
     baseline_runtime_defect_fixed = bool(runtime_involved and ((fixed_invalid and low_token_fixed) or finish_reason_changed))
+    tool_trajectory_defect_fixed = bool(fixed_tool_problem)
     return {
         "candidate_id": candidate.candidate_id,
         "runtime_only": runtime_only,
         "runtime_involved": runtime_involved,
-        "runtime_finding": baseline_runtime_defect_fixed,
+        "runtime_finding": baseline_runtime_defect_fixed or tool_trajectory_defect_fixed,
         "diagnostic_class": (
             "baseline_runtime_defect_fixed"
             if baseline_runtime_defect_fixed
+            else "tool_trajectory_defect_fixed"
+            if tool_trajectory_defect_fixed
             else "no_runtime_reliability_finding"
         ),
         "baseline_runtime_defect_fixed": baseline_runtime_defect_fixed,
+        "tool_trajectory_defect_fixed": tool_trajectory_defect_fixed,
         "reason": (
             "Baseline runtime defect fixed: runtime candidate corrected invalid outputs where baseline runs ended far below the requested output cap."
             if baseline_runtime_defect_fixed
+            else "Tool trajectory defect fixed: candidate removed tool errors or invalid tool outcomes seen in the reference run."
+            if tool_trajectory_defect_fixed
             else "No runtime reliability suspicion detected."
         ),
         "fixed_invalid_output_case_ids": fixed_invalid,
+        "fixed_tool_problem_case_ids": fixed_tool_problem,
         "low_token_fixed_case_ids": low_token_fixed,
         "finish_reason_changed_case_ids": finish_reason_changed,
         "regressed_case_ids": list(flip_summary["regressed_case_ids"]),
@@ -280,6 +290,32 @@ def _invalid_output(evaluation: Any) -> bool:
         any("invalid_output" in label for label in evaluation.grade.labels)
         or (isinstance(output, dict) and "invalid_output" in output)
         or bool(evaluation.record.diagnostics.metadata.get("invalid_output"))
+    )
+
+
+def _has_tool_problem(evaluation: Any) -> bool:
+    diagnostics = evaluation.record.diagnostics
+    if diagnostics.terminal_reason in {"premature_stop", "max_turns", "stopped_before_required_action"}:
+        return True
+    for turn in diagnostics.turns:
+        if turn.outcome in {
+            "invalid_tool_call",
+            "wrong_tool",
+            "missing_tool",
+            "unnecessary_tool",
+            "bad_tool_arguments",
+            "premature_stop",
+            "policy_violation",
+            "state_mutation_error",
+        }:
+            return True
+        for tool_call in turn.tool_calls:
+            if tool_call.status in {"error", "invalid"} or tool_call.error:
+                return True
+    return any(
+        label.startswith(("wrong_tool", "missing_tool", "invalid_tool", "bad_tool"))
+        or label.startswith("tool_error:")
+        for label in evaluation.grade.labels
     )
 
 

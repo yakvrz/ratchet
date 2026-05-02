@@ -283,9 +283,18 @@ def surface_targets(surface: SurfaceSpec) -> list[SurfaceTarget]:
                     ],
                     "safe_patterns": [
                         "validate draft response with completion_claims_supported then rewrite_response on failure",
+                        "validate draft response with clarification_response then rewrite_response to an explicit clarification request on failure",
                         "validate structured output with json_object, actions_array, or required_output_keys",
                     ],
                 },
+                semantics=TargetSemantics(
+                    role="response_guarding",
+                    axes=["clarification", "claim_support", "completion_integrity"],
+                    scope="global",
+                    risks=["response_contract_regression"],
+                    confidence=0.7,
+                    source="response_surface",
+                ),
             )
         )
     if surface.state.supports_persistent_state:
@@ -644,10 +653,11 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
                 "block",
                 "allow",
                 "replan",
+                "terminate",
                 "log_event",
                 "trace_annotation",
             ),
-            ("allow", "block", "modified_tool_call", "replan_instruction"),
+            ("allow", "block", "modified_tool_call", "replan_instruction", "terminate"),
         ),
         (
             "after_tool_result",

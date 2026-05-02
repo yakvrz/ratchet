@@ -33,6 +33,16 @@ python -m ratchet check --config samples/order_desk_tool_loop_agent/ratchet.asse
 python -m ratchet optimize --config samples/order_desk_tool_loop_agent/ratchet.assessment.toml
 ```
 
+Run the larger diagnostic assessment when judging optimizer capability:
+
+```bash
+python samples/order_desk_tool_loop_agent/generate_expanded_evals.py
+python -m ratchet eval-health --config samples/order_desk_tool_loop_agent/ratchet.diagnostic_expanded.toml --strict
+python -m ratchet optimize --config samples/order_desk_tool_loop_agent/ratchet.diagnostic_expanded.toml
+```
+
+The expanded diagnostic set uses distinct generated tasks rather than repeated samples: 24 train, 48 dev, and 48 holdout cases, balanced across cancel, address, return, and ambiguity.
+
 Development target:
 
 - full reduced run under 5-10 minutes

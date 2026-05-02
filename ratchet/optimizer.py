@@ -2637,6 +2637,8 @@ def _is_timeout_error(error: Exception) -> bool:
 def _requires_finalist_confirmation(candidate: CompiledCandidate | None, runtime_diagnostic: dict[str, Any]) -> bool:
     if runtime_diagnostic.get("baseline_runtime_defect_fixed"):
         return True
+    if runtime_diagnostic.get("tool_trajectory_defect_fixed") or runtime_diagnostic.get("fixed_tool_problem_case_ids"):
+        return True
     if runtime_diagnostic.get("fixed_invalid_output_case_ids") and _touches_output_or_runtime(candidate):
         return True
     if runtime_diagnostic.get("finish_reason_changed_case_ids") and _touches_output_or_runtime(candidate):

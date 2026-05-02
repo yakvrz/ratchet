@@ -46,6 +46,7 @@ class TransformContract:
                 "Use only hook/op pairs listed in hook_ops; omitted hook means on_task_start.",
                 "Use required_params for each op; do not invent prose-only operations.",
                 "References are only legal when their root appears in available_refs for that hook.",
+                "when/unless conditions must be simple runtime-ref objects such as {'tool_call.name':'lookup'} or {'state.ids':{'not_empty':true}}; operator trees are illegal.",
                 "Compiler validation remains authoritative; these examples are shapes, not recipes.",
             ],
             "opportunity_contracts": {
@@ -116,6 +117,8 @@ def transform_patch_schema_for_contract(contract: TransformContract) -> dict[str
                     {"type": "boolean"},
                 ]
             },
+            "message": {"type": "string", "minLength": 1, "maxLength": 1200},
+            "replacement": {},
             "value": {},
             "initial": {},
             "type": {"type": "string", "maxLength": 160},
@@ -163,7 +166,7 @@ def _required_params(surface: SurfaceSpec) -> dict[str, list[str]]:
         "normalize_tool_args": ["hook", "op"],
         "repair_tool_args": ["hook", "op"],
         "set_model_config": ["hook", "op", "field", "value"],
-        "rewrite_response": ["hook", "op", "content"],
+        "rewrite_response": ["hook", "op", "message_or_replacement"],
         "block_response": ["hook", "op", "message"],
         "log_event": ["hook", "op"],
         "trace_annotation": ["hook", "op", "fields"],
@@ -229,6 +232,18 @@ def _examples(surface: SurfaceSpec, hook_ops: dict[str, list[str]]) -> dict[str,
                 "op": "validate",
                 "target": "draft_response",
                 "checks": [{"type": "json_object"}],
+            }
+        )
+        examples.setdefault("surface_response", []).append(
+            {
+                "hook": "before_user_response",
+                "op": "validate",
+                "target": "draft_response",
+                "checks": [{"type": "clarification_response"}],
+                "on_fail": {
+                    "op": "rewrite_response",
+                    "message": "Please clarify which option you want me to use before I continue.",
+                },
             }
         )
     return examples

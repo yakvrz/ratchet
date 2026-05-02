@@ -285,6 +285,7 @@ def _suitability(*, mechanism: str, target: SurfaceTarget, objective: Optimizati
     role = target.semantics.role
     bottleneck = str(evidence.get("bottleneck_class") or "")
     residual_modes = {str(item) for item in evidence.get("residual_failure_modes", []) if item}
+    evidence_text = str(evidence).lower()
     if mechanism == "surface_context" and (
         bottleneck in {"semantic_boundary_confusion", "general_correctness_gap"}
         or {"label_confusion", "weak_slices", "general_correctness_gap"} & residual_modes
@@ -294,6 +295,10 @@ def _suitability(*, mechanism: str, target: SurfaceTarget, objective: Optimizati
         bottleneck == "output_contract" or evidence.get("invalid_output") or "invalid_output" in residual_modes
     ):
         score += 0.45
+    if mechanism == "surface_response" and (
+        "clarification" in evidence_text or "ambiguous" in evidence_text or "ambiguity" in evidence_text
+    ):
+        score += 0.35
     if mechanism == "surface_runtime" and evidence.get("runtime_defect"):
         score += 0.45
     if mechanism == "surface_tool_loop" and (
@@ -323,6 +328,7 @@ def _suitability(*, mechanism: str, target: SurfaceTarget, objective: Optimizati
         "output_budget_control",
         "output_format_rule",
         "schema_adherence_policy",
+        "response_guarding",
     }:
         score += 0.10
     if mechanism == "surface_runtime" and role in {

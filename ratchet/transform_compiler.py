@@ -28,6 +28,8 @@ FORBIDDEN_REFERENCE_ROOTS = {
     "expected",
 }
 CASE_ID_CONDITION_PATTERN = re.compile(r"\b(case|task)[_-]?id\b", re.IGNORECASE)
+REFERENCE_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+(?:\[\])?)*$")
+CONDITION_OPERATOR_KEYS = {"exists", "not_empty", "equals"}
 FORBIDDEN_TRACE_LITERALS = (
     "###stop###",
     "hidden task",
@@ -144,6 +146,8 @@ class TransformCompiler:
         self._validate_response_op(index, patch, surface)
         self._validate_tool_op(index, patch, surface)
         self._validate_validation_checks(index, patch, hook_name, state_fields)
+        self._validate_conditions(index, patch, hook.available_inputs, state_fields)
+        self._validate_on_fail(index, patch, hook.allowed_ops, state_fields)
         self._validate_references(index, patch, hook.available_inputs, state_fields)
 
     def _validate_context_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
@@ -243,8 +247,14 @@ class TransformCompiler:
             self._reject(index, "response_interception_unsupported", "Surface does not allow draft response interception.")
         if patch.op.op == "rewrite_response" and not surface.response.response_rewrite_allowed:
             self._reject(index, "response_rewrite_unsupported", "Surface does not allow response rewriting.")
+        if patch.op.op == "rewrite_response":
+            params = patch.op.params
+            if "message" not in params and "replacement" not in params:
+                self._reject(index, "response_rewrite_content_required", "rewrite_response requires message or replacement.")
         if patch.op.op == "block_response" and not surface.response.response_blocking_allowed:
             self._reject(index, "response_block_unsupported", "Surface does not allow response blocking.")
+        if patch.op.op == "block_response" and "message" not in patch.op.params:
+            self._reject(index, "response_block_message_required", "block_response requires message.")
 
     def _validate_tool_op(self, index: int, patch: TransformPatch, surface: SurfaceSpec) -> None:
         op = patch.op.op
@@ -321,6 +331,83 @@ class TransformCompiler:
                     self._reject(index, "unknown_state_field", f"State reference {ref!r} is not defined.")
             elif root not in available_inputs and root not in {"candidate", "surface"}:
                 self._reject(index, "unavailable_reference", f"Reference {ref!r} is unavailable at this hook.")
+
+    def _validate_conditions(
+        self,
+        index: int,
+        patch: TransformPatch,
+        available_inputs: tuple[str, ...],
+        state_fields: set[str],
+    ) -> None:
+        for condition_name, condition in (("when", patch.when), ("unless", patch.unless)):
+            if condition is None:
+                continue
+            if not isinstance(condition, dict):
+                self._reject(index, "invalid_condition", f"{condition_name} must be an object of runtime refs to expected values.")
+            for ref, expected in condition.items():
+                if not isinstance(ref, str) or not REFERENCE_KEY_PATTERN.fullmatch(ref):
+                    self._reject(
+                        index,
+                        "invalid_condition",
+                        f"{condition_name} key {ref!r} is not a runtime reference; supported shape is {{'tool_call.name': 'tool'}} or {{'state.field': {{'exists': true}}}}.",
+                    )
+                root = ref.split(".", 1)[0]
+                if root in FORBIDDEN_REFERENCE_ROOTS:
+                    self._reject(index, "immutable_boundary_violation", f"Candidate condition attempts forbidden reference {ref!r}.")
+                if root == "state":
+                    parts = ref.split(".")
+                    if len(parts) < 2 or parts[1] not in state_fields:
+                        self._reject(index, "unknown_state_field", f"Condition state reference {ref!r} is not defined.")
+                elif root not in available_inputs:
+                    self._reject(index, "unavailable_reference", f"Condition reference {ref!r} is unavailable at this hook.")
+                if isinstance(expected, dict):
+                    unknown_keys = set(expected) - CONDITION_OPERATOR_KEYS
+                    if unknown_keys:
+                        self._reject(
+                            index,
+                            "invalid_condition",
+                            f"{condition_name} for {ref!r} uses unsupported operator(s): {sorted(unknown_keys)}.",
+                        )
+                    if "exists" in expected and not isinstance(expected["exists"], bool):
+                        self._reject(index, "invalid_condition", f"{condition_name} operator 'exists' requires a boolean.")
+                    if "not_empty" in expected and not isinstance(expected["not_empty"], bool):
+                        self._reject(index, "invalid_condition", f"{condition_name} operator 'not_empty' requires a boolean.")
+
+    def _validate_on_fail(
+        self,
+        index: int,
+        patch: TransformPatch,
+        hook_allowed_ops: tuple[str, ...],
+        state_fields: set[str],
+    ) -> None:
+        if patch.op.op not in {"validate", "validate_claims"}:
+            return
+        on_fail = patch.op.params.get("on_fail")
+        if on_fail is None:
+            return
+        if not isinstance(on_fail, dict):
+            self._reject(index, "invalid_on_fail", "validate on_fail must be a transform operation object.")
+        try:
+            failure_patch = TransformPatch.from_dict(on_fail)
+        except ValueError as exc:
+            self._reject(index, "invalid_on_fail", str(exc))
+        if failure_patch.hook is not None and failure_patch.hook != patch.hook:
+            self._reject(index, "invalid_on_fail", "validate on_fail must run at the same hook; omit hook inside on_fail.")
+        if failure_patch.op.op not in hook_allowed_ops:
+            self._reject(
+                index,
+                "invalid_on_fail",
+                f"on_fail operation {failure_patch.op.op!r} is not allowed at hook {(patch.hook or 'on_task_start')!r}.",
+            )
+        if failure_patch.op.op == "rewrite_response":
+            if "message" not in failure_patch.op.params and "replacement" not in failure_patch.op.params:
+                self._reject(index, "invalid_on_fail", "rewrite_response on_fail requires message or replacement.")
+        if failure_patch.op.op == "block_response" and "message" not in failure_patch.op.params:
+            self._reject(index, "invalid_on_fail", "block_response on_fail requires message.")
+        if failure_patch.op.op in {"set_state", "append_state", "merge_state", "clear_state", "expose_state", "hide_state"}:
+            field = failure_patch.op.params.get("field")
+            if not isinstance(field, str) or field not in state_fields:
+                self._reject(index, "unknown_state_field", f"on_fail references undefined state field {field!r}.")
 
     def _validate_boundaries(self, index: int, patch: TransformPatch) -> None:
         payload_text = json.dumps(patch.to_dict(), sort_keys=True, default=str)
