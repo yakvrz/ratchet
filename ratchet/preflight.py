@@ -6,11 +6,12 @@ import json
 import tempfile
 from typing import Any
 
-from ratchet.adapters import AdapterProtocol, checked_agent_spec
+from ratchet.adapters import AdapterProtocol, checked_agent_spec, checked_surface_spec
 from ratchet.model_client import ResponsesModelClient, validate_optimizer_model_access
-from ratchet.surface import SurfaceGenerator
-from ratchet.types import AgentPatch, EditableTarget, EvalCase, GradeResult, OptimizationObjective, PatchOperation, RunRecord
-from ratchet.validation import PatchValidator
+from ratchet.surfaces import SurfaceSpec
+from ratchet.transform_compiler import TransformCompiler
+from ratchet.transform_program import TransformProgram
+from ratchet.types import EvalCase, GradeResult, OptimizationObjective, RunRecord
 
 
 @dataclass(frozen=True)
@@ -64,18 +65,19 @@ def _run_checked_case(
 def _stability_summary(
     adapter: AdapterProtocol,
     sample_cases: tuple[EvalCase, ...],
+    first_pass: list[tuple[RunRecord, GradeResult]] | None = None,
 ) -> dict[str, Any]:
-    first_pass: list[tuple[RunRecord, GradeResult]] = []
+    first_pass_rows: list[tuple[RunRecord, GradeResult]] = list(first_pass or [])
     second_pass: list[tuple[RunRecord, GradeResult]] = []
-    for case in sample_cases:
-        first_pass.append(_run_checked_case(adapter, case))
+    for case in sample_cases[len(first_pass_rows):]:
+        first_pass_rows.append(_run_checked_case(adapter, case))
     for case in sample_cases:
         second_pass.append(_run_checked_case(adapter, case))
 
     pass_flips: list[str] = []
     output_drift: list[str] = []
     score_deltas: list[float] = []
-    for case, (first_record, first_grade), (second_record, second_grade) in zip(sample_cases, first_pass, second_pass):
+    for case, (first_record, first_grade), (second_record, second_grade) in zip(sample_cases, first_pass_rows, second_pass):
         if first_grade.passed != second_grade.passed:
             pass_flips.append(case.id)
         if first_record.output != second_record.output:
@@ -83,10 +85,6 @@ def _stability_summary(
         score_deltas.append(abs(first_grade.score - second_grade.score))
     mean_score_drift = sum(score_deltas) / max(len(score_deltas), 1)
     stable = not pass_flips and mean_score_drift <= 0.01
-    if not stable:
-        raise ValueError(
-            "Preflight stability check failed: repeated baseline runs changed externally graded behavior."
-        )
     return {
         "stable": stable,
         "pass_flip_case_ids": pass_flips,
@@ -107,11 +105,16 @@ def run_preflight_check(
     optimizer_client: ResponsesModelClient | None = None,
 ) -> CheckSummary:
     spec = checked_agent_spec(adapter, adapter_spec=adapter_spec)
-    surface = SurfaceGenerator().generate(spec, objective)
+    surface_cases = tuple(case for case in cases if case.split == "train") or tuple(
+        case for case in cases if case.split == "dev"
+    )
+    surface = checked_surface_spec(adapter, adapter_spec=adapter_spec, cases=surface_cases)
     sample_cases = select_check_cases(cases, sample_limit=sample_limit)
     sample_rows: list[dict[str, Any]] = []
+    first_pass: list[tuple[RunRecord, GradeResult]] = []
     for case in sample_cases:
         record, grade = _run_checked_case(adapter, case)
+        first_pass.append((record, grade))
         sample_rows.append(
             {
                 "case_id": case.id,
@@ -123,8 +126,8 @@ def run_preflight_check(
             }
         )
 
-    stability = _stability_summary(adapter, sample_cases)
-    materialization = _materialization_audit(adapter, spec, surface, objective)
+    stability = _stability_summary(adapter, sample_cases, first_pass=first_pass)
+    materialization = _materialization_audit(adapter, surface, sample_case=sample_cases[0])
     optimizer_model_access = (
         validate_optimizer_model_access(
             env_path=optimizer_env_path,
@@ -137,12 +140,12 @@ def run_preflight_check(
 
     with tempfile.TemporaryDirectory() as tmp:
         export_dir = Path(tmp) / "export"
-        adapter.export(AgentPatch.empty(), export_dir)
+        adapter.export(None, export_dir)
 
     return CheckSummary(
         adapter=adapter_spec,
         agent_spec=spec.to_dict() if spec else None,
-        generated_surface=[target.to_dict() for target in surface],
+        generated_surface=[surface.to_dict()],
         sample_cases=sample_rows,
         stability=stability,
         materialization=materialization,
@@ -153,146 +156,154 @@ def run_preflight_check(
 
 def _materialization_audit(
     adapter: AdapterProtocol,
-    spec: Any,
-    surface: list[EditableTarget],
-    objective: OptimizationObjective,
+    surface: SurfaceSpec,
+    *,
+    sample_case: EvalCase,
 ) -> dict[str, Any]:
-    if not surface:
-        return {"checked": False, "verified_kinds": [], "skipped_kinds": [], "checks": []}
-    targets_by_kind: dict[str, EditableTarget] = {}
-    for target in surface:
-        targets_by_kind.setdefault(target.kind, target)
-        if _preferred_materialization_target(target):
-            targets_by_kind[target.kind] = target
+    compiler = TransformCompiler()
+    raw_programs = _sentinel_transform_programs(surface)
+    execution_programs = _sentinel_execution_programs(surface)
+    if not raw_programs and not execution_programs:
+        return {
+            "checked": False,
+            "verified_surfaces": [],
+            "skipped_surfaces": [],
+            "checks": [],
+            "execution_checks": [],
+        }
     checks: list[dict[str, Any]] = []
-    validator = PatchValidator()
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        for index, (kind, target) in enumerate(sorted(targets_by_kind.items())):
-            patch, expected = _sentinel_patch_for_target(target, index)
-            is_valid, invalid_reason = validator.validate_with_reason(
-                patch,
-                current_spec=spec,
-                surface=surface,
-                objective=objective,
-            )
-            if not is_valid:
-                checks.append(
-                    {
-                        "kind": kind,
-                        "target": target.name,
-                        "verified": False,
-                        "reason": invalid_reason or "sentinel patch was invalid",
-                    }
-                )
-                continue
-            export_dir = root / kind
-            adapter.export(patch, export_dir)
+        for index, (surface_name, raw_program, expected) in enumerate(raw_programs):
+            candidate = compiler.compile_or_raise(TransformProgram.from_dict(raw_program), surface)
+            export_dir = root / surface_name
+            adapter.export(candidate, export_dir)
             exported_text = _exported_review_text(export_dir)
             verified = expected in exported_text
             checks.append(
                 {
-                    "kind": kind,
-                    "target": target.name,
+                    "surface": surface_name,
                     "verified": verified,
                     "expected": expected,
-                    "reason": None if verified else "patched sentinel was not found in exported review artifacts",
+                    "reason": None if verified else "compiled transform sentinel was not found in exported artifacts",
                 }
             )
-    failed = [check for check in checks if not check["verified"]]
+    execution_checks: list[dict[str, Any]] = []
+    for surface_name, raw_program, expected in execution_programs:
+        candidate = compiler.compile_or_raise(TransformProgram.from_dict(raw_program), surface)
+        record = adapter.run_case(sample_case, candidate)
+        if not isinstance(record, RunRecord):
+            raise TypeError(f"run_case returned {type(record).__name__}, expected RunRecord.")
+        output_text = json.dumps(record.output, sort_keys=True, default=str)
+        trace = record.diagnostics.metadata.get("transform_trace", [])
+        trace_text = json.dumps(trace, sort_keys=True, default=str)
+        verified = expected in output_text or expected in trace_text
+        execution_checks.append(
+            {
+                "surface": surface_name,
+                "verified": verified,
+                "expected": expected,
+                "reason": None if verified else "compiled transform sentinel was not observed during run_case execution",
+            }
+        )
+    failed = [check for check in [*checks, *execution_checks] if not check["verified"]]
     if failed:
-        failed_rows = ", ".join(f"{check['kind']}:{check['target']}" for check in failed)
-        raise ValueError(f"Materialization audit failed for generated targets: {failed_rows}")
+        failed_rows = ", ".join(str(check["surface"]) for check in failed)
+        raise ValueError(f"Materialization audit failed for transform surfaces: {failed_rows}")
     return {
         "checked": True,
-        "verified_kinds": [str(check["kind"]) for check in checks],
-        "skipped_kinds": [],
+        "verified_surfaces": [str(check["surface"]) for check in checks],
+        "skipped_surfaces": [],
         "checks": checks,
+        "execution_checks": execution_checks,
     }
 
 
-def _preferred_materialization_target(target: EditableTarget) -> bool:
-    schema_types = _schema_types(target)
-    return bool(schema_types & {"string", "object", "array"}) or target.kind in {"model", "verifier"}
+def _sentinel_transform_programs(surface: SurfaceSpec) -> list[tuple[str, dict[str, Any], str]]:
+    programs: list[tuple[str, dict[str, Any], str]] = []
+    sentinel = "RATCHET_TRANSFORM_SENTINEL_CONTEXT"
+    editable = set(surface.context.editable_sections)
+    section = next((item.name for item in surface.context.graph.sections if item.name in editable), None)
+    if section is not None:
+        programs.append(
+            (
+                "context",
+                {
+                    "id": "preflight_context_sentinel",
+                    "patches": [
+                        {
+                            "hook": "before_model_call",
+                            "op": "replace_context_section",
+                            "section": section,
+                            "content": sentinel,
+                        }
+                    ],
+                },
+                sentinel,
+            )
+        )
+    if surface.context.generated_sections_allowed:
+        generated_sentinel = "RATCHET_TRANSFORM_SENTINEL_GENERATED_SECTION"
+        programs.append(
+            (
+                "generated_context",
+                {
+                    "id": "preflight_generated_context_sentinel",
+                    "patches": [
+                        {
+                            "hook": "before_model_call",
+                            "op": "add_context_section",
+                            "section": "preflight_generated_context_sentinel",
+                            "content": generated_sentinel,
+                            "position": "end",
+                        }
+                    ],
+                },
+                generated_sentinel,
+            )
+        )
+    if surface.model.max_tokens_configurable:
+        programs.append(
+            (
+                "model_config",
+                {
+                    "id": "preflight_model_config_sentinel",
+                    "patches": [
+                        {
+                            "hook": "before_model_call",
+                            "op": "set_model_config",
+                            "field": "max_tokens",
+                            "value": 321,
+                        }
+                    ],
+                },
+                '"field": "max_tokens"',
+            )
+        )
+    return programs
 
 
-def _sentinel_patch_for_target(target: EditableTarget, index: int) -> tuple[AgentPatch, str]:
-    op = _sentinel_op(target)
-    sentinel = f"RATCHET_MATERIALIZATION_SENTINEL_{target.kind}_{index}"
-    schema_types = _schema_types(target)
-    if op == "change_model":
-        value = target.choices[0]
-        expected = f'"model": "{value}"'
-    elif op == "add_few_shot":
-        value = [
+def _sentinel_execution_programs(surface: SurfaceSpec) -> list[tuple[str, dict[str, Any], str]]:
+    hook = surface.hooks["before_user_response"]
+    if not hook.supported or "rewrite_response" not in hook.allowed_ops:
+        return []
+    sentinel = "RATCHET_TRANSFORM_SENTINEL_RESPONSE"
+    return [
+        (
+            "response_execution",
             {
-                "source_case_id": "preflight-sentinel",
-                "input": sentinel,
-                "output": {"label": sentinel},
-                "purpose": "Preflight materialization audit sentinel.",
-            }
-        ]
-        expected = sentinel
-    elif schema_types == {"boolean"}:
-        value = not bool(target.current_value)
-        leaf = target.path.rsplit(".", 1)[-1]
-        expected = f'"{leaf}": {str(value).lower()}'
-    elif schema_types == {"integer"}:
-        value = 912345 + index
-        expected = str(value)
-    elif schema_types == {"number"}:
-        value = 912345.25 + index
-        expected = str(value)
-    elif "object" in schema_types:
-        value = {"ratchet_materialization_sentinel": sentinel}
-        expected = sentinel
-    elif "array" in schema_types:
-        value = [{"ratchet_materialization_sentinel": sentinel}]
-        expected = sentinel
-    else:
-        value = sentinel
-        expected = sentinel
-    return (
-        AgentPatch(
-            operations=[
-                PatchOperation(
-                    op=op,
-                    target=target.name,
-                    value=value,
-                    rationale="Preflight materialization audit sentinel.",
-                )
-            ],
-            rationale="Preflight materialization audit sentinel.",
-            expected_effect="Verify adapter export materializes generated targets.",
-        ),
-        expected,
-    )
-
-
-def _schema_types(target: EditableTarget) -> set[str]:
-    schema_type = target.value_schema.get("type")
-    if isinstance(schema_type, list):
-        return {str(item) for item in schema_type}
-    if schema_type is None:
-        return set()
-    return {str(schema_type)}
-
-
-def _sentinel_op(target: EditableTarget) -> str:
-    for op in (
-        "change_model",
-        "add_few_shot",
-        "add_instruction",
-        "revise_instruction",
-        "add_output_constraint",
-        "revise_tool_description",
-        "revise_tool_policy",
-        "set_runtime_param",
-        "add_verifier_retry",
-    ):
-        if op in target.allowed_ops:
-            return op
-    return target.allowed_ops[0]
+                "id": "preflight_response_execution_sentinel",
+                "patches": [
+                    {
+                        "hook": "before_user_response",
+                        "op": "rewrite_response",
+                        "message": sentinel,
+                    }
+                ],
+            },
+            sentinel,
+        )
+    ]
 
 
 def _exported_review_text(root: Path) -> str:

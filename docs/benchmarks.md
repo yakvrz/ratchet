@@ -5,13 +5,22 @@ Ratchet's sample suite is intentionally limited to public, trusted assessment ve
 Current samples:
 
 - `samples/bfcl_function_calling_agent/`
-- `samples/taubench_action_agent/`
+- `samples/order_desk_tool_loop_agent/`
+- `samples/taubench_agent/`
 - `samples/banking77_intent_agent/`
 - `samples/clinc150_intent_agent/`
 
+## Order Desk Tool Loop
+
+Order Desk is Ratchet's cheap agentic development assessment. It is a local deterministic tool-loop environment with a domain policy, live tool schemas, declared tool result schemas, read and mutating tools, hidden environment state, and final grading from the environment state.
+
+It exists because BFCL and the intent benchmarks are too single-shot to exercise Ratchet's runtime hooks, while tau-bench is expensive enough that it is a poor inner-loop development vehicle. Order Desk should be used to catch architecture regressions in surface inference, identifier-flow affordances, context graph execution, tool-call validation, response interception, and staged measurement before spending tau budget.
+
+Order Desk is not an external benchmark result. It is a controlled development vehicle for agentic surface optimization. A useful run should show the optimizer discovering task-agnostic mechanisms through the same DSL used elsewhere, such as context restructuring, read-before-write behavior, tool-error recovery, state exposure, and response claim guarding.
+
 ## BFCL Function Calling
 
-BFCL is the primary Ratchet development benchmark.
+BFCL is the primary function-calling development benchmark.
 
 It is useful because it exercises behavior that a policy optimizer should actually improve:
 
@@ -28,30 +37,11 @@ BFCL is not a full leaderboard run in this repo. The sample is a fixed developme
 
 ## tau-bench
 
-The tau-bench action sample is currently a workflow/action-policy development probe, not the official interactive benchmark.
+The tau-bench sample uses `GeneratedToolLoopAdapter`, so Ratchet owns the agent loop: model calls, tool-call parsing, `before_tool_call`, `after_tool_result`, response interception, state, traces, and transform instrumentation. The external `sierra-research/tau-bench` package supplies the user simulator, environment state, tool schemas, and benchmark reward.
 
-It is built from the original public `sierra-research/tau-bench` retail and airline task files. The adapter does not run the full interactive tau-bench simulator. Instead, it turns each public task into an action-policy planning case: the agent sees task context, a compact tool catalog, and a policy excerpt, then predicts the required workflow action names.
+That split is intentional. The benchmark connector may know how to create a tau-bench environment, but the optimizer does not get tau-specific candidate logic. Candidate programs still compile against the same hook-based surface used by any other interactive tool environment.
 
-This is useful for:
-
-- tool/action selection
-- policy-constrained workflow planning
-- multi-domain customer-service tasks
-- output-contract behavior
-- model capability probes
-- few-shot and instruction improvements
-
-It should be interpreted as a Ratchet development assessment, not an official tau-bench leaderboard result. Official tau-bench evaluation requires the simulator, user model, domain state, and environment dynamics.
-
-Ratchet now has the core substrate needed for faithful tau-style adapters:
-
-- `DiagnosticTrace` can record multi-turn trajectories, tool calls, terminal state, and terminal reason.
-- `InteractionRecorder` helps adapters produce those traces without custom bookkeeping.
-- tool/action affordances can be generated from observed trajectory failures.
-- measurement budgets can cap candidate dollars, tool calls, and turns.
-- `ratchet.benchmarks.taubench` provides an optional bridge for converting original tau-bench retail/airline results into `RunRecord`s when the external `tau-bench` package is installed.
-
-The next tau-bench milestone should replace the static action probe with an adapter backed by the official simulator, not tune Ratchet against the proxy.
+A credible tau-bench result should compare baseline and Ratchet-optimized runs with the same agent model, user simulator, task set, trial count, and inference budget. The report should include held-out success, failure-mode deltas, tool/model/turn cost deltas, promoted transform diffs, and immutable-boundary evidence.
 
 ## BANKING77
 
@@ -67,7 +57,7 @@ It is useful for:
 
 It is not a flagship Ratchet benchmark. Single-label intent classification over a fixed taxonomy can often be better served by a fine-tuned encoder model than by an LLM agent. BANKING77 should not be overinterpreted as proof that Ratchet is useful for agent policy optimization.
 
-Good Ratchet behavior on BANKING77 means clear evidence accounting, cautious promotion, and honest reporting when gains are directional, unstable, or too sample-sensitive.
+Good Ratchet behavior on BANKING77 means clear evidence accounting, deterministic objective-based promotion, and honest reporting when gains are unstable or too sample-sensitive.
 
 ## CLINC150
 

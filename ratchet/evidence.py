@@ -4,7 +4,7 @@ from collections import Counter, defaultdict
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from ratchet.results import PatchSummary, _compact_prompt_value
+from ratchet.results import CandidateSummary, _compact_prompt_value
 from ratchet.types import EvalCase
 
 
@@ -108,7 +108,7 @@ def build_proposal_example_bank(
     )
 
 
-def build_behavior_diagnostics(summary: PatchSummary, *, max_case_ids: int = 8) -> dict[str, Any]:
+def build_behavior_diagnostics(summary: CandidateSummary, *, max_case_ids: int = 8) -> dict[str, Any]:
     label_field = infer_label_field_from_cases(tuple(evaluation.case for evaluation in summary.evaluations))
     per_label: dict[str, dict[str, Any]] = {}
     confusion_counts: Counter[tuple[str, str]] = Counter()

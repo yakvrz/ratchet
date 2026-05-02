@@ -1,0 +1,47 @@
+[ratchet]
+adapter = "ratchet_adapter_expanded:adapter"
+evals = "evals.diagnostic_expanded.jsonl"
+out = "results/diagnostic-expanded"
+env_file = "../../.env"
+dev_budget = 8
+holdout_budget = 4
+holdout_top_k = 1
+optimizer_model = "gemini-3-pro-preview"
+optimizer_reasoning = "medium"
+search_planner_model = "gemini-3-pro-preview"
+candidate_implementer_model = "gemini-3-pro-preview"
+samples_per_case = 1
+case_concurrency = 6
+stage_case_concurrency = 6
+case_timeout_s = 0
+expensive_candidate_cost_ratio = 8.0
+max_dev_measurement_cost_usd = 0.60
+max_holdout_measurement_cost_usd = 0.50
+max_dev_measurement_tool_calls = 1800
+max_holdout_measurement_tool_calls = 1200
+max_dev_measurement_turns = 2100
+max_holdout_measurement_turns = 1400
+
+[ratchet.eval_health]
+sample_limit = 8
+repeats = 2
+min_dev_cases = 48
+min_holdout_cases = 48
+min_cases_per_category = 12
+max_runtime_error_rate = 0.05
+max_unstable_case_rate = 0.25
+
+[ratchet.objective]
+mode = "correctness"
+tie_breakers = ["highest_correctness", "lower_tool_calls", "lower_latency"]
+
+[ratchet.objective.constraints]
+allowed_models = [
+  "gemini-2.5-flash-lite",
+  "gemini-2.5-flash",
+  "gemini-2.5-pro",
+  "gemini-3-flash-preview",
+  "gemini-3-pro-preview",
+]
+min_correctness_delta = 0.0
+max_patch_operations = 4

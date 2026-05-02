@@ -49,7 +49,7 @@ def _incomplete_cases(progress_rows: list[dict[str, Any]]) -> list[dict[str, Any
         if event not in {"case_started", "case_completed"}:
             continue
         key = (
-            str(row.get("patch_hash") or ""),
+            str(row.get("candidate_id") or ""),
             str(row.get("case_id") or ""),
             int(row.get("sample_index") or 0),
         )
@@ -63,7 +63,7 @@ def _incomplete_cases(progress_rows: list[dict[str, Any]]) -> list[dict[str, Any
             continue
         incomplete.append(
             {
-                "patch_hash": key[0],
+                "candidate_id": key[0],
                 "case_id": key[1],
                 "sample_index": key[2],
                 "split": row.get("split"),
@@ -74,7 +74,7 @@ def _incomplete_cases(progress_rows: list[dict[str, Any]]) -> list[dict[str, Any
     return sorted(
         incomplete,
         key=lambda item: (
-            str(item.get("patch_hash") or ""),
+            str(item.get("candidate_id") or ""),
             str(item.get("case_id") or ""),
             int(item.get("sample_index") or 0),
         ),
@@ -104,7 +104,7 @@ def _partial_report(manifest: dict[str, Any]) -> str:
         for item in incomplete_cases[:50]:
             rows.append(
                 "- "
-                f"patch=`{item.get('patch_hash')}` "
+                f"candidate=`{item.get('candidate_id')}` "
                 f"case=`{item.get('case_id')}` "
                 f"sample={item.get('sample_index')} "
                 f"started_elapsed={item.get('started_elapsed_s')}s"

@@ -6,7 +6,7 @@ import random
 import statistics
 from typing import Any
 
-from ratchet.results import PassSignificance, PatchSummary, Comparison
+from ratchet.results import PassSignificance, CandidateSummary, Comparison
 from ratchet.types import OptimizationObjective
 
 
@@ -16,8 +16,7 @@ DEFAULT_COST_MODE_LATENCY_GUARD = 1.15
 SCORE_EQUIVALENCE_FLOOR = 0.05
 COST_EQUIVALENCE_FRACTION = 0.0
 LATENCY_EQUIVALENCE_FRACTION = 0.0
-SIGNIFICANCE_ALPHA = 0.10
-FINALIST_STATUSES = {"validated", "directional", "failed", "unstable"}
+FINALIST_STATUSES = {"validated", "failed", "unstable"}
 
 
 @dataclass(frozen=True)
@@ -30,16 +29,11 @@ class FinalGateResult:
     def validated(self) -> bool:
         return self.status == "validated"
 
-    @property
-    def directional(self) -> bool:
-        return self.status == "directional"
-
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
             "reason": self.reason,
             "validated": self.validated,
-            "directional": self.directional,
             "comparison": self.comparison.to_dict(),
         }
 
@@ -73,11 +67,11 @@ def mcnemar_pvalue(fixed: int, regressed: int) -> float:
     return tail / (2 ** n)
 
 
-def compare_summaries(reference: PatchSummary, patch_summary: PatchSummary) -> Comparison:
+def compare_summaries(reference: CandidateSummary, candidate_summary: CandidateSummary) -> Comparison:
     reference_by_id = _case_metric_rows(reference)
-    patch_by_id = _case_metric_rows(patch_summary)
+    patch_by_id = _case_metric_rows(candidate_summary)
     if set(reference_by_id) != set(patch_by_id):
-        raise ValueError("Patch summaries must cover the same cases for paired comparison.")
+        raise ValueError("Candidate summaries must cover the same cases for paired comparison.")
     case_ids = list(reference_by_id)
     score_deltas = [
         patch_by_id[case_id]["score"] - reference_by_id[case_id]["score"]
@@ -107,7 +101,7 @@ def compare_summaries(reference: PatchSummary, patch_summary: PatchSummary) -> C
         patch_by_id[case_id]["turns"] - reference_by_id[case_id]["turns"]
         for case_id in case_ids
     ]
-    flips = behavior_flip_summary(reference, patch_summary)
+    flips = behavior_flip_summary(reference, candidate_summary)
     pass_significance = PassSignificance(
         fixed_count=flips["fixed_count"],
         regressed_count=flips["regressed_count"],
@@ -131,7 +125,7 @@ def compare_summaries(reference: PatchSummary, patch_summary: PatchSummary) -> C
     )
 
 
-def _case_metric_rows(summary: PatchSummary) -> dict[str, dict[str, float]]:
+def _case_metric_rows(summary: CandidateSummary) -> dict[str, dict[str, float]]:
     rows: dict[str, dict[str, float]] = {}
     for case_id, evaluations, mean_score, _, _ in summary._case_rows():
         rows[case_id] = {
@@ -146,11 +140,11 @@ def _case_metric_rows(summary: PatchSummary) -> dict[str, dict[str, float]]:
     return rows
 
 
-def behavior_flip_summary(reference: PatchSummary, patch_summary: PatchSummary) -> dict[str, Any]:
+def behavior_flip_summary(reference: CandidateSummary, candidate_summary: CandidateSummary) -> dict[str, Any]:
     reference_rows = {case_id: case_passed for case_id, _, _, _, case_passed in reference._case_rows()}
-    patch_rows = {case_id: case_passed for case_id, _, _, _, case_passed in patch_summary._case_rows()}
+    patch_rows = {case_id: case_passed for case_id, _, _, _, case_passed in candidate_summary._case_rows()}
     if set(reference_rows) != set(patch_rows):
-        raise ValueError("Patch summaries must cover the same cases for flip comparison.")
+        raise ValueError("Candidate summaries must cover the same cases for flip comparison.")
     fixed: list[str] = []
     regressed: list[str] = []
     for case_id, reference_passed in reference_rows.items():
@@ -186,8 +180,8 @@ class GatePredicate:
 
     def constraint_reason(
         self,
-        baseline: PatchSummary,
-        candidate: PatchSummary,
+        baseline: CandidateSummary,
+        candidate: CandidateSummary,
     ) -> str | None:
         constraints = self.objective.constraints
         score_delta = candidate.mean_score - baseline.mean_score
@@ -196,14 +190,14 @@ class GatePredicate:
             required_score_delta = 0.0 if self.mode == "correctness" else -NON_INFERIORITY_MARGIN
         if score_delta + 1e-9 < required_score_delta:
             return (
-                "correctness constraint rejected patch "
+                "correctness constraint rejected candidate "
                 f"(score delta {score_delta:.4f} < required {required_score_delta:.4f})"
             )
         max_cost_ratio = constraints.max_cost_ratio
         if max_cost_ratio is not None and baseline.mean_cost_usd > 0:
             if candidate.mean_cost_usd > baseline.mean_cost_usd * max_cost_ratio:
                 return (
-                    "cost constraint rejected patch "
+                    "cost constraint rejected candidate "
                     f"(${candidate.mean_cost_usd:.6f} > {max_cost_ratio:.2f}x baseline)"
                 )
         max_latency_ratio = constraints.max_latency_ratio
@@ -215,23 +209,23 @@ class GatePredicate:
         if max_latency_ratio is not None and baseline.median_latency_s > 0:
             if candidate.median_latency_s > baseline.median_latency_s * max_latency_ratio:
                 return (
-                    "latency constraint rejected patch "
+                    "latency constraint rejected candidate "
                     f"({candidate.median_latency_s:.3f}s > {max_latency_ratio:.2f}x baseline)"
                 )
         return None
 
     def improvement_reason(
         self,
-        reference: PatchSummary,
-        candidate: PatchSummary,
+        reference: CandidateSummary,
+        candidate: CandidateSummary,
     ) -> str | None:
         if self.mode == "correctness":
+            if candidate.mean_score > reference.mean_score + NON_INFERIORITY_MARGIN:
+                return None
             if candidate.pass_count > reference.pass_count:
                 return None
             if candidate.pass_count < reference.pass_count:
-                return "correctness objective rejected pass count regression"
-            if candidate.mean_score > reference.mean_score + NON_INFERIORITY_MARGIN:
-                return None
+                return "correctness objective rejected pass count regression without material score gain"
             return "correctness objective did not improve pass count or mean score"
         if self.mode == "cost":
             if candidate.mean_score < reference.mean_score - NON_INFERIORITY_MARGIN:
@@ -247,50 +241,12 @@ class GatePredicate:
             return None
         raise ValueError(f"Unsupported optimization mode: {self.mode}")
 
-    def confidence_reason(self, comparison: Comparison) -> str | None:
-        if self.mode == "correctness":
-            sig = comparison.pass_significance
-            if sig is None:
-                return "correctness uncertainty rejected patch (missing paired pass-flip significance)"
-            if sig.p_value > SIGNIFICANCE_ALPHA:
-                return (
-                    "correctness uncertainty rejected patch "
-                    f"(fixed {sig.fixed_count}, regressed {sig.regressed_count}, "
-                    f"paired pass-flip p-value {sig.p_value:.4f} > alpha {SIGNIFICANCE_ALPHA:.2f})"
-                )
-            return None
-        if self.mode == "cost":
-            if comparison.score_ci[0] < -NON_INFERIORITY_MARGIN:
-                return (
-                    "cost uncertainty rejected correctness tradeoff "
-                    f"(score CI lower {comparison.score_ci[0]:.4f} < {-NON_INFERIORITY_MARGIN:.4f})"
-                )
-            if comparison.cost_ci[1] >= 0.0:
-                return (
-                    "cost uncertainty rejected patch "
-                    f"(cost CI upper {comparison.cost_ci[1]:.6f} >= 0.000000)"
-                )
-            return None
-        if self.mode == "latency":
-            if comparison.score_ci[0] < -NON_INFERIORITY_MARGIN:
-                return (
-                    "latency uncertainty rejected correctness tradeoff "
-                    f"(score CI lower {comparison.score_ci[0]:.4f} < {-NON_INFERIORITY_MARGIN:.4f})"
-                )
-            if comparison.latency_ci[1] >= 0.0:
-                return (
-                    "latency uncertainty rejected patch "
-                    f"(latency CI upper {comparison.latency_ci[1]:.4f} >= 0.0000)"
-                )
-            return None
-        raise ValueError(f"Unsupported optimization mode: {self.mode}")
-
     def dev_gate_reason(
         self,
         *,
-        baseline: PatchSummary,
-        reference: PatchSummary,
-        candidate: PatchSummary,
+        baseline: CandidateSummary,
+        reference: CandidateSummary,
+        candidate: CandidateSummary,
     ) -> str | None:
         reason = self.constraint_reason(baseline, candidate)
         if reason is not None:
@@ -300,8 +256,8 @@ class GatePredicate:
     def confirmation_reason(
         self,
         *,
-        baseline: PatchSummary,
-        candidate: PatchSummary,
+        baseline: CandidateSummary,
+        candidate: CandidateSummary,
         regressed_case_ids: list[str],
         comparison: Comparison | None = None,
     ) -> str | None:
@@ -316,8 +272,8 @@ class GatePredicate:
 
     def final_gate(
         self,
-        baseline: PatchSummary,
-        candidate: PatchSummary,
+        baseline: CandidateSummary,
+        candidate: CandidateSummary,
     ) -> FinalGateResult:
         comparison = compare_summaries(baseline, candidate)
         constraint_reason = self.constraint_reason(baseline, candidate)
@@ -326,20 +282,17 @@ class GatePredicate:
         improvement_reason = self.improvement_reason(baseline, candidate)
         if improvement_reason is not None:
             return FinalGateResult(status="failed", reason=improvement_reason, comparison=comparison)
-        confidence_reason = self.confidence_reason(comparison)
-        if confidence_reason is not None:
-            return FinalGateResult(status="directional", reason=confidence_reason, comparison=comparison)
         return FinalGateResult(status="validated", reason=None, comparison=comparison)
 
-    def sort_key(self, summary: PatchSummary) -> tuple[Any, ...]:
+    def sort_key(self, summary: CandidateSummary) -> tuple[Any, ...]:
         if self.mode == "correctness":
             return (
-                -summary.pass_count,
                 -summary.mean_score,
+                -summary.pass_count,
                 summary.mean_cost_usd,
                 summary.median_latency_s,
                 summary.operation_count,
-                summary.patch_hash,
+                summary.candidate_id,
             )
         if self.mode == "cost":
             return (
@@ -348,7 +301,7 @@ class GatePredicate:
                 -summary.mean_score,
                 summary.median_latency_s,
                 summary.operation_count,
-                summary.patch_hash,
+                summary.candidate_id,
             )
         return (
             summary.median_latency_s,
@@ -356,10 +309,10 @@ class GatePredicate:
             -summary.mean_score,
             summary.mean_cost_usd,
             summary.operation_count,
-            summary.patch_hash,
+            summary.candidate_id,
         )
 
-    def primary_metric(self, summary: PatchSummary) -> float:
+    def primary_metric(self, summary: CandidateSummary) -> float:
         """Higher-is-better view of the primary axis. Used for equivalence bands."""
         if self.mode == "correctness":
             return summary.mean_score
@@ -367,7 +320,7 @@ class GatePredicate:
             return -summary.mean_cost_usd
         return -summary.median_latency_s
 
-    def equivalence_margin(self, reference: PatchSummary) -> float:
+    def equivalence_margin(self, reference: CandidateSummary) -> float:
         """How wide the noise band is around the primary axis, expressed in
         the same units as ``primary_metric``."""
         if self.mode == "correctness":
@@ -377,15 +330,16 @@ class GatePredicate:
             return reference.mean_cost_usd * COST_EQUIVALENCE_FRACTION
         return reference.median_latency_s * LATENCY_EQUIVALENCE_FRACTION
 
-    def secondary_sort_key(self, summary: PatchSummary) -> tuple[Any, ...]:
+    def secondary_sort_key(self, summary: CandidateSummary) -> tuple[Any, ...]:
         """Tiebreak ordering applied within an equivalence band on the primary axis."""
         if self.mode == "correctness":
             return (
+                -summary.pass_count,
                 summary.mean_cost_usd,
                 summary.median_latency_s,
                 summary.operation_count,
                 -summary.mean_score,
-                summary.patch_hash,
+                summary.candidate_id,
             )
         if self.mode == "cost":
             return (
@@ -393,20 +347,20 @@ class GatePredicate:
                 summary.median_latency_s,
                 summary.operation_count,
                 summary.mean_cost_usd,
-                summary.patch_hash,
+                summary.candidate_id,
             )
         return (
             -summary.mean_score,
             summary.mean_cost_usd,
             summary.operation_count,
             summary.median_latency_s,
-            summary.patch_hash,
+            summary.candidate_id,
         )
 
     def select_recommended(
         self,
-        candidates: list[PatchSummary],
-    ) -> tuple[PatchSummary, dict[str, Any]]:
+        candidates: list[CandidateSummary],
+    ) -> tuple[CandidateSummary, dict[str, Any]]:
         """Pick a recommendation from already-validated candidates.
 
         Best on the primary axis wins; within an equivalence band any
@@ -431,11 +385,11 @@ class GatePredicate:
             candidates=candidates,
             policy=policy,
         )
-        if selected.patch_hash == highest_quality.patch_hash:
-            reason = f"Promoted highest-quality validated patch for {self.mode} objective."
+        if selected.candidate_id == highest_quality.candidate_id:
+            reason = f"Promoted highest-quality validated candidate for {self.mode} objective."
         else:
             reason = (
-                f"Promoted `{policy}` validated patch within primary-axis equivalence margin "
+                f"Promoted `{policy}` validated candidate within primary-axis equivalence margin "
                 f"for {self.mode} objective (margin {margin:.4f})."
             )
         variants = self._frontier_variants(
@@ -444,8 +398,8 @@ class GatePredicate:
             candidates=candidates,
         )
         return selected, {
-            "recommended_patch_hash": selected.patch_hash,
-            "highest_quality_patch_hash": highest_quality.patch_hash,
+            "recommended_candidate_id": selected.candidate_id,
+            "highest_quality_candidate_id": highest_quality.candidate_id,
             "validated_candidate_count": len(candidates),
             "equivalence_margin": margin,
             "recommendation_policy": policy,
@@ -477,11 +431,11 @@ class GatePredicate:
     def _select_by_policy(
         self,
         *,
-        highest_quality: PatchSummary,
-        equivalent: list[PatchSummary],
-        candidates: list[PatchSummary],
+        highest_quality: CandidateSummary,
+        equivalent: list[CandidateSummary],
+        candidates: list[CandidateSummary],
         policy: str,
-    ) -> PatchSummary:
+    ) -> CandidateSummary:
         if policy == "highest_correctness":
             return highest_quality
         if policy in {"lowest_cost", "lowest_cost_within_quality_margin"}:
@@ -492,7 +446,7 @@ class GatePredicate:
                     -summary.mean_score,
                     summary.median_latency_s,
                     summary.operation_count,
-                    summary.patch_hash,
+                    summary.candidate_id,
                 ),
             )
         if policy in {"lowest_latency", "lowest_latency_within_quality_margin"}:
@@ -503,7 +457,7 @@ class GatePredicate:
                     -summary.mean_score,
                     summary.mean_cost_usd,
                     summary.operation_count,
-                    summary.patch_hash,
+                    summary.candidate_id,
                 ),
             )
         if policy == "simplest_within_quality_margin":
@@ -514,7 +468,7 @@ class GatePredicate:
                     summary.mean_cost_usd,
                     summary.median_latency_s,
                     -summary.mean_score,
-                    summary.patch_hash,
+                    summary.candidate_id,
                 ),
             )
         if policy == "balanced":
@@ -524,11 +478,11 @@ class GatePredicate:
     def _frontier_variants(
         self,
         *,
-        highest_quality: PatchSummary,
-        equivalent: list[PatchSummary],
-        candidates: list[PatchSummary],
+        highest_quality: CandidateSummary,
+        equivalent: list[CandidateSummary],
+        candidates: list[CandidateSummary],
     ) -> list[dict[str, Any]]:
-        variants: list[tuple[str, PatchSummary]] = [("highest_quality", highest_quality)]
+        variants: list[tuple[str, CandidateSummary]] = [("highest_quality", highest_quality)]
         if self.mode == "correctness":
             variants.extend(
                 [
@@ -564,7 +518,7 @@ class GatePredicate:
         seen: set[tuple[str, str]] = set()
         rows: list[dict[str, Any]] = []
         for role, summary in variants:
-            key = (role, summary.patch_hash)
+            key = (role, summary.candidate_id)
             if key in seen:
                 continue
             seen.add(key)
@@ -577,93 +531,86 @@ def _predicate(objective: OptimizationObjective | None) -> GatePredicate:
 
 
 def patch_satisfies_constraints(
-    baseline: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective,
 ) -> bool:
-    return _predicate(objective).constraint_reason(baseline, patch_summary) is None
+    return _predicate(objective).constraint_reason(baseline, candidate_summary) is None
 
 
 def constraint_rejection_reason(
-    baseline: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective,
 ) -> str | None:
-    return _predicate(objective).constraint_reason(baseline, patch_summary)
+    return _predicate(objective).constraint_reason(baseline, candidate_summary)
 
 
 def objective_improved(
-    reference: PatchSummary,
-    patch_summary: PatchSummary,
+    reference: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective,
 ) -> bool:
-    return _predicate(objective).improvement_reason(reference, patch_summary) is None
+    return _predicate(objective).improvement_reason(reference, candidate_summary) is None
 
 
 def objective_rejection_reason(
-    reference: PatchSummary,
-    patch_summary: PatchSummary,
+    reference: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective,
 ) -> str | None:
-    return _predicate(objective).improvement_reason(reference, patch_summary)
+    return _predicate(objective).improvement_reason(reference, candidate_summary)
 
 
-def patch_rejection_reason(
+def candidate_rejection_reason(
     *,
-    baseline: PatchSummary,
-    reference: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    reference: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective,
 ) -> str | None:
     predicate = _predicate(objective)
     return predicate.dev_gate_reason(
         baseline=baseline,
         reference=reference,
-        candidate=patch_summary,
+        candidate=candidate_summary,
     )
 
 
-def objective_sort_key(summary: PatchSummary, objective: OptimizationObjective) -> tuple[Any, ...]:
+def objective_sort_key(summary: CandidateSummary, objective: OptimizationObjective) -> tuple[Any, ...]:
     return _predicate(objective).sort_key(summary)
 
 
 def final_gate(
-    baseline: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective | None = None,
 ) -> tuple[bool, Comparison]:
-    gate = _predicate(objective).final_gate(baseline, patch_summary)
+    gate = _predicate(objective).final_gate(baseline, candidate_summary)
     return gate.validated, gate.comparison
 
 
 def final_gate_rejection_reason(
-    baseline: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective | None = None,
 ) -> tuple[str | None, Comparison]:
-    gate = _predicate(objective).final_gate(baseline, patch_summary)
+    gate = _predicate(objective).final_gate(baseline, candidate_summary)
     return (None if gate.validated else gate.reason), gate.comparison
 
 
 def final_gate_status(
-    baseline: PatchSummary,
-    patch_summary: PatchSummary,
+    baseline: CandidateSummary,
+    candidate_summary: CandidateSummary,
     objective: OptimizationObjective | None = None,
 ) -> FinalGateResult:
-    return _predicate(objective).final_gate(baseline, patch_summary)
+    return _predicate(objective).final_gate(baseline, candidate_summary)
 
 
-def uncertainty_rejection_reason(
-    comparison: Comparison,
+def select_recommended_candidate(
+    candidates: list[CandidateSummary],
     objective: OptimizationObjective,
-) -> str | None:
-    return _predicate(objective).confidence_reason(comparison)
-
-
-def select_recommended_patch(
-    candidates: list[PatchSummary],
-    objective: OptimizationObjective,
-) -> tuple[PatchSummary, dict[str, Any]]:
+) -> tuple[CandidateSummary, dict[str, Any]]:
     return _predicate(objective).select_recommended(candidates)
 
 
@@ -671,10 +618,10 @@ def _normalize_policy_token(value: str) -> str:
     return str(value).strip().lower().replace("-", "_")
 
 
-def _frontier_variant_row(role: str, summary: PatchSummary) -> dict[str, Any]:
+def _frontier_variant_row(role: str, summary: CandidateSummary) -> dict[str, Any]:
     return {
         "role": role,
-        "patch_hash": summary.patch_hash,
+        "candidate_id": summary.candidate_id,
         "pass_count": summary.pass_count,
         "case_count": summary.case_count,
         "mean_score": summary.mean_score,
@@ -684,13 +631,22 @@ def _frontier_variant_row(role: str, summary: PatchSummary) -> dict[str, Any]:
         "operation_count": summary.operation_count,
         "operations": [
             {
-                "op": operation.op,
-                "target": operation.target,
-                "value_summary": _operation_value_summary(operation.value),
+                "op": transform.op.op,
+                "hook": transform.hook,
+                "target": _transform_target(transform.to_dict()),
+                "value_summary": _operation_value_summary(transform.op.params),
             }
-            for operation in summary.patch.operations
+            for transform in (summary.candidate.program.patches if summary.candidate is not None else ())
         ],
     }
+
+
+def _transform_target(payload: dict[str, Any]) -> str:
+    for key in ("section", "field", "target", "tool"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return str(payload.get("hook") or "global")
 
 
 def _operation_value_summary(value: Any) -> Any:
@@ -703,8 +659,8 @@ def _operation_value_summary(value: Any) -> Any:
     return value
 
 
-def pareto_frontier(summaries: list[PatchSummary]) -> list[dict[str, Any]]:
-    frontier: list[PatchSummary] = []
+def pareto_frontier(summaries: list[CandidateSummary]) -> list[dict[str, Any]]:
+    frontier: list[CandidateSummary] = []
     for summary in summaries:
         dominated = False
         for other in summaries:

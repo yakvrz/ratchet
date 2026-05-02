@@ -12,7 +12,8 @@ from ratchet.scaffold import init_scaffold
 from ratchet.preflight import run_preflight_check
 from ratchet.config import RatchetConfigError, load_run_config, resolve_run_config
 from ratchet.__main__ import CliProgressPrinter
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 FUNCTION_AGENT_BODY = """from __future__ import annotations
@@ -20,32 +21,36 @@ FUNCTION_AGENT_BODY = """from __future__ import annotations
 from typing import Any
 
 
-def run_agent(spec: dict[str, Any], case_payload: dict[str, Any]) -> dict[str, Any]:
-    expected = str(case_payload["expected"])
-    cheaper = spec["model"] == "cheaper"
-    grounded = "grounded" in " ".join(spec.get("instructions", {}).values()).lower()
-    total_tokens = 180
-    cost_usd = 0.009
-    latency_s = 1.3
-    if cheaper:
-        total_tokens -= 60
-        cost_usd -= 0.005
-        latency_s -= 0.2
-    if grounded:
-        total_tokens -= 35
-        cost_usd -= 0.001
-        latency_s -= 0.1
-    output = expected if grounded else "wrong"
-    return {
-        "output": output,
-        "raw_output_text": output,
-        "tool_calls": [],
-        "latency_s": latency_s,
-        "input_tokens": total_tokens // 2,
-        "output_tokens": total_tokens // 2,
-        "total_tokens": total_tokens,
-        "cost_usd": cost_usd,
-    }
+class Usage:
+    input_tokens = 90
+    output_tokens = 14
+
+
+class Response:
+    usage = Usage()
+    output = []
+    finish_reason = "stop"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+
+
+class Client:
+    def create_response(self, **kwargs: Any) -> Response:
+        answers = {"first": "alpha", "second": "beta", "third": "gamma", "fourth": "delta"}
+        return Response(answers[str(kwargs["input"])])
+
+
+def build_model_input(case_payload: dict[str, Any]) -> Any:
+    return case_payload["input"]
+
+
+def parse_model_output(raw_output_text: str) -> object:
+    return raw_output_text.strip()
+
+
+def create_model_client() -> object:
+    return Client()
 """
 
 
@@ -57,39 +62,36 @@ from typing import Any
 
 
 def run_agent(spec: dict[str, Any], case_payload: dict[str, Any]) -> dict[str, Any]:
-    expected = str(case_payload["expected"])
-    cheaper = spec["model"] == "cheaper"
-    grounded = "grounded" in " ".join(spec.get("instructions", {}).values()).lower()
-    total_tokens = 200
-    cost_usd = 0.011
-    latency_s = 1.4
-    if cheaper:
-        total_tokens -= 70
-        cost_usd -= 0.006
-        latency_s -= 0.25
-    if grounded:
-        total_tokens -= 45
-        cost_usd -= 0.001
-        latency_s -= 0.1
-    output = expected if grounded else "wrong"
-    return {
-        "output": output,
-        "raw_output_text": output,
-        "tool_calls": [],
-        "latency_s": latency_s,
-        "input_tokens": total_tokens // 2,
-        "output_tokens": total_tokens // 2,
-        "total_tokens": total_tokens,
-        "cost_usd": cost_usd,
-    }
+    return {"input": case_payload["input"]}
+
+
+class Usage:
+    input_tokens = 100
+    output_tokens = 16
+
+
+class Response:
+    usage = Usage()
+    output = []
+    finish_reason = "stop"
+
+    def __init__(self, output_text: str) -> None:
+        self.output_text = output_text
+
+
+class Client:
+    def create_response(self, **kwargs: Any) -> Response:
+        answers = {"first": "alpha", "second": "beta", "third": "gamma", "fourth": "delta"}
+        return Response(answers[str(kwargs["input"])])
+
+
+def create_model_client() -> object:
+    return Client()
 
 
 def main() -> None:
     request = json.loads(sys.stdin.read())
-    response = run_agent(
-        spec=dict(request["spec"]),
-        case_payload=dict(request["case"]),
-    )
+    response = run_agent({}, dict(request["case"]))
     sys.stdout.write(json.dumps(response, sort_keys=True))
 
 
@@ -102,20 +104,21 @@ BROKEN_ADAPTER_BODY = """from __future__ import annotations
 
 from pathlib import Path
 
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, EvalCase, GradeResult
 
 
 class BrokenAdapter:
     def agent_spec(self) -> AgentSpec:
         return AgentSpec(name="broken", model="primary")
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> dict[str, str]:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> dict[str, str]:
         return {"output": "wrong"}
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0, passed=True, labels=[])
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         Path(out_dir).mkdir(parents=True, exist_ok=True)
 
 
@@ -132,7 +135,7 @@ class IgnoringExportAdapter:
             output_contract="Return text.",
         )
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         return RunRecord(
             output=str(case.expected),
             metrics=OperationalMetrics(
@@ -147,9 +150,36 @@ class IgnoringExportAdapter:
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         return GradeResult(score=1.0, passed=True)
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate | None, out_dir: Path) -> None:
         out_dir.mkdir(parents=True, exist_ok=True)
-        (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), sort_keys=True))
+        (out_dir / "candidate.json").write_text(json.dumps(candidate.to_dict() if candidate else None, sort_keys=True))
+
+
+class CandidateAwareExportAdapter(IgnoringExportAdapter):
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
+        if candidate is not None:
+            return RunRecord(
+                output={"message": "RATCHET_TRANSFORM_SENTINEL_RESPONSE"},
+                metrics=OperationalMetrics(
+                    latency_s=0.0,
+                    input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=0,
+                    cost_usd=0.0,
+                ),
+                diagnostics=DiagnosticTrace(
+                    metadata={
+                        "transform_trace": [
+                            {
+                                "hook": "before_user_response",
+                                "op": "rewrite_response",
+                                "fields": {"message": "RATCHET_TRANSFORM_SENTINEL_RESPONSE"},
+                            }
+                        ]
+                    }
+                ),
+            )
+        return super().run_case(case, candidate)
 
 
 class NoneAgentSpecAdapter(IgnoringExportAdapter):
@@ -213,9 +243,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(run_line)
-        self.assertIn("[00:03] Setup", run_line)
-        self.assertIn("train=20, dev=30, holdout=10", run_line)
-        self.assertIn("concurrency=4/12", run_line)
+        self.assertIn("[00:03] Run", run_line)
+        self.assertIn("60 cases for correctness", run_line)
+        self.assertIn("train 20, dev 30, holdout 10", run_line)
+        self.assertIn("candidate budget dev 8, holdout 2", run_line)
 
         proposal_line = printer.format(
             {
@@ -236,32 +267,73 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(proposal_line)
-        self.assertIn("Implement", proposal_line)
-        self.assertIn("returned 5 candidate(s): 4 valid, 1 invalid", proposal_line)
-        self.assertIn("model=gemini-3-flash-preview", proposal_line)
-        self.assertIn("tokens=1200/300", proposal_line)
+        self.assertIn("Build", proposal_line)
+        self.assertIn("5 candidates, 4 compiled, 1 contract failures", proposal_line)
+        self.assertIn("gemini-3-flash-preview", proposal_line)
+        self.assertIn("1500 tokens", proposal_line)
 
         candidate_line = printer.format(
             {
                 "event": "candidate_evaluated",
                 "elapsed_s": 125,
                 "frontier_status": "screened_out",
-                "transform_family": "targeted_few_shot",
-                "patch_hash": "abcdef123456",
+                "surface_mechanism": "surface_examples",
+                "candidate_id": "abcdef123456",
                 "score_delta": 0.125,
                 "cost_delta": -0.002,
                 "latency_delta": 0.31,
+                "fixed_count": 3,
+                "regressed_count": 1,
                 "stage_count": 2,
                 "full_dev_evaluated": False,
                 "rejection_reason": "small-dev regression",
             }
         )
         self.assertIsNotNone(candidate_line)
-        self.assertIn("Candidate", candidate_line)
-        self.assertIn("patch=abcdef12", candidate_line)
+        self.assertIn("Learn", candidate_line)
+        self.assertIn("abcdef12", candidate_line)
         self.assertIn("score +0.125", candidate_line)
         self.assertIn("cost -$0.0020", candidate_line)
-        self.assertIn("full_dev=no", candidate_line)
+        self.assertIn("fixed 3, regressed 1", candidate_line)
+        self.assertIn("full-dev no", candidate_line)
+
+        evidence_line = printer.format(
+            {
+                "event": "evidence_packet_ready",
+                "elapsed_s": 40,
+                "weak_slices": ["ambiguity", "cancel"],
+                "residual_failure_modes": ["tool_trajectory", "weak_slices"],
+                "tool_error_case_count": 8,
+                "invalid_output_count": 0,
+            }
+        )
+        self.assertIsNotNone(evidence_line)
+        self.assertIn("Diagnose", evidence_line)
+        self.assertIn("weak slices ambiguity, cancel", evidence_line)
+        self.assertIn("8 tool-error cases", evidence_line)
+
+        plan_line = printer.format(
+            {
+                "event": "search_plan_ready",
+                "elapsed_s": 50,
+                "diagnosis": "The agent mutates orders before inspecting them and guesses on ambiguous requests.",
+                "briefs": [
+                    {
+                        "brief_id": "inspect-before-mutate",
+                        "mechanism_class": "surface_tool_loop",
+                        "target_slices": ["cancel", "address"],
+                        "priority": 1,
+                    }
+                ],
+            }
+        )
+        self.assertIsNotNone(plan_line)
+        self.assertIn("Plan", plan_line)
+        self.assertIn("thinks The agent mutates", plan_line)
+        self.assertIn("inspect-before-mutate", plan_line)
+
+        batch_line = printer.format({"event": "case_batch_started", "elapsed_s": 80, "fresh_count": 12})
+        self.assertIsNone(batch_line)
 
     def test_check_fails_clearly_on_invalid_adapter_wiring(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,7 +360,20 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertEqual(context.exception.returncode, 3)
             self.assertIn("run_case returned dict", context.exception.stderr)
 
-    def test_check_fails_when_export_does_not_materialize_generated_targets(self) -> None:
+    def test_check_accepts_compiled_candidate_export_surface(self) -> None:
+        cases = (
+            EvalCase(id="dev-1", split="dev", input="x", expected="x"),
+            EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
+        )
+        run_preflight_check(
+            adapter_spec="tests.test_cli_config:adapter",
+            adapter=CandidateAwareExportAdapter(),
+            cases=cases,
+            objective=OptimizationObjective(),
+            sample_limit=2,
+        )
+
+    def test_check_rejects_adapter_that_exports_but_ignores_candidate_execution(self) -> None:
         cases = (
             EvalCase(id="dev-1", split="dev", input="x", expected="x"),
             EvalCase(id="hold-1", split="holdout", input="y", expected="y"),
@@ -354,16 +439,17 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.run_cli("optimize", "--config", str(config_path))
             out_dir = root / "results" / "run"
             manifest = json.loads((out_dir / "run_manifest.json").read_text())
-            selected = json.loads((out_dir / "selected_patch.json").read_text())
+            selected = json.loads((out_dir / "selected_candidate.json").read_text())
             summary = (out_dir / "summary.html").read_text()
             report = (out_dir / "report.md").read_text()
-            self.assertIn("selected_patch_hash", manifest)
+            self.assertIn("selected_candidate_id", manifest)
+            self.assertEqual(manifest["simplification_results"], [])
             self.assertFalse(selected["promoted"])
-            applied = json.loads((out_dir / "exported_patch" / "agent_spec.json").read_text())
-            self.assertNotIn("grounded", " ".join(applied["instructions"].values()).lower())
+            exported_surface = json.loads((out_dir / "exported_candidate" / "surface_spec.json").read_text())
+            self.assertEqual(exported_surface["agent_id"], "scaffolded-python-function-agent")
             self.assertIn("<h2>What Changed</h2>", summary)
             self.assertIn('src="plots/scorecard.svg"', summary)
-            self.assertIn("## Selected Patch", report)
+            self.assertIn("## Selected Candidate", report)
 
     def test_sanitize_examples_can_be_configured_and_overridden(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -377,6 +463,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     adapter = "pkg.module:adapter"
                     evals = "evals.jsonl"
                     out = "results/run"
+                    case_timeout_s = 0
                     stage_case_concurrency = 12
                     sanitize_examples = true
                     """
@@ -395,7 +482,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 holdout_budget=None,
                 objective_mode=None,
                 allowed_models=None,
-                allowed_edits=None,
                 optimizer_model=None,
                 optimizer_reasoning=None,
                 samples_per_case=None,
@@ -407,6 +493,26 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 sanitize_examples=False,
             )
             self.assertFalse(overridden.objective.constraints.sanitize_examples)
+
+    def test_config_rejects_hard_timeout_with_threaded_case_concurrency(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    case_timeout_s = 180
+                    case_concurrency = 2
+                    """
+                ).strip()
+            )
+            with self.assertRaisesRegex(RatchetConfigError, "case_timeout_s requires serial case execution"):
+                load_run_config(config_path)
 
     def test_measurement_budgets_replace_expensive_candidate_caps(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -494,13 +600,9 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     out = "results/run"
                     optimizer_model = "default-model"
                     optimizer_reasoning = "medium"
-                    diagnoser_model = "diagnoser-model"
-                    research_theorist_model = "theorist-model"
-                    research_theorist_reasoning = "high"
-                    research_planner_reasoning = "high"
+                    search_planner_model = "planner-model"
+                    search_planner_reasoning = "high"
                     candidate_implementer_model = "implementer-model"
-                    measurement_selector_model = "selector-model"
-                    measurement_selector_reasoning = "low"
                     """
                 ).strip()
             )
@@ -509,21 +611,15 @@ class CliConfigIntegrationTests(unittest.TestCase):
             self.assertEqual(
                 loaded.optimizer_role_models(),
                 {
-                    "diagnoser": "diagnoser-model",
-                    "research_theorist": "theorist-model",
-                    "research_planner": "default-model",
+                    "search_planner": "planner-model",
                     "candidate_implementer": "implementer-model",
-                    "measurement_selector": "selector-model",
                 },
             )
             self.assertEqual(
                 loaded.optimizer_role_reasoning(),
                 {
-                    "diagnoser": "medium",
-                    "research_theorist": "high",
-                    "research_planner": "high",
+                    "search_planner": "high",
                     "candidate_implementer": "medium",
-                    "measurement_selector": "low",
                 },
             )
 
@@ -537,7 +633,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 holdout_budget=None,
                 objective_mode=None,
                 allowed_models=None,
-                allowed_edits=None,
                 optimizer_model=None,
                 optimizer_reasoning=None,
                 samples_per_case=None,
@@ -549,6 +644,26 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 candidate_implementer_model="override-implementer",
             )
             self.assertEqual(overridden.optimizer_role_models()["candidate_implementer"], "override-implementer")
+
+    def test_config_rejects_removed_optimizer_role_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "evals.jsonl").write_text("")
+            config_path = root / "ratchet.toml"
+            config_path.write_text(
+                textwrap.dedent(
+                    """
+                    [ratchet]
+                    adapter = "pkg.module:adapter"
+                    evals = "evals.jsonl"
+                    out = "results/run"
+                    diagnoser_model = "removed"
+                    """
+                ).strip()
+            )
+
+            with self.assertRaisesRegex(RatchetConfigError, "diagnoser_model"):
+                load_run_config(config_path)
 
     def test_config_rejects_unknown_top_level_key(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -637,7 +752,6 @@ class CliConfigIntegrationTests(unittest.TestCase):
                     mode = "correctness"
 
                     [ratchet.objective.constraints]
-                    allowed_edits = ["instruction"]
                     typo_ratio = 2.0
                     """
                 ).strip()
@@ -655,7 +769,7 @@ class CliConfigIntegrationTests(unittest.TestCase):
             config_path.write_text(config_path.read_text().replace("dev_budget = 8", "dev_budget = 0"))
             self.run_cli("optimize", "--config", str(config_path))
             out_dir = root / "results" / "run"
-            selected = json.loads((out_dir / "selected_patch.json").read_text())
+            selected = json.loads((out_dir / "selected_candidate.json").read_text())
             self.assertFalse(selected["promoted"])
 
 

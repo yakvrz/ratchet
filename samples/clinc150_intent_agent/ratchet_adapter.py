@@ -1,17 +1,20 @@
 from __future__ import annotations
 
-import json
 import os
-from pathlib import Path
 
-from ratchet.model_client import ResponsesModelClient
-from ratchet.rendering import render_few_shot_prompt
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord, TargetSemantics
+from ratchet.adapter_generation import (
+    GeneratedSingleCallAdapter,
+    ModelRequest,
+    context_graph_from_spec,
+    model_config_from_spec,
+)
+from ratchet.grading import extract_json_payload
+from ratchet.types import AgentSpec, EvalCase, GradeResult, TargetSemantics
 
 try:
-    from agent import CLINC150_LABELS, Clinc150IntentRunner
+    from agent import CLINC150_LABELS, Clinc150AgentConfig, _extract_label
 except ModuleNotFoundError:
-    from .agent import CLINC150_LABELS, Clinc150IntentRunner
+    from .agent import CLINC150_LABELS, Clinc150AgentConfig, _extract_label
 
 
 BASE_SPEC = AgentSpec(
@@ -205,39 +208,36 @@ BASE_SPEC = AgentSpec(
 )
 
 
-def agent_config_from_spec(spec: AgentSpec) -> dict[str, str]:
-    return {
-        "model": spec.model,
-        "reasoning_effort": str(spec.runtime.get("reasoning_effort", "low")),
-        "output_cap": str(spec.runtime.get("output_cap", 512)),
-        "task_rule": spec.instructions.get("task_rule", ""),
-        "label_rule": spec.instructions.get("label_rule", ""),
-        "label_descriptions": spec.instructions.get("label_descriptions", ""),
-        "label_aliases": spec.instructions.get("label_aliases", ""),
-        "confusable_label_rules": spec.instructions.get("confusable_label_rules", ""),
-        "decision_rule": spec.instructions.get("decision_rule", ""),
-        "output_rule": spec.instructions.get("output_rule", ""),
-        "few_shot": render_few_shot_prompt(spec.few_shot),
-    }
-
-
-class Clinc150IntentAdapter:
-    def __init__(
-        self,
-        env_path: str | None = None,
-        runner: Clinc150IntentRunner | None = None,
-    ) -> None:
-        self.env_path = env_path or os.environ.get("RATCHET_ENV_FILE", ".env")
-        self._runner = runner
-
+class Clinc150IntentHarness:
     def agent_spec(self) -> AgentSpec:
         return BASE_SPEC
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
-        if self._runner is None:
-            client = ResponsesModelClient(env_path=self.env_path)
-            self._runner = Clinc150IntentRunner(client=client)
-        return self._runner.run_case(agent_config_from_spec(BASE_SPEC.apply_patch(patch)), case)
+    def build_model_request(self, spec: AgentSpec, case: EvalCase) -> ModelRequest:
+        config = Clinc150AgentConfig.from_agent_config(_agent_config_from_spec(spec))
+        return ModelRequest(
+            context=context_graph_from_spec(
+                spec,
+                section_order=[
+                    "task_rule",
+                    "label_rule",
+                    "label_descriptions",
+                    "label_aliases",
+                    "confusable_label_rules",
+                    "decision_rule",
+                    "output_rule",
+                ],
+            ),
+            input=str(case.input),
+            model_config=model_config_from_spec(spec),
+            text=config.text_config(),
+        )
+
+    def parse_output(self, raw_output_text: str) -> object:
+        payload = extract_json_payload(raw_output_text)
+        if isinstance(payload, dict):
+            return payload
+        label = _extract_label(raw_output_text)
+        return {"label": label} if label is not None else {"label": "invalid", "invalid_output": raw_output_text}
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         expected = case.expected
@@ -263,12 +263,31 @@ class Clinc150IntentAdapter:
             notes=f"actual={actual!r} expected={expected_label!r}",
         )
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
-        out_dir.mkdir(parents=True, exist_ok=True)
-        spec = BASE_SPEC.apply_patch(patch)
-        (out_dir / "patch.json").write_text(json.dumps(patch.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "agent_spec.json").write_text(json.dumps(spec.to_dict(), indent=2, sort_keys=True))
-        (out_dir / "agent_config.json").write_text(json.dumps(agent_config_from_spec(spec), indent=2, sort_keys=True))
+class Clinc150IntentAdapter(GeneratedSingleCallAdapter):
+    def __init__(self, env_path: str | None = None, client: object | None = None, runner: object | None = None) -> None:
+        if client is None and runner is not None:
+            client = getattr(runner, "client", None)
+        super().__init__(
+            harness=Clinc150IntentHarness(),
+            env_path=env_path or os.environ.get("RATCHET_ENV_FILE", ".env"),
+            client=client,
+        )
+
+
+def _agent_config_from_spec(spec: AgentSpec) -> dict[str, str]:
+    return {
+        "model": spec.model,
+        "reasoning_effort": str(spec.runtime.get("reasoning_effort", "low")),
+        "output_cap": str(spec.runtime.get("output_cap", 512)),
+        "task_rule": spec.instructions.get("task_rule", ""),
+        "label_rule": spec.instructions.get("label_rule", ""),
+        "label_descriptions": spec.instructions.get("label_descriptions", ""),
+        "label_aliases": spec.instructions.get("label_aliases", ""),
+        "confusable_label_rules": spec.instructions.get("confusable_label_rules", ""),
+        "decision_rule": spec.instructions.get("decision_rule", ""),
+        "output_rule": spec.instructions.get("output_rule", ""),
+        "few_shot": "",
+    }
 
 
 adapter = Clinc150IntentAdapter()

@@ -25,20 +25,13 @@ RUN_CONFIG_KEYS = {
     "objective",
     "mode",
     "allowed_models",
-    "allowed_edits",
     "sanitize_examples",
     "optimizer_model",
     "optimizer_reasoning",
-    "diagnoser_model",
-    "diagnoser_reasoning",
-    "research_theorist_model",
-    "research_theorist_reasoning",
-    "research_planner_model",
-    "research_planner_reasoning",
+    "search_planner_model",
+    "search_planner_reasoning",
     "candidate_implementer_model",
     "candidate_implementer_reasoning",
-    "measurement_selector_model",
-    "measurement_selector_reasoning",
     "samples_per_case",
     "case_concurrency",
     "stage_case_concurrency",
@@ -70,7 +63,6 @@ EVAL_HEALTH_KEYS = {
     "max_estimated_eval_tokens",
 }
 CONSTRAINT_KEYS = {
-    "allowed_edits",
     "allowed_models",
     "max_cost_ratio",
     "max_latency_ratio",
@@ -168,16 +160,10 @@ class RatchetRunConfig:
     objective: OptimizationObjective = field(default_factory=OptimizationObjective)
     optimizer_model: str = "gpt-5.4"
     optimizer_reasoning: str = "medium"
-    diagnoser_model: str | None = None
-    diagnoser_reasoning: str | None = None
-    research_theorist_model: str | None = None
-    research_theorist_reasoning: str | None = None
-    research_planner_model: str | None = None
-    research_planner_reasoning: str | None = None
+    search_planner_model: str | None = None
+    search_planner_reasoning: str | None = None
     candidate_implementer_model: str | None = None
     candidate_implementer_reasoning: str | None = None
-    measurement_selector_model: str | None = None
-    measurement_selector_reasoning: str | None = None
     samples_per_case: int = 1
     case_concurrency: int = 1
     stage_case_concurrency: int | None = None
@@ -201,6 +187,12 @@ class RatchetRunConfig:
             raise RatchetConfigError("case_concurrency must be positive.")
         if self.stage_case_concurrency is not None and self.stage_case_concurrency <= 0:
             raise RatchetConfigError("stage_case_concurrency must be positive when set.")
+        effective_stage_concurrency = self.stage_case_concurrency or self.case_concurrency
+        if self.case_timeout_s > 0 and (self.case_concurrency > 1 or effective_stage_concurrency > 1):
+            raise RatchetConfigError(
+                "case_timeout_s requires serial case execution; set case_timeout_s = 0 to use "
+                "case_concurrency or stage_case_concurrency above 1."
+            )
         for name in ("max_dev_measurement_cost_usd", "max_holdout_measurement_cost_usd"):
             value = getattr(self, name)
             if value is not None and value < 0:
@@ -253,20 +245,14 @@ class RatchetRunConfig:
 
     def optimizer_role_models(self) -> dict[str, str]:
         return {
-            "diagnoser": self.diagnoser_model or self.optimizer_model,
-            "research_theorist": self.research_theorist_model or self.optimizer_model,
-            "research_planner": self.research_planner_model or self.optimizer_model,
+            "search_planner": self.search_planner_model or self.optimizer_model,
             "candidate_implementer": self.candidate_implementer_model or self.optimizer_model,
-            "measurement_selector": self.measurement_selector_model or self.optimizer_model,
         }
 
     def optimizer_role_reasoning(self) -> dict[str, str]:
         return {
-            "diagnoser": self.diagnoser_reasoning or self.optimizer_reasoning,
-            "research_theorist": self.research_theorist_reasoning or self.optimizer_reasoning,
-            "research_planner": self.research_planner_reasoning or self.optimizer_reasoning,
+            "search_planner": self.search_planner_reasoning or self.optimizer_reasoning,
             "candidate_implementer": self.candidate_implementer_reasoning or self.optimizer_reasoning,
-            "measurement_selector": self.measurement_selector_reasoning or self.optimizer_reasoning,
         }
 
 
@@ -301,8 +287,6 @@ def _objective_from_payload(payload: dict[str, Any]) -> OptimizationObjective:
     _reject_unknown_keys(constraints, CONSTRAINT_KEYS, "ratchet.objective.constraints")
     if "allowed_models" in payload:
         constraints["allowed_models"] = payload["allowed_models"]
-    if "allowed_edits" in payload:
-        constraints["allowed_edits"] = payload["allowed_edits"]
     if "sanitize_examples" in payload:
         constraints["sanitize_examples"] = payload["sanitize_examples"]
     raw_objective["constraints"] = constraints
@@ -336,16 +320,10 @@ def load_run_config(path: str | Path) -> RatchetRunConfig:
         objective=_objective_from_payload(payload),
         optimizer_model=str(payload.get("optimizer_model", "gpt-5.4")),
         optimizer_reasoning=str(payload.get("optimizer_reasoning", "medium")),
-        diagnoser_model=_optional_str(payload.get("diagnoser_model")),
-        diagnoser_reasoning=_optional_str(payload.get("diagnoser_reasoning")),
-        research_theorist_model=_optional_str(payload.get("research_theorist_model")),
-        research_theorist_reasoning=_optional_str(payload.get("research_theorist_reasoning")),
-        research_planner_model=_optional_str(payload.get("research_planner_model")),
-        research_planner_reasoning=_optional_str(payload.get("research_planner_reasoning")),
+        search_planner_model=_optional_str(payload.get("search_planner_model")),
+        search_planner_reasoning=_optional_str(payload.get("search_planner_reasoning")),
         candidate_implementer_model=_optional_str(payload.get("candidate_implementer_model")),
         candidate_implementer_reasoning=_optional_str(payload.get("candidate_implementer_reasoning")),
-        measurement_selector_model=_optional_str(payload.get("measurement_selector_model")),
-        measurement_selector_reasoning=_optional_str(payload.get("measurement_selector_reasoning")),
         samples_per_case=int(payload.get("samples_per_case", 1)),
         case_concurrency=int(payload.get("case_concurrency", 1)),
         stage_case_concurrency=_optional_int(payload.get("stage_case_concurrency")),
@@ -399,7 +377,6 @@ def resolve_run_config(
     holdout_budget: int | None,
     objective_mode: str | None,
     allowed_models: list[str] | None,
-    allowed_edits: list[str] | None,
     optimizer_model: str | None,
     optimizer_reasoning: str | None,
     samples_per_case: int | None,
@@ -416,16 +393,10 @@ def resolve_run_config(
     max_holdout_measurement_tool_calls: int | None = None,
     max_dev_measurement_turns: int | None = None,
     max_holdout_measurement_turns: int | None = None,
-    diagnoser_model: str | None = None,
-    diagnoser_reasoning: str | None = None,
-    research_theorist_model: str | None = None,
-    research_theorist_reasoning: str | None = None,
-    research_planner_model: str | None = None,
-    research_planner_reasoning: str | None = None,
+    search_planner_model: str | None = None,
+    search_planner_reasoning: str | None = None,
     candidate_implementer_model: str | None = None,
     candidate_implementer_reasoning: str | None = None,
-    measurement_selector_model: str | None = None,
-    measurement_selector_reasoning: str | None = None,
 ) -> RatchetRunConfig:
     if config_path is not None:
         base = load_run_config(config_path)
@@ -441,8 +412,6 @@ def resolve_run_config(
     constraints_payload = base.objective.constraints.to_dict()
     if allowed_models is not None:
         constraints_payload["allowed_models"] = allowed_models
-    if allowed_edits is not None:
-        constraints_payload["allowed_edits"] = allowed_edits
     if sanitize_examples is not None:
         constraints_payload["sanitize_examples"] = sanitize_examples
     objective = OptimizationObjective(
@@ -460,16 +429,10 @@ def resolve_run_config(
         objective=objective,
         optimizer_model=optimizer_model or base.optimizer_model,
         optimizer_reasoning=optimizer_reasoning or base.optimizer_reasoning,
-        diagnoser_model=diagnoser_model or base.diagnoser_model,
-        diagnoser_reasoning=diagnoser_reasoning or base.diagnoser_reasoning,
-        research_theorist_model=research_theorist_model or base.research_theorist_model,
-        research_theorist_reasoning=research_theorist_reasoning or base.research_theorist_reasoning,
-        research_planner_model=research_planner_model or base.research_planner_model,
-        research_planner_reasoning=research_planner_reasoning or base.research_planner_reasoning,
+        search_planner_model=search_planner_model or base.search_planner_model,
+        search_planner_reasoning=search_planner_reasoning or base.search_planner_reasoning,
         candidate_implementer_model=candidate_implementer_model or base.candidate_implementer_model,
         candidate_implementer_reasoning=candidate_implementer_reasoning or base.candidate_implementer_reasoning,
-        measurement_selector_model=measurement_selector_model or base.measurement_selector_model,
-        measurement_selector_reasoning=measurement_selector_reasoning or base.measurement_selector_reasoning,
         samples_per_case=samples_per_case if samples_per_case is not None else base.samples_per_case,
         case_concurrency=case_concurrency if case_concurrency is not None else base.case_concurrency,
         stage_case_concurrency=(

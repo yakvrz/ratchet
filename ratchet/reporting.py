@@ -9,23 +9,38 @@ from typing import Any
 from ratchet.adapters import AdapterProtocol
 from ratchet.io import write_json, write_jsonl
 from ratchet.objectives import compare_summaries
-from ratchet.results import PatchSummary, OptimizerStats, RatchetResult
-from ratchet.types import AgentPatch, OptimizationObjective
+from ratchet.results import CandidateSummary, OptimizerStats, RatchetResult
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import OptimizationObjective
+
+
+def _summary_dict(summary: CandidateSummary | None) -> dict[str, Any] | None:
+    return summary.to_dict() if summary is not None else None
+
+
+def _metric_text(summary: CandidateSummary | None, field: str, *, currency: bool = False) -> str:
+    if summary is None:
+        return "not measured"
+    value = float(getattr(summary, field))
+    if currency:
+        return f"${value:.6f}"
+    return f"{value:.3f}"
 
 
 def build_outcome_analysis(
     *,
     objective: OptimizationObjective,
     promoted: bool,
-    baseline_dev: PatchSummary,
-    accepted_dev_patches: list[PatchSummary],
-    holdout_patches: list[PatchSummary],
-    decision_log: list[dict[str, Any]],
+    baseline_dev: CandidateSummary,
+    accepted_dev_candidates: list[CandidateSummary],
+    holdout_candidates: list[CandidateSummary],
+    events: list[dict[str, Any]],
     finalist_statuses: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    proposal_iterations = [event for event in decision_log if event.get("type") == "proposal_iteration"]
-    proposal_evaluations = [event for event in decision_log if event.get("type") == "proposal_evaluation"]
-    holdout_validations = [event for event in decision_log if event.get("type") == "holdout_validation"]
+    proposal_iterations = [event for event in events if event.get("type") == "proposal_iteration"]
+    proposal_evaluations = [event for event in events if event.get("type") == "proposal_evaluation"]
+    holdout_validations = [event for event in events if event.get("type") == "holdout_validation"]
+    search_plan_events = [event for event in events if event.get("type") == "search_plan"]
     dev_rejection_reasons: Counter[str] = Counter(
         str(event.get("rejection_reason"))
         for event in proposal_evaluations
@@ -43,7 +58,8 @@ def build_outcome_analysis(
     )
     latest_iteration = proposal_iterations[-1] if proposal_iterations else {}
     latest_stats = dict(latest_iteration.get("proposal_stats") or {})
-    diagnosis_analysis = str(latest_iteration.get("diagnosis_analysis", ""))
+    latest_search_plan = search_plan_events[-1].get("search_plan", {}) if search_plan_events else {}
+    search_plan_diagnosis = str(latest_search_plan.get("diagnosis", ""))
     proposal_analysis = str(latest_iteration.get("proposal_analysis", ""))
     finalist_status_rows = list(finalist_statuses or [])
     if not finalist_status_rows:
@@ -51,7 +67,7 @@ def build_outcome_analysis(
             {
                 "status": event.get("finalist_status"),
                 "reason": event.get("rejection_reason"),
-                "patch_hash": event.get("patch_hash"),
+                "candidate_id": event.get("candidate_id"),
             }
             for event in holdout_validations
             if event.get("finalist_status")
@@ -61,7 +77,7 @@ def build_outcome_analysis(
     )
 
     status = "promoted"
-    summary = "Promoted an optimized patch after holdout validation."
+    summary = "Promoted an optimized candidate after holdout validation."
     if not promoted:
         if (
             objective.mode == "correctness"
@@ -70,48 +86,42 @@ def build_outcome_analysis(
         ):
             status = "no_failures"
             summary = "Baseline had no dev failures under the correctness objective."
+        elif proposal_evaluations and not accepted_dev_candidates:
+            if any("tradeoff" in reason or "constraint rejected" in reason for reason in dev_rejection_reasons):
+                status = "objective_tradeoff_rejected"
+                summary = "Candidate proposals were evaluated but rejected by objective constraints or tradeoff guards."
+            else:
+                status = "proposals_evaluated_no_dev_gain"
+                summary = "Candidate proposals ran on dev but did not improve the configured objective."
         elif (
             latest_stats.get("raw_count", 0) > 0
             and latest_stats.get("valid_count", 0) == 0
-            and not accepted_dev_patches
-            and not holdout_patches
+            and not accepted_dev_candidates
+            and not holdout_candidates
         ):
             status = "proposals_invalid"
-            summary = "The optimizing model returned patches, but none satisfied the generated surface schema."
+            summary = "The optimizing model returned candidates, but none satisfied the generated surface schema."
         elif proposal_iterations and not proposal_evaluations:
             status = "no_valid_model_proposals"
             if "failed" in proposal_analysis.lower():
                 summary = "The optimizing model proposal call failed and Ratchet did not use a fallback."
-            elif "No failing cases" in diagnosis_analysis and objective.mode == "correctness":
+            elif "No failing cases" in search_plan_diagnosis and objective.mode == "correctness":
                 status = "no_failures"
                 summary = "Baseline had no dev failures under the correctness objective."
             else:
-                summary = "The optimizing model produced no valid patches."
-        elif proposal_evaluations and not accepted_dev_patches:
-            if any("tradeoff" in reason or "constraint rejected" in reason for reason in dev_rejection_reasons):
-                status = "objective_tradeoff_rejected"
-                summary = "Patch proposals were evaluated but rejected by objective constraints or tradeoff guards."
-            else:
-                status = "proposals_evaluated_no_dev_gain"
-                summary = "Patch proposals ran on dev but did not improve the configured objective."
-        elif accepted_dev_patches and not holdout_patches:
+                summary = "The optimizing model produced no valid candidates."
+        elif accepted_dev_candidates and not holdout_candidates:
             if finalist_status_counts.get("unstable", 0) > 0:
                 status = "runtime_baseline_unstable"
                 summary = "At least one dev finalist improved, but paired stability checks showed runtime/baseline instability."
             elif finalist_status_counts.get("failed", 0) > 0:
                 status = "finalists_failed_confirmation"
-                summary = "At least one dev patch improved, but finalist confirmation rejected all candidates before holdout."
+                summary = "At least one dev candidate improved, but finalist confirmation rejected all candidates before holdout."
             else:
                 status = "holdout_not_run_budget_exhausted"
-                summary = "At least one dev patch improved, but holdout validation budget was zero."
+                summary = "At least one dev candidate improved, but holdout validation budget was zero."
         elif holdout_validations and not any(event.get("passed_final_gate") for event in holdout_validations):
-            if finalist_status_counts.get("directional", 0) > 0:
-                status = "directional_holdout_gain"
-                summary = "A dev finalist improved holdout directionally, but the uncertainty gate did not validate it."
-            elif any("uncertainty rejected" in reason for reason in holdout_rejection_reasons):
-                status = "holdout_gain_uncertain"
-                summary = "A dev finalist reached holdout, but its measured gain was not statistically supported."
-            elif any("tradeoff" in reason or "constraint rejected" in reason for reason in holdout_rejection_reasons):
+            if any("tradeoff" in reason or "constraint rejected" in reason for reason in holdout_rejection_reasons):
                 status = "objective_tradeoff_rejected"
                 summary = "A dev finalist reached holdout but was rejected by objective constraints or tradeoff guards."
             else:
@@ -126,9 +136,9 @@ def build_outcome_analysis(
         "summary": summary,
         "proposal_iterations": len(proposal_iterations),
         "proposal_evaluations": len(proposal_evaluations),
-        "accepted_dev_patches": len(accepted_dev_patches),
+        "accepted_dev_candidates": len(accepted_dev_candidates),
         "holdout_validations": len(holdout_validations),
-        "latest_diagnosis_analysis": diagnosis_analysis,
+        "latest_search_plan_diagnosis": search_plan_diagnosis,
         "latest_proposal_analysis": proposal_analysis,
         "latest_proposal_stats": latest_stats,
         "rejection_reasons": dict(sorted(rejection_reasons.items(), key=lambda item: (-item[1], item[0]))),
@@ -151,31 +161,46 @@ class RatchetReporter:
         self.stats = stats
 
     def write_outputs(self, result: RatchetResult) -> None:
-        selected_comparison = compare_summaries(result.baseline_holdout, result.selected_holdout)
+        selected_comparison = (
+            compare_summaries(result.baseline_holdout, result.selected_holdout)
+            if result.baseline_holdout is not None and result.selected_holdout is not None
+            else None
+        )
         write_json(self.out_dir / "run_manifest.json", result.manifest)
-        write_json(self.out_dir / "decision_log.json", result.decision_log)
+        write_jsonl(self.out_dir / "events.jsonl", result.events)
+        write_json(
+            self.out_dir / "run_summary.json",
+            {
+                "selected_candidate_id": result.selected_candidate_id,
+                "promoted": result.promoted,
+                "outcome_analysis": result.outcome_analysis,
+                "search_plan_count": len(result.search_plans),
+                "proposal_count": len(result.proposals),
+                "accepted_dev_count": len(result.accepted_dev_candidates),
+                "holdout_candidate_count": len(result.holdout_candidates),
+            },
+        )
         write_json(self.out_dir / "outcome_analysis.json", result.outcome_analysis)
         write_json(self.out_dir / "evidence_ledger.json", result.evidence_ledger)
-        write_jsonl(self.out_dir / "diagnoses.jsonl", result.diagnoses)
-        write_jsonl(self.out_dir / "task_theories.jsonl", result.task_theories)
+        write_jsonl(self.out_dir / "search_plans.jsonl", result.search_plans)
         write_jsonl(self.out_dir / "proposals.jsonl", result.proposals)
         write_json(
-            self.out_dir / "patch_metrics.json",
+            self.out_dir / "candidate_metrics.json",
             {
                 "baseline_dev": result.baseline_dev.to_dict(),
-                "baseline_holdout": result.baseline_holdout.to_dict(),
-                "best_dev_patch": result.best_dev_patch.to_dict(),
-                "selected_holdout": result.selected_holdout.to_dict(),
-                "accepted_dev_patches": [summary.to_dict() for summary in result.accepted_dev_patches],
-                "holdout_patches": [summary.to_dict() for summary in result.holdout_patches],
+                "baseline_holdout": _summary_dict(result.baseline_holdout),
+                "best_dev_candidate": result.best_dev_candidate.to_dict(),
+                "selected_holdout": _summary_dict(result.selected_holdout),
+                "accepted_dev_candidates": [summary.to_dict() for summary in result.accepted_dev_candidates],
+                "holdout_candidates": [summary.to_dict() for summary in result.holdout_candidates],
                 "pareto_frontier": result.pareto_frontier,
                 "generated_surface": result.generated_surface,
-                "task_theories": result.task_theories,
+                "search_plans": result.search_plans,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "proposal_example_bank": result.manifest.get("proposal_example_bank", {}),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
-                "affordance_summaries": result.affordance_summaries,
+                "surface_opportunity_summaries": result.surface_opportunity_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -185,29 +210,30 @@ class RatchetReporter:
                 "run_cost": (result.run_profile or {}).get("run_cost", {}),
                 "quality_cost_tradeoffs": result.quality_cost_tradeoffs,
                 "ideation_metrics": result.ideation_metrics,
+                "transform_trace_attribution": _transform_trace_attribution(result),
                 "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
             },
         )
         write_json(self.out_dir / "ideation_metrics.json", result.ideation_metrics)
         write_json(
-            self.out_dir / "selected_patch.json",
+            self.out_dir / "selected_candidate.json",
             {
                 "promoted": result.promoted,
-                "selected_patch_hash": result.selected_patch_hash,
+                "selected_candidate_id": result.selected_candidate_id,
                 "selected_finalist_status": _selected_finalist_status(
                     result.finalist_statuses,
-                    result.selected_patch_hash,
+                    result.selected_candidate_id,
                 ),
-                "patch": result.selected_patch.to_dict(),
+                "candidate": result.selected_candidate.to_dict() if result.selected_candidate is not None else None,
                 "objective": self.objective.to_dict(),
                 "selection_reason": result.selection_reason,
                 "outcome_analysis": result.outcome_analysis,
-                "task_theories": result.task_theories,
+                "search_plans": result.search_plans,
                 "frontier_status_summaries": _frontier_status_summaries(result.proposals),
                 "transform_summaries": result.transform_summaries,
                 "transform_context_summaries": result.transform_context_summaries,
-                "affordance_summaries": result.affordance_summaries,
+                "surface_opportunity_summaries": result.surface_opportunity_summaries,
                 "finalist_statuses": result.finalist_statuses,
                 "runtime_reliability_diagnostics": result.runtime_reliability_diagnostics,
                 "confirmation_results": result.confirmation_results,
@@ -218,27 +244,39 @@ class RatchetReporter:
                 "ideation_metrics": result.ideation_metrics,
                 "evidence_ledger": result.evidence_ledger,
                 "optimizer_call_diagnostics": result.optimizer_call_diagnostics,
-                "holdout_comparison_to_baseline": selected_comparison.to_dict(),
-                "baseline": result.baseline_holdout.to_dict(),
-                "selected": result.selected_holdout.to_dict(),
+                "holdout_comparison_to_baseline": selected_comparison.to_dict()
+                if selected_comparison is not None
+                else None,
+                "baseline": _summary_dict(result.baseline_holdout),
+                "selected": _summary_dict(result.selected_holdout),
             },
         )
-        export_dir = self.out_dir / "exported_patch"
-        self.adapter.export(result.selected_patch, export_dir)
+        export_dir = self.out_dir / "exported_candidate"
+        self.adapter.export(result.selected_candidate, export_dir)
         self._write_report(result)
         self._write_summary_html(result)
         self._write_plots(result)
 
     def _write_report(self, result: RatchetResult) -> None:
-        changes = self._patch_change_rows(result.selected_patch)
-        comparison = compare_summaries(result.baseline_holdout, result.selected_holdout)
+        changes = self._candidate_change_rows(result.selected_candidate)
+        comparison = (
+            compare_summaries(result.baseline_holdout, result.selected_holdout)
+            if result.baseline_holdout is not None and result.selected_holdout is not None
+            else None
+        )
         transform_narrative = self._transform_narrative(result)
+        holdout_rows = self._holdout_comparison_rows(result, comparison)
+        samples_per_case = (
+            result.baseline_holdout.samples_per_case
+            if result.baseline_holdout is not None
+            else result.baseline_dev.samples_per_case
+        )
         lines = [
             "# Ratchet Report",
             "",
-            f"Outcome: {'promoted optimized patch' if result.promoted else 'kept original baseline'}",
+            f"Outcome: {'promoted optimized candidate' if result.promoted else 'kept original baseline'}",
             f"Objective: `{self.objective.mode}`",
-            f"Selected patch: `{result.selected_patch_hash}`",
+            f"Selected candidate: `{result.selected_candidate_id}`",
             f"Outcome status: `{result.outcome_analysis['status']}`",
             f"Outcome summary: {result.outcome_analysis['summary']}",
             f"Recommendation: {result.frontier_recommendation.get('reason', result.selection_reason)}",
@@ -246,7 +284,7 @@ class RatchetReporter:
             "",
             "## Task Theory",
             "",
-            *self._task_theory_rows(result),
+            *self._search_plan_rows(result),
             "",
             "## Frontier Categories",
             "",
@@ -274,47 +312,39 @@ class RatchetReporter:
             "",
             "## Baseline vs Selected Holdout",
             "",
-            "| Metric | Baseline | Selected |",
-            "| --- | ---: | ---: |",
-            f"| Mean score | {result.baseline_holdout.mean_score:.3f} | {result.selected_holdout.mean_score:.3f} |",
-            f"| Pass count | {result.baseline_holdout.pass_count} | {result.selected_holdout.pass_count} |",
-            f"| Avg cost | ${result.baseline_holdout.mean_cost_usd:.6f} | ${result.selected_holdout.mean_cost_usd:.6f} |",
-            f"| Median latency | {result.baseline_holdout.median_latency_s:.2f}s | {result.selected_holdout.median_latency_s:.2f}s |",
-            f"| Samples | {result.baseline_holdout.sample_count} over {result.baseline_holdout.case_count} cases | {result.selected_holdout.sample_count} over {result.selected_holdout.case_count} cases |",
-            f"| Split-vote cases | {len(result.baseline_holdout.split_vote_case_ids)} | {len(result.selected_holdout.split_vote_case_ids)} |",
+            *holdout_rows,
             "",
-            "## Holdout Uncertainty",
+            "## Holdout Paired Evidence",
             "",
-            f"- Score delta: {comparison.score_delta:.4f} CI [{comparison.score_ci[0]:.4f}, {comparison.score_ci[1]:.4f}]",
-            f"- Cost delta: ${comparison.cost_delta:.6f} CI [${comparison.cost_ci[0]:.6f}, ${comparison.cost_ci[1]:.6f}]",
-            f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
-            f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
+            *self._holdout_paired_evidence_rows(comparison),
             "",
-            "## Selected Patch",
+            "## Selected Candidate",
             "",
-            *(changes or ["No patch operations; original baseline selected."]),
+            *(changes or ["No transform operations; original baseline selected."]),
+            "",
+            "## Transform Attribution",
+            "",
+            *self._transform_attribution_rows(result),
             "",
             "## Generated Surface",
             "",
-            *[
-                f"- `{target['name']}` ({target['kind']}): {', '.join(target['allowed_ops'])}; schema={json.dumps(target.get('value_schema', {}), sort_keys=True)}"
-                for target in result.generated_surface
-            ],
+            *_surface_rows(result.generated_surface),
             "",
             "## Optimization Trace",
             "",
             f"- Proposal iterations: {result.outcome_analysis['proposal_iterations']}",
             f"- Proposal evaluations: {result.outcome_analysis['proposal_evaluations']}",
-            f"- Accepted dev patches: {result.outcome_analysis['accepted_dev_patches']}",
+            f"- Accepted dev candidates: {result.outcome_analysis['accepted_dev_candidates']}",
             f"- Holdout validations: {result.outcome_analysis['holdout_validations']}",
-            f"- Latest diagnosis: {result.outcome_analysis['latest_diagnosis_analysis'] or 'n/a'}",
+            f"- Latest search-plan diagnosis: {result.outcome_analysis['latest_search_plan_diagnosis'] or 'n/a'}",
             f"- Latest proposal: {result.outcome_analysis['latest_proposal_analysis'] or 'n/a'}",
+            f"- Latest proposal coverage: {_proposal_coverage_text(result.outcome_analysis.get('latest_proposal_stats', {}))}",
             f"- Rejection reasons: {json.dumps(result.outcome_analysis['rejection_reasons'], sort_keys=True)}",
             f"- Finalist status counts: {json.dumps(result.outcome_analysis.get('finalist_status_counts', {}), sort_keys=True)}",
             "",
-            "## Research Steps",
+            "## Search Steps",
             "",
-            *self._research_step_rows(result),
+            *self._search_step_rows(result),
             "",
             "## Ideation Quality",
             "",
@@ -356,7 +386,7 @@ class RatchetReporter:
             "",
             transform_narrative,
             "",
-            "## Transform Families",
+            "## Surface Mechanisms",
             "",
             *[
                 "- "
@@ -369,9 +399,9 @@ class RatchetReporter:
                 for name, summary in sorted(result.transform_summaries.items())
             ],
             "",
-            "## Optimization Affordances",
+            "## Surface Opportunities",
             "",
-            *self._affordance_summary_rows(result),
+            *self._surface_opportunity_summary_rows(result),
             "",
             "## Transform Contexts",
             "",
@@ -389,18 +419,23 @@ class RatchetReporter:
             "## Run Health",
             "",
             f"- Cache hits: {self.stats.cache_hits}",
+            f"- Local cache hits: {self.stats.local_cache_hits}",
+            f"- Shared cache hits: {self.stats.shared_cache_hits}",
             f"- Fresh case evaluations: {self.stats.fresh_case_evaluations}",
             f"- Runtime errors: {self.stats.runtime_errors}",
             f"- Grader errors: {self.stats.grader_errors}",
             f"- Timeouts: {self.stats.timeouts}",
-            f"- Samples per case: {result.baseline_holdout.samples_per_case:g}",
+            f"- Samples per case: {samples_per_case:g}",
             f"- Proposal-safe train examples: {(result.manifest.get('proposal_example_bank') or {}).get('example_count', 0)}",
         ]
         (self.out_dir / "report.md").write_text("\n".join(lines) + "\n")
 
     def _write_summary_html(self, result: RatchetResult) -> None:
-        rows = self._patch_change_rows(result.selected_patch)
+        rows = self._candidate_change_rows(result.selected_candidate)
         html_rows = "".join(f"<li>{escape(row)}</li>" for row in rows) or "<li>Original baseline kept.</li>"
+        baseline_score = _metric_text(result.baseline_holdout, "mean_score")
+        selected_score = _metric_text(result.selected_holdout, "mean_score")
+        selected_cost = _metric_text(result.selected_holdout, "mean_cost_usd", currency=True)
         html = f"""<!doctype html>
 <html>
 <head>
@@ -416,13 +451,13 @@ class RatchetReporter:
   </style>
 </head>
 <body>
-  <h1>{'Promoted patch' if result.promoted else 'Baseline kept'}</h1>
+  <h1>{'Promoted candidate' if result.promoted else 'Baseline kept'}</h1>
   <p>{escape(result.selection_reason)}</p>
   <p><strong>{escape(str(result.outcome_analysis['status']))}</strong>: {escape(str(result.outcome_analysis['summary']))}</p>
   <h2>Outcome</h2>
-  <div class="metric"><span>Baseline score</span><strong>{result.baseline_holdout.mean_score:.3f}</strong></div>
-  <div class="metric"><span>Selected score</span><strong>{result.selected_holdout.mean_score:.3f}</strong></div>
-  <div class="metric"><span>Selected cost</span><strong>${result.selected_holdout.mean_cost_usd:.6f}</strong></div>
+  <div class="metric"><span>Baseline holdout score</span><strong>{baseline_score}</strong></div>
+  <div class="metric"><span>Selected holdout score</span><strong>{selected_score}</strong></div>
+  <div class="metric"><span>Selected holdout cost</span><strong>{selected_cost}</strong></div>
   <h2>What Changed</h2>
   <ul>{html_rows}</ul>
   <h2>Progress</h2>
@@ -440,7 +475,81 @@ class RatchetReporter:
         self._write_progress_svg(plots / "progress.svg", result)
         self._write_progress_svg(plots / "efficiency_progress.svg", result)
 
+    @staticmethod
+    def _holdout_comparison_rows(result: RatchetResult, comparison: Any | None) -> list[str]:
+        if result.baseline_holdout is None or result.selected_holdout is None or comparison is None:
+            return ["Holdout was not measured because no candidate reached final validation."]
+        return [
+            "| Metric | Baseline | Selected |",
+            "| --- | ---: | ---: |",
+            f"| Mean score | {result.baseline_holdout.mean_score:.3f} | {result.selected_holdout.mean_score:.3f} |",
+            f"| Pass count | {result.baseline_holdout.pass_count} | {result.selected_holdout.pass_count} |",
+            f"| Avg cost | ${result.baseline_holdout.mean_cost_usd:.6f} | ${result.selected_holdout.mean_cost_usd:.6f} |",
+            f"| Median latency | {result.baseline_holdout.median_latency_s:.2f}s | {result.selected_holdout.median_latency_s:.2f}s |",
+            f"| Samples | {result.baseline_holdout.sample_count} over {result.baseline_holdout.case_count} cases | {result.selected_holdout.sample_count} over {result.selected_holdout.case_count} cases |",
+            f"| Split-vote cases | {len(result.baseline_holdout.split_vote_case_ids)} | {len(result.selected_holdout.split_vote_case_ids)} |",
+        ]
+
+    @staticmethod
+    def _holdout_paired_evidence_rows(comparison: Any | None) -> list[str]:
+        if comparison is None:
+            return ["Holdout paired evidence was not computed."]
+        rows = [
+            f"- Score delta: {comparison.score_delta:.4f} CI [{comparison.score_ci[0]:.4f}, {comparison.score_ci[1]:.4f}]",
+            f"- Cost delta: ${comparison.cost_delta:.6f} CI [${comparison.cost_ci[0]:.6f}, ${comparison.cost_ci[1]:.6f}]",
+            f"- Token delta: {comparison.token_delta:.1f} CI [{comparison.token_ci[0]:.1f}, {comparison.token_ci[1]:.1f}]",
+            f"- Latency delta: {comparison.latency_delta:.3f}s CI [{comparison.latency_ci[0]:.3f}s, {comparison.latency_ci[1]:.3f}s]",
+        ]
+        if comparison.pass_significance is not None:
+            sig = comparison.pass_significance
+            rows.append(
+                f"- Pass flips: fixed={sig.fixed_count}, regressed={sig.regressed_count}, paired p={sig.p_value:.4f}"
+            )
+        return rows
+
+    @staticmethod
+    def _transform_attribution_rows(result: RatchetResult) -> list[str]:
+        attribution = _transform_trace_attribution(result)
+        candidates = attribution.get("candidates") or {}
+        if not candidates:
+            return ["No transform trace attribution was recorded."]
+        rows = [
+            "| Candidate | Split | Trace events | Top operations | Skipped-tool mismatches |",
+            "| --- | --- | ---: | --- | --- |",
+        ]
+        for candidate_id_value, item in sorted(candidates.items()):
+            operation_counts = item.get("operation_counts") or {}
+            skipped_tools = item.get("skipped_tool_counts") or {}
+            top_ops = ", ".join(
+                f"`{name}` x{count}" for name, count in list(operation_counts.items())[:4]
+            ) or "none"
+            skipped = ", ".join(
+                f"`{name}` x{count}" for name, count in list(skipped_tools.items())[:3]
+            ) or "none"
+            rows.append(
+                "| "
+                f"`{candidate_id_value}` | "
+                f"{', '.join(item.get('splits') or []) or 'n/a'} | "
+                f"{int(item.get('trace_event_count') or 0)} | "
+                f"{top_ops} | "
+                f"{skipped} |"
+            )
+        return rows
+
     def _write_scorecard_svg(self, path: Path, result: RatchetResult) -> None:
+        if result.baseline_holdout is None or result.selected_holdout is None:
+            path.write_text(
+                "\n".join(
+                    [
+                        '<svg xmlns="http://www.w3.org/2000/svg" width="720" height="180">',
+                        '<rect width="100%" height="100%" fill="#ffffff"/>',
+                        '<text x="32" y="36" font-size="22" font-family="Arial">Holdout not measured</text>',
+                        '<text x="32" y="78" font-size="14" font-family="Arial">No candidate reached final holdout validation.</text>',
+                        "</svg>",
+                    ]
+                )
+            )
+            return
         metrics = [
             ("Score", result.baseline_holdout.mean_score, result.selected_holdout.mean_score),
             ("Cost", result.baseline_holdout.mean_cost_usd, result.selected_holdout.mean_cost_usd),
@@ -466,7 +575,7 @@ class RatchetReporter:
         path.write_text(svg)
 
     def _write_progress_svg(self, path: Path, result: RatchetResult) -> None:
-        summaries = [result.baseline_dev, *result.accepted_dev_patches]
+        summaries = [result.baseline_dev, *result.accepted_dev_candidates]
         points = []
         for index, summary in enumerate(summaries):
             x = 60 + index * 110
@@ -503,46 +612,39 @@ class RatchetReporter:
         rows = []
         for item in result.finalist_statuses:
             status = str(item.get("status", "unknown"))
-            patch_hash_value = str(item.get("patch_hash", "unknown"))
+            candidate_id_value = str(item.get("candidate_id", "unknown"))
             reason = str(item.get("reason") or "passed")
             stage = str(item.get("stage") or "unknown")
             holdout_metrics = item.get("holdout_metrics") or {}
             pass_count = holdout_metrics.get("pass_count")
             case_count = holdout_metrics.get("case_count")
             metric_text = f"; holdout={pass_count}/{case_count}" if pass_count is not None and case_count is not None else ""
-            rows.append(f"- `{patch_hash_value}`: `{status}` at `{stage}`{metric_text}; {reason}")
+            rows.append(f"- `{candidate_id_value}`: `{status}` at `{stage}`{metric_text}; {reason}")
         return rows
 
     @staticmethod
-    def _research_step_rows(result: RatchetResult) -> list[str]:
+    def _search_step_rows(result: RatchetResult) -> list[str]:
         rows = [
             event
-            for event in result.decision_log
-            if event.get("type") in {"research_plan", "measurement_decision"}
+            for event in result.events
+            if event.get("type") in {"search_plan_call", "search_plan"}
         ]
         if not rows:
-            return ["No research planner or measurement selector decisions were recorded."]
+            return ["No search planner decisions were recorded."]
         table = [
-            "| Iteration | Type | Stage | Output | Rationale |",
+            "| Iteration | Type | Output | Rationale |",
             "| ---: | --- | --- | --- | --- |",
         ]
         for row in rows[-12:]:
             row_type = str(row.get("type") or "")
-            if row_type == "research_plan":
-                intents = row.get("experiment_intents") or []
-                output = ", ".join(str(item.get("intent_id", ""))[:16] for item in intents if isinstance(item, dict))
-                rationale = f"{len(intents)} intent(s)"
-                stage = "planning"
-            else:
-                decision = row.get("decision") or {}
-                output = ", ".join(str(item)[:12] for item in decision.get("selected_candidate_ids", [])) or "none"
-                rationale = _short_reason(decision.get("rationale"))
-                stage = str(row.get("stage") or "")
+            plan = row.get("search_plan") or {}
+            briefs = plan.get("briefs") or []
+            output = ", ".join(str(item.get("brief_id", ""))[:16] for item in briefs if isinstance(item, dict))
+            rationale = f"{len(briefs)} brief(s)"
             table.append(
                 "| "
                 f"{row.get('iteration')} | "
                 f"`{row_type}` | "
-                f"`{stage}` | "
                 f"{output or 'none'} | "
                 f"{rationale} |"
             )
@@ -561,8 +663,8 @@ class RatchetReporter:
         stage_counts = discovery.get("stage_counts") or {}
         invalid_reasons = implementer.get("invalid_reason_counts") or {}
         rows = [
-            f"- Planner intents: {planner.get('intent_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
-            f"- Intents citing affordances: {planner.get('intent_with_affordance_ids', 0)}.",
+            f"- Planner briefs: {planner.get('brief_count', 0)} across {planner.get('plan_count', 0)} plan call(s).",
+            f"- Briefs citing surface opportunities: {planner.get('brief_with_surface_opportunity_ids', 0)}.",
             f"- Implementer candidates: valid={implementer.get('valid_candidate_count', 0)} invalid={implementer.get('invalid_candidate_count', 0)}.",
             f"- Discovery stages: {json.dumps(stage_counts, sort_keys=True)}",
         ]
@@ -570,34 +672,29 @@ class RatchetReporter:
             rows.append(f"- Invalid implementation reasons: {json.dumps(invalid_reasons, sort_keys=True)}")
         missing = planner.get("missing_opportunity_mechanisms") or []
         if missing:
-            rows.append(f"- Task-theory opportunities not covered by intents: {json.dumps(missing[:8])}")
+            rows.append(f"- Planner mechanisms not covered by candidates: {json.dumps(missing[:8])}")
         return rows
 
     @staticmethod
-    def _task_theory_rows(result: RatchetResult) -> list[str]:
-        if not result.task_theories:
-            return ["No task theory snapshots were recorded."]
+    def _search_plan_rows(result: RatchetResult) -> list[str]:
+        if not result.search_plans:
+            return ["No search plan snapshots were recorded."]
         rows = []
-        for item in result.task_theories[-5:]:
-            theory = item.get("research_theory") or item.get("task_theory") or {}
-            opportunities = [
-                str(row.get("mechanism_class"))
-                for row in theory.get("experiment_opportunities", [])[:3]
-                if isinstance(row, dict) and row.get("mechanism_class")
-            ]
-            hypotheses = [
-                str(row.get("hypothesis_id"))
-                for row in theory.get("hypotheses", [])[:3]
-                if isinstance(row, dict) and row.get("hypothesis_id")
+        for item in result.search_plans[-5:]:
+            plan = item.get("search_plan") or {}
+            mechanisms = list(plan.get("target_mechanisms") or plan.get("active_mechanisms") or [])[:3]
+            briefs = [
+                str(row.get("brief_id"))
+                for row in plan.get("briefs", [])[:3]
+                if isinstance(row, dict) and row.get("brief_id")
             ]
             rows.append(
                 "- "
-                f"iteration={item.get('iteration')} parent=`{item.get('parent_patch_hash')}` "
-                f"primary=`{theory.get('primary_hypothesis_id') or theory.get('bottleneck_class')}` "
-                f"hypotheses={json.dumps(hypotheses)} "
-                f"residual={json.dumps(theory.get('residual_failure_modes', []))} "
-                f"opportunities={json.dumps(opportunities)} "
-                f"confidence={theory.get('confidence')}"
+                f"iteration={item.get('iteration')} parent=`{item.get('parent_candidate_id')}` "
+                f"plan=`{plan.get('plan_id')}` "
+                f"briefs={json.dumps(briefs)} "
+                f"mechanisms={json.dumps(mechanisms)} "
+                f"confidence={plan.get('confidence')}"
             )
         return rows
 
@@ -617,7 +714,7 @@ class RatchetReporter:
                 f"{item.get('count', 0)} | "
                 f"{float(item.get('best_score_delta') or 0.0):+.3f} | "
                 f"${float(item.get('best_cost_delta') or 0.0):+.6f} | "
-                f"{', '.join(str(value) for value in item.get('patch_hashes', [])[:4])} |"
+                f"{', '.join(str(value) for value in item.get('candidate_ids', [])[:4])} |"
             )
         return rows
 
@@ -631,19 +728,20 @@ class RatchetReporter:
         if not rows:
             return ["No candidates were screened after small-dev triage."]
         table = [
-            "| Patch | Reason | Small-dev cases | Score delta | Pass gain | Mechanism |",
-            "| --- | --- | ---: | ---: | ---: | --- |",
+            "| Candidate | Reason | Small-dev cases | Score delta | Pass gain | Failure-label delta | Mechanism |",
+            "| --- | --- | ---: | ---: | ---: | --- | --- |",
         ]
         for row in rows[:12]:
             signal = _small_dev_signal(row)
             table.append(
                 "| "
-                f"`{row.get('patch_hash')}` | "
+                f"`{row.get('candidate_id')}` | "
                 f"{_short_reason(row.get('rejection_reason'))} | "
                 f"{signal['case_count']} | "
                 f"{signal['score_delta']:+.3f} | "
                 f"{signal['pass_gain']:+d} | "
-                f"`{row.get('mechanism_class') or row.get('transform_family')}` |"
+                f"{signal['failure_label_delta']} | "
+                f"`{row.get('mechanism_class') or row.get('surface_mechanism')}` |"
             )
         if len(rows) > 12:
             table.append(f"- {len(rows) - 12} additional screened candidates omitted from this table.")
@@ -700,14 +798,14 @@ class RatchetReporter:
             return rows
         rows.extend(
             [
-                "| Patch | Status | Passed | Reason |",
+                "| Candidate | Status | Passed | Reason |",
                 "| --- | --- | --- | --- |",
             ]
         )
         for item in confirmations:
             rows.append(
                 "| "
-                f"`{item.get('patch_hash')}` | "
+                f"`{item.get('candidate_id')}` | "
                 f"`{item.get('status') or item.get('diagnostic_class')}` | "
                 f"{bool(item.get('passed'))} | "
                 f"{_short_reason(item.get('reason'))} |"
@@ -738,29 +836,31 @@ class RatchetReporter:
             f"- Holdout turn budget used: `{float(result.manifest.get('holdout_measurement_turns_used') or 0.0):.1f}`"
             f" / `{result.manifest.get('max_holdout_measurement_turns')}`",
             f"- Expensive deployed-policy reporting threshold: `{result.manifest.get('expensive_candidate_cost_ratio')}x` baseline cost",
-            f"- Total eval cost: `${float((run_cost.get('eval') or {}).get('cost_usd') or 0.0):.6f}`",
+            f"- Total eval cost: `${float(run_cost.get('eval_cost_usd') or 0.0):.6f}`",
             f"- Fresh case evaluations: {((result.manifest.get('stats') or {}).get('fresh_case_evaluations', 0))}",
+            f"- Local case cache hits: {((result.manifest.get('stats') or {}).get('local_cache_hits', 0))}",
+            f"- Shared case cache hits: {((result.manifest.get('stats') or {}).get('shared_cache_hits', 0))}",
         ]
 
     @staticmethod
-    def _affordance_summary_rows(result: RatchetResult) -> list[str]:
-        if not result.affordance_summaries:
-            return ["No optimization affordance applications were recorded."]
+    def _surface_opportunity_summary_rows(result: RatchetResult) -> list[str]:
+        if not result.surface_opportunity_summaries:
+            return ["No surface opportunity applications were recorded."]
         rows = [
-            "| Affordance | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
+            "| Surface opportunity | State | Proposed | Evaluated | Accepted | Best score delta | Notes |",
             "| --- | --- | ---: | ---: | ---: | ---: | --- |",
         ]
         ranked = sorted(
-            result.affordance_summaries.values(),
+            result.surface_opportunity_summaries.values(),
             key=lambda item: (
                 str(item.get("state") or ""),
-                str(item.get("affordance_id") or ""),
+                str(item.get("surface_opportunity_id") or ""),
             ),
         )
         for item in ranked[:20]:
             rows.append(
                 "| "
-                f"`{item.get('affordance_id')}` | "
+                f"`{item.get('surface_opportunity_id')}` | "
                 f"`{item.get('state')}` | "
                 f"{item.get('proposed_count', 0)} | "
                 f"{item.get('evaluated_count', 0)} | "
@@ -769,28 +869,28 @@ class RatchetReporter:
                 f"{_short_reason(item.get('reason'))} |"
             )
         if len(ranked) > 20:
-            rows.append(f"- {len(ranked) - 20} additional affordance summaries omitted from this table.")
+            rows.append(f"- {len(ranked) - 20} additional surface opportunity summaries omitted from this table.")
         return rows
 
     @staticmethod
     def _frontier_variant_rows(result: RatchetResult) -> list[str]:
         variants = result.frontier_recommendation.get("frontier_variants") or []
         if not variants:
-            if result.holdout_patches:
+            if result.holdout_candidates:
                 statuses = {
-                    str(item.get("patch_hash")): item
+                    str(item.get("candidate_id")): item
                     for item in result.finalist_statuses
-                    if item.get("patch_hash")
+                    if item.get("candidate_id")
                 }
                 variants = [
                     {
                         "role": "holdout_candidate"
                         + (
-                            f" ({statuses.get(item.patch_hash, {}).get('status')})"
-                            if statuses.get(item.patch_hash, {}).get("status")
+                            f" ({statuses.get(item.candidate_id, {}).get('status')})"
+                            if statuses.get(item.candidate_id, {}).get("status")
                             else ""
                         ),
-                        "patch_hash": item.patch_hash,
+                        "candidate_id": item.candidate_id,
                         "pass_count": item.pass_count,
                         "case_count": item.case_count,
                         "mean_score": item.mean_score,
@@ -800,30 +900,30 @@ class RatchetReporter:
                         "operation_count": item.operation_count,
                         "operations": [
                             {
-                                "op": operation.op,
-                                "target": operation.target,
-                                "value_summary": RatchetReporter._format_value(operation.value),
+                                "op": operation.op.op,
+                                "target": operation.hook or "on_task_start",
+                                "value_summary": RatchetReporter._format_value(operation.op.params),
                             }
-                            for operation in item.patch.operations
+                            for operation in (item.candidate.program.patches if item.candidate is not None else ())
                         ],
                     }
-                    for item in result.holdout_patches
+                    for item in result.holdout_candidates
                 ]
             else:
                 return ["No holdout finalist candidates were available."]
         rows = [
-            "| Role | Patch | Holdout | Score | Cost | Tokens | Latency | Ops |",
+            "| Role | Candidate | Holdout | Score | Cost | Tokens | Latency | Ops |",
             "| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |",
         ]
-        selected_hash = result.selected_patch_hash
+        selected_hash = result.selected_candidate_id
         for item in variants:
             role = str(item.get("role", "candidate"))
-            if item.get("patch_hash") == selected_hash:
+            if item.get("candidate_id") == selected_hash:
                 role = f"{role} (selected)"
             rows.append(
                 "| "
                 f"{role} | "
-                f"`{item.get('patch_hash')}` | "
+                f"`{item.get('candidate_id')}` | "
                 f"{int(item.get('pass_count') or 0)}/{int(item.get('case_count') or 0)} | "
                 f"{float(item.get('mean_score') or 0.0):.3f} | "
                 f"${float(item.get('mean_cost_usd') or 0.0):.6f} | "
@@ -861,7 +961,7 @@ class RatchetReporter:
         for item in findings:
             rows.append(
                 "- "
-                f"`{item.get('patch_hash')}` ({item.get('diagnostic_class', 'runtime_finding')}): {item.get('reason')} "
+                f"`{item.get('candidate_id')}` ({item.get('diagnostic_class', 'runtime_finding')}): {item.get('reason')} "
                 f"fixed_invalid={item.get('fixed_invalid_output_case_ids', [])}, "
                 f"low_token_fixed={item.get('low_token_fixed_case_ids', [])}, "
                 f"finish_changed={item.get('finish_reason_changed_case_ids', [])}, "
@@ -871,7 +971,7 @@ class RatchetReporter:
             for item in result.confirmation_results:
                 rows.append(
                     "- "
-                    f"confirmation `{item.get('patch_hash')}`: "
+                    f"confirmation `{item.get('candidate_id')}`: "
                     f"passed={item.get('passed')}; {item.get('reason')}"
                 )
         return rows
@@ -881,12 +981,12 @@ class RatchetReporter:
         rows = [
             row
             for row in result.proposals
-            if row.get("transform_family") == "targeted_few_shot" and row.get("metrics")
+            if row.get("surface_mechanism") == "surface_examples" and row.get("metrics")
         ]
         if not rows:
             return ["No evaluated few-shot example candidates were recorded."]
         table = [
-            "| Patch | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
+            "| Candidate | Status | Examples | Strategy | Score Delta | Token Delta | Tokens / Example | Source IDs |",
             "| --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
         ]
         for row in rows[:12]:
@@ -901,7 +1001,7 @@ class RatchetReporter:
             status = "accepted" if row.get("accepted") else "rejected"
             table.append(
                 "| "
-                f"`{row.get('patch_hash')}` | "
+                f"`{row.get('candidate_id')}` | "
                 f"{status} | "
                 f"{example_count} | "
                 f"{parameters.get('selection_strategy', 'unspecified')} | "
@@ -917,7 +1017,7 @@ class RatchetReporter:
     @staticmethod
     def _simplification_rows(result: RatchetResult) -> list[str]:
         if not result.simplification_results:
-            return ["No finalist simplification variants were evaluated."]
+            return ["Finalist simplification is not enabled in this Ratchet run."]
         evaluated = [row for row in result.simplification_results if row.get("type") == "simplification_evaluation"]
         skipped = [row for row in result.simplification_results if row.get("type") == "simplification_skipped"]
         accepted = [row for row in evaluated if row.get("accepted")]
@@ -929,14 +1029,14 @@ class RatchetReporter:
             if item.get("type") == "simplification_skipped":
                 rows.append(
                     "- "
-                    f"skipped parent `{item.get('parent_patch_hash')}`: "
+                    f"skipped parent `{item.get('parent_candidate_id')}`: "
                     f"{item.get('reason') or 'simplification skipped'}"
                 )
                 continue
             simplification = item.get("simplification") or {}
             rows.append(
                 "- "
-                f"`{item.get('patch_hash')}` from `{item.get('parent_patch_hash')}`: "
+                f"`{item.get('candidate_id')}` from `{item.get('parent_candidate_id')}`: "
                 f"{simplification.get('type', 'simplification')} accepted={item.get('accepted')}; "
                 f"{item.get('rejection_reason') or 'passed dev gate'}"
             )
@@ -948,7 +1048,7 @@ class RatchetReporter:
             return ["No model substitutions failed promotion solely because of deployed cost/latency constraints."]
         return [
             "- "
-            f"`{item.get('patch_hash')}`: {item.get('rejection_reason')} "
+            f"`{item.get('candidate_id')}`: {item.get('rejection_reason')} "
             f"metrics={json.dumps(item.get('metrics', {}), sort_keys=True)}"
             for item in result.quality_cost_tradeoffs
         ]
@@ -969,12 +1069,12 @@ class RatchetReporter:
         token_heavy = profile.get("highest_token_cases") or []
         if token_heavy:
             rows.append("- Highest token cases: " + RatchetReporter._compact_profile_rows(token_heavy, "total_tokens"))
-        patch_profiles = profile.get("patch_profiles") or []
-        if patch_profiles:
-            rows.append("- Patch profiles: " + RatchetReporter._compact_patch_profile_rows(patch_profiles))
-        patch_deltas = profile.get("patch_deltas_vs_baseline") or []
-        if patch_deltas:
-            rows.append("- Patch deltas vs baseline: " + RatchetReporter._compact_patch_delta_rows(patch_deltas))
+        candidate_profiles = profile.get("candidate_profiles") or []
+        if candidate_profiles:
+            rows.append("- Candidate profiles: " + RatchetReporter._compact_candidate_profile_rows(candidate_profiles))
+        candidate_deltas = profile.get("candidate_deltas_vs_baseline") or []
+        if candidate_deltas:
+            rows.append("- Candidate deltas vs baseline: " + RatchetReporter._compact_candidate_delta_rows(candidate_deltas))
         return rows
 
     @staticmethod
@@ -1022,14 +1122,14 @@ class RatchetReporter:
     @staticmethod
     def _compact_profile_rows(rows: list[dict[str, Any]], metric: str, *, limit: int = 5) -> str:
         return "; ".join(
-            f"{row.get('split_group')}:{row.get('case_id')}@{row.get('patch_hash')}={row.get(metric)}"
+            f"{row.get('split_group')}:{row.get('case_id')}@{row.get('candidate_id')}={row.get(metric)}"
             for row in rows[:limit]
         )
 
     @staticmethod
-    def _compact_patch_profile_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+    def _compact_candidate_profile_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
         return "; ".join(
-            f"{row.get('split')}:{row.get('patch_hash')} score={float(row.get('mean_score') or 0.0):.3f} "
+            f"{row.get('split')}:{row.get('candidate_id')} score={float(row.get('mean_score') or 0.0):.3f} "
             f"cost=${float(row.get('mean_cost_usd') or 0.0):.6f} "
             f"tokens={float(row.get('mean_total_tokens') or 0.0):.1f} "
             f"lat={float(row.get('median_latency_s') or 0.0):.2f}s"
@@ -1037,9 +1137,9 @@ class RatchetReporter:
         )
 
     @staticmethod
-    def _compact_patch_delta_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
+    def _compact_candidate_delta_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> str:
         return "; ".join(
-            f"{row.get('split')}:{row.get('patch_hash')} "
+            f"{row.get('split')}:{row.get('candidate_id')} "
             f"score_delta={float(row.get('score_delta') or 0.0):+.3f} "
             f"cost_delta=${float(row.get('cost_delta') or 0.0):+.6f} "
             f"token_delta={float(row.get('token_delta') or 0.0):+.1f} "
@@ -1048,10 +1148,12 @@ class RatchetReporter:
         )
 
     @staticmethod
-    def _patch_change_rows(patch: AgentPatch) -> list[str]:
+    def _candidate_change_rows(candidate: CompiledCandidate | None) -> list[str]:
+        if candidate is None:
+            return []
         return [
-            f"`{operation.op}` on `{operation.target}`: {RatchetReporter._format_value(operation.value)}"
-            for operation in patch.operations
+            f"`{operation.op.op}` at `{operation.hook or 'on_task_start'}`: {RatchetReporter._format_value(operation.op.params)}"
+            for operation in candidate.program.patches
         ]
 
     @staticmethod
@@ -1061,10 +1163,10 @@ class RatchetReporter:
             for name, summary in sorted(result.transform_summaries.items())
             if int(summary.get("evaluated_count") or 0) > 0
         ]
-        promoted = [
+        dev_eligible = [
             name
             for name, summary in sorted(result.transform_summaries.items())
-            if summary.get("state") == "promoted"
+            if summary.get("state") == "promotable_dev"
         ]
         constrained = [
             name
@@ -1077,14 +1179,14 @@ class RatchetReporter:
             if summary.get("state") == "paused"
         ]
         if not tested:
-            return "Ratchet did not evaluate any transform-family candidates after profiling the current branch."
-        parts = [f"Ratchet evaluated transform families: {', '.join(f'`{name}`' for name in tested)}."]
-        if promoted:
-            parts.append(f"Promoted families: {', '.join(f'`{name}`' for name in promoted)}.")
+            return "Ratchet did not evaluate any surface-program candidates after profiling the current branch."
+        parts = [f"Ratchet evaluated surface mechanisms: {', '.join(f'`{name}`' for name in tested)}."]
+        if dev_eligible:
+            parts.append(f"Dev-eligible surface mechanisms: {', '.join(f'`{name}`' for name in dev_eligible)}.")
         if constrained:
-            parts.append(f"Constrained families after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
+            parts.append(f"Constrained surface mechanisms after regressions or repeated failed gates: {', '.join(f'`{name}`' for name in constrained)}.")
         if paused:
-            parts.append(f"Paused families pending stronger evidence: {', '.join(f'`{name}`' for name in paused)}.")
+            parts.append(f"Paused surface mechanisms pending stronger evidence: {', '.join(f'`{name}`' for name in paused)}.")
         if not result.promoted:
             parts.append("No candidate cleared the configured dev and holdout gates, so Ratchet kept the baseline.")
         return " ".join(parts)
@@ -1103,7 +1205,7 @@ def _frontier_status_summaries(proposals: list[dict[str, Any]]) -> dict[str, dic
             continue
         item = summaries.setdefault(
             str(status),
-            {"count": 0, "best_score_delta": None, "best_cost_delta": None, "patch_hashes": []},
+            {"count": 0, "best_score_delta": None, "best_cost_delta": None, "candidate_ids": []},
         )
         item["count"] += 1
         comparison = row.get("comparison_to_parent") or {}
@@ -1117,10 +1219,56 @@ def _frontier_status_summaries(proposals: list[dict[str, Any]]) -> dict[str, dic
             item["best_cost_delta"] is None or float(cost_delta) < float(item["best_cost_delta"])
         ):
             item["best_cost_delta"] = float(cost_delta)
-        patch_hash_value = row.get("patch_hash")
-        if patch_hash_value and patch_hash_value not in item["patch_hashes"]:
-            item["patch_hashes"].append(str(patch_hash_value))
+        candidate_id_value = row.get("candidate_id")
+        if candidate_id_value and candidate_id_value not in item["candidate_ids"]:
+            item["candidate_ids"].append(str(candidate_id_value))
     return summaries
+
+
+def _transform_trace_attribution(result: RatchetResult) -> dict[str, Any]:
+    summaries = [*result.accepted_dev_candidates, *result.holdout_candidates]
+    by_candidate: dict[str, dict[str, Any]] = {}
+    for summary in summaries:
+        if summary.candidate is None:
+            continue
+        item = by_candidate.setdefault(
+            summary.candidate_id,
+            {
+                "candidate_id": summary.candidate_id,
+                "splits": set(),
+                "trace_event_count": 0,
+                "operation_counts": Counter(),
+                "skipped_tool_counts": Counter(),
+            },
+        )
+        item["splits"].add(summary.split)
+        for evaluation in summary.evaluations:
+            trace = evaluation.record.diagnostics.metadata.get("transform_trace", [])
+            if not isinstance(trace, list):
+                continue
+            for event in trace:
+                if not isinstance(event, dict):
+                    continue
+                hook = str(event.get("hook") or "unknown")
+                op = str(event.get("op") or "unknown")
+                trace_result = str(event.get("result") or "applied")
+                item["trace_event_count"] += 1
+                item["operation_counts"][f"{hook}:{op}:{trace_result}"] += 1
+                fields = event.get("fields") if isinstance(event.get("fields"), dict) else {}
+                if trace_result == "skipped_tool":
+                    expected = str(fields.get("tool") or "unknown")
+                    actual = str(fields.get("actual") or "unknown")
+                    item["skipped_tool_counts"][f"{expected}->{actual}"] += 1
+    candidates: dict[str, dict[str, Any]] = {}
+    for candidate_id_value, item in by_candidate.items():
+        candidates[candidate_id_value] = {
+            "candidate_id": candidate_id_value,
+            "splits": sorted(item["splits"]),
+            "trace_event_count": int(item["trace_event_count"]),
+            "operation_counts": dict(sorted(item["operation_counts"].items(), key=lambda pair: (-pair[1], pair[0]))),
+            "skipped_tool_counts": dict(sorted(item["skipped_tool_counts"].items(), key=lambda pair: (-pair[1], pair[0]))),
+        }
+    return {"candidates": candidates}
 
 
 def _small_dev_signal(row: dict[str, Any]) -> dict[str, Any]:
@@ -1138,7 +1286,25 @@ def _small_dev_signal(row: dict[str, Any]) -> dict[str, Any]:
         "case_count": int(stage.get("case_count") or 0),
         "score_delta": float(comparison.get("score_delta") or 0.0),
         "pass_gain": pass_gain,
+        "failure_label_delta": _top_failure_label_delta(stage.get("failure_label_delta") or {}),
     }
+
+
+def _top_failure_label_delta(delta: Any) -> str:
+    if not isinstance(delta, dict) or not delta:
+        return "none"
+    rows = []
+    for label, payload in delta.items():
+        if not isinstance(payload, dict):
+            continue
+        change = int(payload.get("delta") or 0)
+        if change == 0:
+            continue
+        rows.append((abs(change), label, change))
+    if not rows:
+        return "none"
+    rows.sort(reverse=True)
+    return ", ".join(f"`{label}` {change:+d}" for _magnitude, label, change in rows[:3])
 
 
 def _short_reason(reason: Any) -> str:
@@ -1146,14 +1312,36 @@ def _short_reason(reason: Any) -> str:
     return text.split(":", 1)[0] if ":" in text else text
 
 
+def _proposal_coverage_text(stats: Any) -> str:
+    if not isinstance(stats, dict):
+        return "n/a"
+    audit = stats.get("plan_audit")
+    if not isinstance(audit, dict):
+        return "n/a"
+    valid = audit.get("valid_covered_brief_ids") or []
+    invalid = audit.get("unrepaired_invalid_brief_ids") or []
+    missed = (
+        audit["unattempted_brief_ids"]
+        if "unattempted_brief_ids" in audit
+        else audit.get("missing_brief_ids") or []
+    )
+    lost = audit.get("mechanisms_lost_to_transform_errors") or []
+    return (
+        f"valid={len(valid)} "
+        f"contract_failed={len(invalid)} "
+        f"unattempted={len(missed)} "
+        f"lost_mechanisms={json.dumps(lost[:5])}"
+    )
+
+
 def _selected_finalist_status(
     finalist_statuses: list[dict[str, Any]],
-    selected_patch_hash: str,
+    selected_candidate_id: str,
 ) -> dict[str, Any] | None:
     for row in finalist_statuses:
-        if row.get("patch_hash") == selected_patch_hash:
+        if row.get("candidate_id") == selected_candidate_id:
             return {
-                "patch_hash": row.get("patch_hash"),
+                "candidate_id": row.get("candidate_id"),
                 "status": row.get("status"),
                 "stage": row.get("stage"),
                 "reason": row.get("reason"),
@@ -1161,3 +1349,19 @@ def _selected_finalist_status(
                 "comparison_to_baseline": row.get("comparison_to_baseline"),
             }
     return None
+
+
+def _surface_rows(surface_rows: list[dict[str, Any]]) -> list[str]:
+    rows: list[str] = []
+    for row in surface_rows:
+        if "agent_id" in row:
+            rows.append(
+                f"- `{row['agent_id']}`: context_sections={len((row.get('context') or {}).get('graph', {}).get('sections', []))}; "
+                f"hooks={len(row.get('hooks') or {})}"
+            )
+            continue
+        rows.append(
+            f"- `{row.get('name', 'surface')}` ({row.get('kind', 'unknown')}): "
+            f"{', '.join(row.get('allowed_ops') or [])}; schema={json.dumps(row.get('value_schema', {}), sort_keys=True)}"
+        )
+    return rows

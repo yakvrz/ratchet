@@ -3,17 +3,17 @@ from __future__ import annotations
 import unittest
 
 from ratchet.evidence_ledger import build_evidence_summary, confirmation_stability_result
-from ratchet.results import CaseEvaluation, PatchSummary
-from ratchet.types import AgentPatch, DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
+from ratchet.results import CaseEvaluation, CandidateSummary
+from ratchet.types import DiagnosticTrace, EvalCase, GradeResult, OperationalMetrics, OptimizationObjective, RunRecord
 
 
 def summary(
-    patch_hash: str,
+    candidate_id: str,
     scores: list[float],
     *,
     invalid_indices: set[int] | None = None,
     finish_reason: str = "stop",
-) -> PatchSummary:
+) -> CandidateSummary:
     invalid_indices = invalid_indices or set()
     evaluations: list[CaseEvaluation] = []
     for index, score in enumerate(scores, start=1):
@@ -44,9 +44,9 @@ def summary(
                 ),
             )
         )
-    return PatchSummary(
-        patch_hash=patch_hash,
-        patch=AgentPatch.empty(),
+    return CandidateSummary(
+        candidate_id=candidate_id,
+        candidate=None,
         split="dev",
         evaluations=evaluations,
     )
@@ -63,8 +63,8 @@ class EvidenceLedgerTests(unittest.TestCase):
             reference=reference,
             baseline=reference,
             candidate=candidate,
-            mechanism_class="semantic_boundary_rewrite",
-            affordance_ids=["prompt.semantic"],
+            mechanism_class="surface_context",
+            surface_opportunity_ids=["surface.surface_context.system_prompt"],
             comparison_group="group",
             candidate_role="atomic",
             rejection_reason=None,
@@ -84,8 +84,8 @@ class EvidenceLedgerTests(unittest.TestCase):
             reference=reference,
             baseline=reference,
             candidate=candidate,
-            mechanism_class="runtime_defect_fix",
-            affordance_ids=["runtime.output_cap"],
+            mechanism_class="surface_runtime",
+            surface_opportunity_ids=["surface.surface_runtime.output_cap"],
             comparison_group="runtime",
             candidate_role="atomic",
             rejection_reason=None,

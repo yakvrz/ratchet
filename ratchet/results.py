@@ -8,8 +8,8 @@ import statistics
 from typing import Any, Iterable
 
 from ratchet.io import append_jsonl, case_digest, stable_digest
+from ratchet.transform_program import CompiledCandidate
 from ratchet.types import (
-    AgentPatch,
     AgentSpec,
     EvalCase,
     GradeResult,
@@ -21,6 +21,8 @@ from ratchet.types import (
 @dataclass
 class OptimizerStats:
     cache_hits: int = 0
+    local_cache_hits: int = 0
+    shared_cache_hits: int = 0
     fresh_case_evaluations: int = 0
     retries: int = 0
     runtime_errors: int = 0
@@ -37,14 +39,23 @@ class CaseEvaluation:
     record: RunRecord
     grade: GradeResult
     cached: bool = False
+    cache_source: str = "fresh"
     sample_index: int = 0
 
-    def to_record(self, patch_hash_value: str, patch: AgentPatch, *, cache_namespace: str) -> dict[str, Any]:
+    def to_record(
+        self,
+        candidate_id_value: str,
+        candidate: CompiledCandidate | None,
+        *,
+        cache_namespace: str,
+    ) -> dict[str, Any]:
         return {
             "cache_namespace": cache_namespace,
-            "patch_hash": patch_hash_value,
+            "candidate_id": candidate_id_value,
             "sample_index": self.sample_index,
-            "patch": patch.to_dict(),
+            "cached": self.cached,
+            "cache_source": self.cache_source,
+            "candidate": candidate.to_dict() if candidate is not None else None,
             "case_digest": case_digest(self.case),
             "case": self.case.to_dict(),
             "record": self.record.to_dict(),
@@ -58,14 +69,15 @@ class CaseEvaluation:
             record=RunRecord.from_dict(payload["record"]),
             grade=GradeResult.from_dict(payload["grade"]),
             cached=True,
+            cache_source=str(payload.get("cache_source") or "local"),
             sample_index=int(payload.get("sample_index", 0)),
         )
 
 
 @dataclass
-class PatchSummary:
-    patch_hash: str
-    patch: AgentPatch
+class CandidateSummary:
+    candidate_id: str
+    candidate: CompiledCandidate | None
     split: str
     evaluations: list[CaseEvaluation]
 
@@ -154,7 +166,7 @@ class PatchSummary:
 
     @property
     def operation_count(self) -> int:
-        return len(self.patch.operations)
+        return len(self.candidate.program.patches) if self.candidate is not None else 0
 
     @property
     def failure_labels(self) -> dict[str, int]:
@@ -236,8 +248,8 @@ class PatchSummary:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "patch_hash": self.patch_hash,
-            "patch": self.patch.to_dict(),
+            "candidate_id": self.candidate_id,
+            "candidate": self.candidate.to_dict() if self.candidate is not None else None,
             "split": self.split,
             "case_count": self.case_count,
             "sample_count": self.sample_count,
@@ -277,6 +289,7 @@ class PatchSummary:
                     "record": evaluation.record.to_dict(),
                     "grade": evaluation.grade.to_dict(),
                     "cached": evaluation.cached,
+                    "cache_source": evaluation.cache_source,
                 }
                 for evaluation in self.evaluations
             ],
@@ -354,25 +367,24 @@ class Comparison:
 
 @dataclass
 class RatchetResult:
-    baseline_patch: AgentPatch
-    selected_patch: AgentPatch
-    selected_patch_hash: str
+    baseline_candidate: CompiledCandidate | None
+    selected_candidate: CompiledCandidate | None
+    selected_candidate_id: str
     promoted: bool
-    baseline_dev: PatchSummary
-    baseline_holdout: PatchSummary
-    best_dev_patch: PatchSummary
-    selected_holdout: PatchSummary
-    accepted_dev_patches: list[PatchSummary]
-    holdout_patches: list[PatchSummary]
+    baseline_dev: CandidateSummary
+    baseline_holdout: CandidateSummary | None
+    best_dev_candidate: CandidateSummary
+    selected_holdout: CandidateSummary | None
+    accepted_dev_candidates: list[CandidateSummary]
+    holdout_candidates: list[CandidateSummary]
     pareto_frontier: list[dict[str, Any]]
-    decision_log: list[dict[str, Any]]
-    diagnoses: list[dict[str, Any]]
+    events: list[dict[str, Any]]
     proposals: list[dict[str, Any]]
     generated_surface: list[dict[str, Any]]
-    task_theories: list[dict[str, Any]]
+    search_plans: list[dict[str, Any]]
     transform_summaries: dict[str, dict[str, Any]]
     transform_context_summaries: dict[str, dict[str, Any]]
-    affordance_summaries: dict[str, dict[str, Any]]
+    surface_opportunity_summaries: dict[str, dict[str, Any]]
     finalist_statuses: list[dict[str, Any]]
     runtime_reliability_diagnostics: list[dict[str, Any]]
     confirmation_results: list[dict[str, Any]]
@@ -389,12 +401,16 @@ class RatchetResult:
 
 
 class ResultStore:
-    def __init__(self, out_dir: Path, *, cache_namespace: str) -> None:
+    def __init__(self, out_dir: Path, *, cache_namespace: str, shared_cache_path: Path | None = None) -> None:
         self.out_dir = out_dir
+        self.out_dir.mkdir(parents=True, exist_ok=True)
         self.case_results_path = out_dir / "case_results.jsonl"
+        self.shared_cache_path = shared_cache_path
         self.cache_namespace = cache_namespace
         self.records: dict[tuple[str, str, int], CaseEvaluation] = {}
+        self.shared_records: dict[tuple[str, str, int], CaseEvaluation] = {}
         self._load_existing()
+        self._load_shared()
 
     def _load_existing(self) -> None:
         if not self.case_results_path.exists():
@@ -405,27 +421,88 @@ class ResultStore:
                 continue
             payload = json.loads(line)
             if payload.get("cache_namespace") != self.cache_namespace:
-                continue
+                raise ValueError(
+                    f"Run-local cache namespace mismatch in {self.case_results_path}: "
+                    f"{payload.get('cache_namespace')!r} != {self.cache_namespace!r}."
+                )
             evaluation = CaseEvaluation.from_record(payload)
+            evaluation.cache_source = "local"
             if evaluation.record.metrics.error:
                 continue
             stored_digest = payload.get("case_digest")
             if stored_digest != case_digest(evaluation.case):
                 continue
-            self.records[(payload["patch_hash"], stored_digest, evaluation.sample_index)] = evaluation
+            self.records[(payload["candidate_id"], stored_digest, evaluation.sample_index)] = evaluation
 
-    def get(self, patch_hash_value: str, case: EvalCase, sample_index: int = 0) -> CaseEvaluation | None:
-        return self.records.get((patch_hash_value, case_digest(case), sample_index))
+    def _load_shared(self) -> None:
+        if self.shared_cache_path is None or not self.shared_cache_path.exists():
+            return
+        for raw_line in self.shared_cache_path.read_text().splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            payload = json.loads(line)
+            if payload.get("cache_namespace") != self.cache_namespace:
+                continue
+            evaluation = CaseEvaluation.from_record(payload)
+            evaluation.cache_source = "shared"
+            if evaluation.record.metrics.error:
+                continue
+            stored_digest = payload.get("case_digest")
+            if stored_digest != case_digest(evaluation.case):
+                continue
+            self.shared_records[(payload["candidate_id"], stored_digest, evaluation.sample_index)] = evaluation
 
-    def put(self, patch_hash_value: str, patch: AgentPatch, evaluation: CaseEvaluation) -> None:
-        key = (patch_hash_value, case_digest(evaluation.case), evaluation.sample_index)
+    def get(
+        self,
+        candidate_id_value: str,
+        case: EvalCase,
+        sample_index: int = 0,
+        candidate: CompiledCandidate | None = None,
+    ) -> CaseEvaluation | None:
+        key = (candidate_id_value, case_digest(case), sample_index)
+        local = self.records.get(key)
+        if local is not None:
+            local.cached = True
+            local.cache_source = "local"
+            return local
+        shared = self.shared_records.get(key)
+        if shared is not None:
+            shared.cached = True
+            shared.cache_source = "shared"
+            self._put_local(candidate_id_value, candidate, shared)
+            return shared
+        return None
+
+    def put(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        evaluation.cache_source = "fresh"
+        self._put_local(candidate_id_value, candidate, evaluation)
+        self._put_shared(candidate_id_value, candidate, evaluation)
+
+    def _put_local(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        key = (candidate_id_value, case_digest(evaluation.case), evaluation.sample_index)
         if key in self.records:
             return
         if not evaluation.record.metrics.error:
             self.records[key] = evaluation
         append_jsonl(
             self.case_results_path,
-            evaluation.to_record(patch_hash_value, patch, cache_namespace=self.cache_namespace),
+            evaluation.to_record(candidate_id_value, candidate, cache_namespace=self.cache_namespace),
+        )
+
+    def _put_shared(self, candidate_id_value: str, candidate: CompiledCandidate | None, evaluation: CaseEvaluation) -> None:
+        if self.shared_cache_path is None:
+            return
+        key = (candidate_id_value, case_digest(evaluation.case), evaluation.sample_index)
+        if key in self.shared_records:
+            return
+        if evaluation.record.metrics.error:
+            return
+        self.shared_cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.shared_records[key] = evaluation
+        append_jsonl(
+            self.shared_cache_path,
+            evaluation.to_record(candidate_id_value, candidate, cache_namespace=self.cache_namespace),
         )
 
 

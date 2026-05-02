@@ -1,17 +1,17 @@
 {
   "task_id": "clinc150_assessment",
   "mechanisms_of_interest": [
-    "runtime_defect_fix",
-    "output_contract_fix",
-    "semantic_boundary_rewrite",
-    "representative_examples",
-    "contrastive_examples",
-    "model_capability_probe"
+    "surface_context",
+    "surface_response",
+    "surface_output",
+    "surface_runtime",
+    "surface_model",
+    "surface_examples"
   ],
   "pivotal_mechanisms": [
-    "runtime_defect_fix",
-    "semantic_boundary_rewrite",
-    "contrastive_examples"
+    "surface_context",
+    "surface_output",
+    "surface_examples"
   ],
   "min_valid_implementation_rate": 0.6,
   "frontier_quality": {

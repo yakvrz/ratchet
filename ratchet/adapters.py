@@ -7,7 +7,9 @@ import json
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-from ratchet.types import AgentPatch, AgentSpec, EvalCase, GradeResult, RunRecord
+from ratchet.surfaces import SurfaceSpec, surface_from_agent_spec
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import AgentSpec, EvalCase, GradeResult, RunRecord
 
 
 FINGERPRINTED_SOURCE_SUFFIXES = {
@@ -39,13 +41,16 @@ class AdapterProtocol(Protocol):
     def agent_spec(self) -> AgentSpec:
         ...
 
-    def run_case(self, case: EvalCase, patch: AgentPatch | None = None) -> RunRecord:
+    def surface_spec(self, cases: tuple[EvalCase, ...]) -> SurfaceSpec:
+        ...
+
+    def run_case(self, case: EvalCase, candidate: CompiledCandidate | None = None) -> RunRecord:
         ...
 
     def grade(self, case: EvalCase, output: object) -> GradeResult:
         ...
 
-    def export(self, patch: AgentPatch, out_dir: Path) -> None:
+    def export(self, candidate: CompiledCandidate, out_dir: Path) -> None:
         ...
 
 
@@ -66,8 +71,13 @@ def load_adapter(spec: str) -> AdapterProtocol:
 
 
 def checked_agent_spec(adapter: AdapterProtocol, *, adapter_spec: str = "adapter") -> AgentSpec:
+    # Optimizer internals still derive task evidence from AgentSpec while the new
+    # transform path uses surface_spec() as the executable optimization contract.
+    method = getattr(adapter, "agent_spec", None)
+    if not callable(method):
+        raise TypeError(f"Adapter {adapter_spec} is missing agent_spec().")
     try:
-        spec = adapter.agent_spec()
+        spec = method()
     except Exception as exc:
         raise TypeError(f"Adapter {adapter_spec} agent_spec() failed: {exc}") from exc
     if spec is None:
@@ -77,6 +87,28 @@ def checked_agent_spec(adapter: AdapterProtocol, *, adapter_spec: str = "adapter
             f"Adapter {adapter_spec} agent_spec() returned {type(spec).__name__}, expected AgentSpec."
         )
     return spec
+
+
+def checked_surface_spec(
+    adapter: AdapterProtocol,
+    *,
+    adapter_spec: str = "adapter",
+    cases: tuple[EvalCase, ...],
+) -> SurfaceSpec:
+    if not cases:
+        raise ValueError(f"Adapter {adapter_spec} surface inference requires at least one proposal-safe case.")
+    method = getattr(adapter, "surface_spec", None)
+    if callable(method):
+        try:
+            surface = method(cases)
+        except Exception as exc:
+            raise TypeError(f"Adapter {adapter_spec} surface_spec() failed: {exc}") from exc
+        if not isinstance(surface, SurfaceSpec):
+            raise TypeError(
+                f"Adapter {adapter_spec} surface_spec() returned {type(surface).__name__}, expected SurfaceSpec."
+            )
+        return surface
+    return surface_from_agent_spec(checked_agent_spec(adapter, adapter_spec=adapter_spec))
 
 
 def adapter_fingerprint(spec: str) -> dict[str, Any]:

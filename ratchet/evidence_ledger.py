@@ -5,7 +5,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterable
 
 from ratchet.objectives import behavior_flip_summary, compare_summaries
-from ratchet.results import Comparison, PatchSummary
+from ratchet.results import Comparison, CandidateSummary
 from ratchet.types import OptimizationObjective
 
 
@@ -19,9 +19,8 @@ class EvidenceSummary:
     stage: str
     case_ids: list[str]
     case_count: int
-    reference_patch_hash: str
-    baseline_patch_hash: str
-    candidate_patch_hash: str
+    reference_candidate_id: str
+    baseline_candidate_id: str
     comparison_to_reference: dict[str, Any]
     behavior_flip_summary: dict[str, Any]
     effect_size: float
@@ -41,7 +40,7 @@ class EvidenceSummary:
     baseline_instability_flags: list[str]
     measurement_cost: dict[str, Any]
     mechanism_class: str
-    affordance_ids: list[str]
+    surface_opportunity_ids: list[str]
     comparison_group: str
     candidate_role: str
     rejection_reason: str | None = None
@@ -61,11 +60,11 @@ class EvidenceLedger:
         *,
         candidate_id: str,
         stage: str,
-        reference: PatchSummary,
-        baseline: PatchSummary,
-        candidate: PatchSummary,
+        reference: CandidateSummary,
+        baseline: CandidateSummary,
+        candidate: CandidateSummary,
         mechanism_class: str,
-        affordance_ids: list[str],
+        surface_opportunity_ids: list[str],
         comparison_group: str,
         candidate_role: str,
         rejection_reason: str | None,
@@ -78,7 +77,7 @@ class EvidenceLedger:
             baseline=baseline,
             candidate=candidate,
             mechanism_class=mechanism_class,
-            affordance_ids=affordance_ids,
+            surface_opportunity_ids=surface_opportunity_ids,
             comparison_group=comparison_group,
             candidate_role=candidate_role,
             rejection_reason=rejection_reason,
@@ -117,11 +116,11 @@ def build_evidence_summary(
     *,
     candidate_id: str,
     stage: str,
-    reference: PatchSummary,
-    baseline: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    baseline: CandidateSummary,
+    candidate: CandidateSummary,
     mechanism_class: str,
-    affordance_ids: list[str],
+    surface_opportunity_ids: list[str],
     comparison_group: str,
     candidate_role: str,
     rejection_reason: str | None,
@@ -148,9 +147,8 @@ def build_evidence_summary(
         stage=stage,
         case_ids=list(candidate.grouped_evaluations),
         case_count=candidate.case_count,
-        reference_patch_hash=reference.patch_hash,
-        baseline_patch_hash=baseline.patch_hash,
-        candidate_patch_hash=candidate.patch_hash,
+        reference_candidate_id=reference.candidate_id,
+        baseline_candidate_id=baseline.candidate_id,
         comparison_to_reference=comparison.to_dict(),
         behavior_flip_summary=flip_summary,
         effect_size=round(comparison.score_delta, 6),
@@ -170,7 +168,7 @@ def build_evidence_summary(
         baseline_instability_flags=flags,
         measurement_cost=_measurement_cost(candidate),
         mechanism_class=mechanism_class,
-        affordance_ids=list(affordance_ids),
+        surface_opportunity_ids=list(surface_opportunity_ids),
         comparison_group=comparison_group,
         candidate_role=candidate_role,
         rejection_reason=rejection_reason,
@@ -179,7 +177,7 @@ def build_evidence_summary(
     )
 
 
-def _measurement_cost(candidate: PatchSummary) -> dict[str, Any]:
+def _measurement_cost(candidate: CandidateSummary) -> dict[str, Any]:
     fresh_evaluations = [evaluation for evaluation in candidate.evaluations if not evaluation.cached]
     fresh_cost = sum(evaluation.record.metrics.cost_usd for evaluation in fresh_evaluations)
     fresh_tokens = sum(evaluation.record.metrics.total_tokens for evaluation in fresh_evaluations)
@@ -204,10 +202,10 @@ def _measurement_cost(candidate: PatchSummary) -> dict[str, Any]:
 
 def confirmation_stability_result(
     *,
-    reference: PatchSummary,
-    candidate: PatchSummary,
-    repeated_reference: PatchSummary,
-    repeated_candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
+    repeated_reference: CandidateSummary,
+    repeated_candidate: CandidateSummary,
     objective: OptimizationObjective,
 ) -> dict[str, Any]:
     comparison = compare_summaries(repeated_reference, repeated_candidate)
@@ -323,12 +321,12 @@ def _sign_consistency(*, pass_gain: int, score_delta: float) -> str:
 
 def _baseline_instability_flags(
     *,
-    reference: PatchSummary,
-    baseline: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    baseline: CandidateSummary,
+    candidate: CandidateSummary,
 ) -> list[str]:
     flags: list[str] = []
-    if reference.patch_hash != baseline.patch_hash:
+    if reference.candidate_id != baseline.candidate_id:
         return flags
     reference_invalid = len(_invalid_case_ids(reference))
     candidate_invalid = len(_invalid_case_ids(candidate))
@@ -345,7 +343,7 @@ def _baseline_instability_flags(
     return sorted(set(flags))
 
 
-def _invalid_case_ids(summary: PatchSummary) -> list[str]:
+def _invalid_case_ids(summary: CandidateSummary) -> list[str]:
     rows: list[str] = []
     for case_id, evaluations in summary.grouped_evaluations.items():
         if any(_invalid_output(evaluation) for evaluation in evaluations):
@@ -363,7 +361,7 @@ def _invalid_output(evaluation: Any) -> bool:
     )
 
 
-def _finish_reason_counts(summary: PatchSummary) -> Counter[str]:
+def _finish_reason_counts(summary: CandidateSummary) -> Counter[str]:
     counts: Counter[str] = Counter()
     for evaluations in summary.grouped_evaluations.values():
         for evaluation in evaluations:
@@ -373,7 +371,7 @@ def _finish_reason_counts(summary: PatchSummary) -> Counter[str]:
     return counts
 
 
-def _tool_problem_case_ids(summary: PatchSummary) -> list[str]:
+def _tool_problem_case_ids(summary: CandidateSummary) -> list[str]:
     rows: list[str] = []
     for case_id, evaluations in summary.grouped_evaluations.items():
         if any(_has_tool_problem(evaluation) for evaluation in evaluations):

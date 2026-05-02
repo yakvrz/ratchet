@@ -7,24 +7,26 @@ from typing import Any
 
 from ratchet.evidence_ledger import confirmation_stability_result
 from ratchet.objectives import behavior_flip_summary, compare_summaries
-from ratchet.results import PatchSummary, RatchetResult
-from ratchet.types import AgentPatch, EvalCase, OptimizationObjective
+from ratchet.results import CandidateSummary, RatchetResult
+from ratchet.transform_program import CompiledCandidate
+from ratchet.types import EvalCase, OptimizationObjective
 
 
 LOW_OUTPUT_TOKEN_RATIO = 0.25
 
 
 def runtime_reliability_diagnostics(
-    reference: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
 ) -> dict[str, Any]:
     flip_summary = behavior_flip_summary(reference, candidate)
     fixed_ids = set(flip_summary["fixed_case_ids"])
-    runtime_only = _is_runtime_only_patch(candidate.patch)
-    runtime_involved = _touches_runtime(candidate.patch)
+    runtime_only = _is_runtime_only_patch(candidate.candidate)
+    runtime_involved = _touches_runtime(candidate.candidate)
     reference_by_id = _representative_evaluations(reference)
     candidate_by_id = _representative_evaluations(candidate)
     fixed_invalid: list[str] = []
+    fixed_tool_problem: list[str] = []
     low_token_fixed: list[str] = []
     finish_reason_changed: list[str] = []
     finish_reasons: dict[str, list[str]] = defaultdict(list)
@@ -42,6 +44,8 @@ def runtime_reliability_diagnostics(
             continue
         if _invalid_output(reference_eval):
             fixed_invalid.append(case_id)
+        if _has_tool_problem(reference_eval) and not _has_tool_problem(candidate_eval):
+            fixed_tool_problem.append(case_id)
         cap = _requested_output_cap(reference_eval) or _requested_output_cap(candidate_eval)
         output_tokens = reference_eval.record.metrics.output_tokens
         if cap and output_tokens <= max(1, int(cap * LOW_OUTPUT_TOKEN_RATIO)):
@@ -51,23 +55,30 @@ def runtime_reliability_diagnostics(
             if finish_reason:
                 finish_reasons[case_id].append(finish_reason)
     baseline_runtime_defect_fixed = bool(runtime_involved and ((fixed_invalid and low_token_fixed) or finish_reason_changed))
+    tool_trajectory_defect_fixed = bool(fixed_tool_problem)
     return {
-        "patch_hash": candidate.patch_hash,
+        "candidate_id": candidate.candidate_id,
         "runtime_only": runtime_only,
         "runtime_involved": runtime_involved,
-        "runtime_finding": baseline_runtime_defect_fixed,
+        "runtime_finding": baseline_runtime_defect_fixed or tool_trajectory_defect_fixed,
         "diagnostic_class": (
             "baseline_runtime_defect_fixed"
             if baseline_runtime_defect_fixed
+            else "tool_trajectory_defect_fixed"
+            if tool_trajectory_defect_fixed
             else "no_runtime_reliability_finding"
         ),
         "baseline_runtime_defect_fixed": baseline_runtime_defect_fixed,
+        "tool_trajectory_defect_fixed": tool_trajectory_defect_fixed,
         "reason": (
-            "Baseline runtime defect fixed: runtime patch corrected invalid outputs where baseline runs ended far below the requested output cap."
+            "Baseline runtime defect fixed: runtime candidate corrected invalid outputs where baseline runs ended far below the requested output cap."
             if baseline_runtime_defect_fixed
+            else "Tool trajectory defect fixed: candidate removed tool errors or invalid tool outcomes seen in the reference run."
+            if tool_trajectory_defect_fixed
             else "No runtime reliability suspicion detected."
         ),
         "fixed_invalid_output_case_ids": fixed_invalid,
+        "fixed_tool_problem_case_ids": fixed_tool_problem,
         "low_token_fixed_case_ids": low_token_fixed,
         "finish_reason_changed_case_ids": finish_reason_changed,
         "regressed_case_ids": list(flip_summary["regressed_case_ids"]),
@@ -76,8 +87,8 @@ def runtime_reliability_diagnostics(
 
 
 def confirmation_case_subset(
-    reference: PatchSummary,
-    candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
     dev_cases: tuple[EvalCase, ...],
     *,
     stable_limit: int = 3,
@@ -108,10 +119,10 @@ def confirmation_case_subset(
 
 def confirmation_result(
     *,
-    reference: PatchSummary,
-    candidate: PatchSummary,
-    confirmation_reference: PatchSummary,
-    confirmation_candidate: PatchSummary,
+    reference: CandidateSummary,
+    candidate: CandidateSummary,
+    confirmation_reference: CandidateSummary,
+    confirmation_candidate: CandidateSummary,
     objective: OptimizationObjective | None = None,
 ) -> dict[str, Any]:
     objective = objective or OptimizationObjective()
@@ -123,7 +134,7 @@ def confirmation_result(
         objective=objective,
     )
     return {
-        "patch_hash": candidate.patch_hash,
+        "candidate_id": candidate.candidate_id,
         "diagnostic_class": stability["status"],
         **stability,
     }
@@ -132,50 +143,58 @@ def confirmation_result(
 def build_run_profile(result: RatchetResult, out_dir: Path) -> dict[str, Any]:
     progress_rows = _read_jsonl(out_dir / "progress.jsonl")
     optimizer_calls = _optimizer_call_profile(result.optimizer_call_diagnostics)
-    run_cost = _run_cost_profile(result, optimizer_calls)
+    run_cost = _run_cost_profile(result, optimizer_calls, progress_rows)
     return {
         "elapsed_s": max((float(row.get("elapsed_s", 0.0)) for row in progress_rows), default=0.0),
         "phase_durations_s": _phase_durations(progress_rows),
         "phase_attempt_durations_s": _phase_attempt_durations(progress_rows),
         "slowest_cases": _case_metric_extremes(result, metric="latency_s", limit=8),
         "highest_token_cases": _case_metric_extremes(result, metric="total_tokens", limit=8),
-        "patch_profiles": _patch_profiles(result),
-        "patch_deltas_vs_baseline": _patch_deltas_vs_baseline(result),
+        "candidate_profiles": _candidate_profiles(result),
+        "candidate_deltas_vs_baseline": _candidate_deltas_vs_baseline(result),
         "optimizer_calls": optimizer_calls,
         "run_cost": run_cost,
         "cache_events": {
             "case_cache_hits": sum(1 for row in progress_rows if row.get("event") == "case_cache_hit"),
+            "local_case_cache_hits": sum(
+                1
+                for row in progress_rows
+                if row.get("event") == "case_cache_hit" and row.get("cache_source") == "local"
+            ),
+            "shared_case_cache_hits": sum(
+                1
+                for row in progress_rows
+                if row.get("event") == "case_cache_hit" and row.get("cache_source") == "shared"
+            ),
             "case_completed": sum(1 for row in progress_rows if row.get("event") == "case_completed"),
-            "diagnosis_cache_hits": sum(
-                1
-                for row in progress_rows
-                if row.get("event") == "diagnosis_completed" and row.get("cached")
-            ),
-            "task_theory_cache_hits": sum(
-                1
-                for row in progress_rows
-                if row.get("event") == "task_theory_ready" and row.get("cached")
-            ),
         },
         "cache_hit_rate": _cache_hit_rate(progress_rows),
     }
 
 
-def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) -> dict[str, Any]:
+def _run_cost_profile(
+    result: RatchetResult,
+    optimizer_calls: dict[str, Any],
+    progress_rows: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    progress_rows = progress_rows or []
+    completed_rows = [row for row in progress_rows if row.get("event") == "case_completed"]
+    if completed_rows:
+        return _run_cost_profile_from_progress(completed_rows, optimizer_calls)
     seen_evaluations: set[tuple[str, str, int]] = set()
     eval_cost = 0.0
     eval_input_tokens = 0
     eval_output_tokens = 0
     eval_total_tokens = 0
     eval_count = 0
-    for summary in [
+    for summary in _present_summaries([
         result.baseline_dev,
         result.baseline_holdout,
-        *result.accepted_dev_patches,
-        *result.holdout_patches,
-    ]:
+        *result.accepted_dev_candidates,
+        *result.holdout_candidates,
+    ]):
         for evaluation in summary.evaluations:
-            key = (summary.patch_hash, evaluation.case.id, evaluation.sample_index)
+            key = (summary.candidate_id, evaluation.case.id, evaluation.sample_index)
             if key in seen_evaluations:
                 continue
             seen_evaluations.add(key)
@@ -207,26 +226,58 @@ def _run_cost_profile(result: RatchetResult, optimizer_calls: dict[str, Any]) ->
     }
 
 
+def _run_cost_profile_from_progress(
+    completed_rows: list[dict[str, Any]],
+    optimizer_calls: dict[str, Any],
+) -> dict[str, Any]:
+    eval_cost = sum(float(row.get("cost_usd") or 0.0) for row in completed_rows)
+    eval_input_tokens = sum(int(row.get("input_tokens") or 0) for row in completed_rows)
+    eval_output_tokens = sum(int(row.get("output_tokens") or 0) for row in completed_rows)
+    eval_total_tokens = sum(int(row.get("total_tokens") or 0) for row in completed_rows)
+    optimizer_totals = optimizer_calls.get("totals") or {}
+    optimizer_cost = float(optimizer_totals.get("cost_usd") or 0.0)
+    optimizer_input_tokens = int(optimizer_totals.get("input_tokens") or 0)
+    optimizer_output_tokens = int(optimizer_totals.get("output_tokens") or 0)
+    optimizer_total_tokens = int(optimizer_totals.get("total_tokens") or 0)
+    return {
+        "eval_cost_usd": eval_cost,
+        "optimizer_cost_usd": optimizer_cost,
+        "total_cost_usd": eval_cost + optimizer_cost,
+        "eval_case_evaluations": len(completed_rows),
+        "eval_input_tokens": eval_input_tokens,
+        "eval_output_tokens": eval_output_tokens,
+        "eval_tokens": eval_total_tokens,
+        "optimizer_input_tokens": optimizer_input_tokens,
+        "optimizer_output_tokens": optimizer_output_tokens,
+        "optimizer_tokens": optimizer_total_tokens,
+        "total_input_tokens": eval_input_tokens + optimizer_input_tokens,
+        "total_output_tokens": eval_output_tokens + optimizer_output_tokens,
+        "total_tokens": eval_total_tokens + optimizer_total_tokens,
+    }
+
+
 def quality_cost_tradeoffs(proposals: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows = []
     for row in proposals:
         reason = str(row.get("rejection_reason") or row.get("constraint_warning") or "")
-        if row.get("transform_family") != "model_substitution" or "cost constraint rejected" not in reason:
+        if row.get("surface_mechanism") != "surface_model" or "cost constraint rejected" not in reason:
             continue
         rows.append(
             {
-                "patch_hash": row.get("patch_hash"),
+                "candidate_id": row.get("candidate_id"),
                 "transform_instance": row.get("transform_instance"),
                 "rejection_reason": reason,
                 "comparison_to_parent": row.get("comparison_to_parent"),
                 "metrics": _compact_metrics(row.get("metrics") or {}),
-                "patch": row.get("patch"),
+                "proposal_candidate": row.get("proposal_candidate"),
+                "compiled_candidate": row.get("compiled_candidate"),
+                "candidate": row.get("compiled_candidate") or row.get("candidate"),
             }
         )
     return rows
 
 
-def _representative_evaluations(summary: PatchSummary) -> dict[str, Any]:
+def _representative_evaluations(summary: CandidateSummary) -> dict[str, Any]:
     rows = {}
     for case_id, evaluations, _, _, _ in summary._case_rows():
         rows[case_id] = next((item for item in evaluations if not item.grade.passed), evaluations[0])
@@ -242,6 +293,32 @@ def _invalid_output(evaluation: Any) -> bool:
     )
 
 
+def _has_tool_problem(evaluation: Any) -> bool:
+    diagnostics = evaluation.record.diagnostics
+    if diagnostics.terminal_reason in {"premature_stop", "max_turns", "stopped_before_required_action"}:
+        return True
+    for turn in diagnostics.turns:
+        if turn.outcome in {
+            "invalid_tool_call",
+            "wrong_tool",
+            "missing_tool",
+            "unnecessary_tool",
+            "bad_tool_arguments",
+            "premature_stop",
+            "policy_violation",
+            "state_mutation_error",
+        }:
+            return True
+        for tool_call in turn.tool_calls:
+            if tool_call.status in {"error", "invalid"} or tool_call.error:
+                return True
+    return any(
+        label.startswith(("wrong_tool", "missing_tool", "invalid_tool", "bad_tool"))
+        or label.startswith("tool_error:")
+        for label in evaluation.grade.labels
+    )
+
+
 def _requested_output_cap(evaluation: Any) -> int | None:
     value = evaluation.record.diagnostics.metadata.get("requested_output_cap")
     try:
@@ -250,15 +327,18 @@ def _requested_output_cap(evaluation: Any) -> int | None:
         return None
 
 
-def _is_runtime_only_patch(patch: AgentPatch) -> bool:
-    return bool(patch.operations) and all(
-        operation.op == "set_runtime_param" and operation.target.startswith("runtime.")
-        for operation in patch.operations
+def _is_runtime_only_patch(patch: CompiledCandidate | None) -> bool:
+    return patch is not None and bool(patch.program.patches) and all(
+        transform.op.op in {"set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"}
+        for transform in patch.program.patches
     )
 
 
-def _touches_runtime(patch: AgentPatch) -> bool:
-    return any(operation.op == "set_runtime_param" and operation.target.startswith("runtime.") for operation in patch.operations)
+def _touches_runtime(patch: CompiledCandidate | None) -> bool:
+    return patch is not None and any(
+        transform.op.op in {"set_model_config", "set_retry_policy", "set_turn_limit", "set_tool_call_limit"}
+        for transform in patch.program.patches
+    )
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -297,7 +377,7 @@ def _phase_intervals(rows: list[dict[str, Any]]) -> dict[str, list[tuple[float, 
     pairings = [
         ("baseline_dev", "baseline_dev_started", "baseline_dev_completed"),
         ("baseline_holdout", "baseline_holdout_started", "baseline_holdout_completed"),
-        ("diagnosis", "diagnosis_started", "diagnosis_completed"),
+        ("search_planning", "search_planner_started", "search_planner_completed"),
         ("proposal", "proposal_started", "proposal_completed"),
         ("candidate_evaluation", "candidate_evaluation_started", "candidate_evaluated"),
         ("confirmation", "confirmation_started", "confirmation_completed"),
@@ -335,16 +415,16 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
     for split_name, summaries in {
         "baseline_dev": [result.baseline_dev],
         "baseline_holdout": [result.baseline_holdout],
-        "accepted_dev": result.accepted_dev_patches,
-        "holdout": result.holdout_patches,
+        "accepted_dev": result.accepted_dev_candidates,
+        "holdout": result.holdout_candidates,
     }.items():
-        for summary in summaries:
+        for summary in _present_summaries(summaries):
             for evaluation in summary.evaluations:
                 metrics = evaluation.record.metrics
                 rows.append(
                     {
                         "split_group": split_name,
-                        "patch_hash": summary.patch_hash,
+                        "candidate_id": summary.candidate_id,
                         "case_id": evaluation.case.id,
                         "latency_s": metrics.latency_s,
                         "total_tokens": metrics.total_tokens,
@@ -357,18 +437,20 @@ def _case_metric_extremes(result: RatchetResult, *, metric: str, limit: int) -> 
     return rows[:limit]
 
 
-def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
-    summaries = [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_patches, *result.holdout_patches]
+def _candidate_profiles(result: RatchetResult) -> list[dict[str, Any]]:
+    summaries = _present_summaries(
+        [result.baseline_dev, result.baseline_holdout, *result.accepted_dev_candidates, *result.holdout_candidates]
+    )
     seen: set[tuple[str, str]] = set()
     rows = []
     for summary in summaries:
-        key = (summary.split, summary.patch_hash)
+        key = (summary.split, summary.candidate_id)
         if key in seen:
             continue
         seen.add(key)
         rows.append(
             {
-                "patch_hash": summary.patch_hash,
+                "candidate_id": summary.candidate_id,
                 "split": summary.split,
                 "case_count": summary.case_count,
                 "pass_count": summary.pass_count,
@@ -382,19 +464,19 @@ def _patch_profiles(result: RatchetResult) -> list[dict[str, Any]]:
     return rows
 
 
-def _patch_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
+def _candidate_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    for split_name, baseline, summaries in [
-        ("dev", result.baseline_dev, result.accepted_dev_patches),
-        ("holdout", result.baseline_holdout, result.holdout_patches),
-    ]:
+    split_groups = [("dev", result.baseline_dev, result.accepted_dev_candidates)]
+    if result.baseline_holdout is not None:
+        split_groups.append(("holdout", result.baseline_holdout, result.holdout_candidates))
+    for split_name, baseline, summaries in split_groups:
         for summary in summaries:
             if set(summary.grouped_evaluations) != set(baseline.grouped_evaluations):
                 continue
             comparison = compare_summaries(baseline, summary)
             rows.append(
                 {
-                    "patch_hash": summary.patch_hash,
+                    "candidate_id": summary.candidate_id,
                     "split": split_name,
                     "score_delta": comparison.score_delta,
                     "score_ci": comparison.score_ci,
@@ -407,6 +489,10 @@ def _patch_deltas_vs_baseline(result: RatchetResult) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def _present_summaries(summaries: list[CandidateSummary | None]) -> list[CandidateSummary]:
+    return [summary for summary in summaries if summary is not None]
 
 
 def _cache_hit_rate(rows: list[dict[str, Any]]) -> float:
@@ -448,7 +534,7 @@ def _optimizer_call_profile(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _compact_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return {
-        "patch_hash": metrics.get("patch_hash"),
+        "candidate_id": metrics.get("candidate_id"),
         "case_count": metrics.get("case_count"),
         "pass_count": metrics.get("pass_count"),
         "mean_score": metrics.get("mean_score"),
