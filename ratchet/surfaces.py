@@ -727,7 +727,7 @@ def tool_loop_surface_from_agent_spec(spec: AgentSpec, *, probe: dict[str, Any])
         immutable_boundaries=surface.immutable_boundaries,
         safety_constraints=surface.safety_constraints,
         affordances=tuple(_tool_loop_affordances(tool_specs)),
-        metadata={"source": "tool_loop_agent_spec"},
+        metadata={"source": "tool_loop_agent_spec", **dict(probe.get("metadata") or {})},
     )
 
 

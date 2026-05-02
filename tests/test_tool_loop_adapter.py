@@ -48,6 +48,30 @@ class _FakeEnvironment:
         return _Response("###STOP###", reward=1.0, done=True)
 
 
+class _HashPrefixedOrderEnvironment(_FakeEnvironment):
+    def step(self, action: dict[str, object]) -> _Response:
+        self.actions.append((str(action["name"]), dict(action["kwargs"])))
+        if action["name"] == "lookup_order":
+            return _Response('{"status": "success", "order": {"order_id": "#A1", "status": "delivered"}}')
+        return _Response("###STOP###", reward=1.0, done=True)
+
+
+class _CasePolicyEnvironment(_FakeEnvironment):
+    def __init__(self, *, policy: str, tool_name: str) -> None:
+        self.wiki = policy
+        self.tools_info = [
+            {
+                "type": "function",
+                "function": {
+                    "name": tool_name,
+                    "description": f"Run {tool_name}.",
+                    "parameters": {"type": "object", "properties": {}, "required": []},
+                },
+            }
+        ]
+        self.actions: list[tuple[str, dict[str, object]]] = []
+
+
 class _FakeClient:
     def __init__(self) -> None:
         self.calls = 0
@@ -534,6 +558,73 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertTrue(any(item["op"] == "validate" and item["result"] == "passed" for item in trace))
         self.assertIn(("mutate_order", {"order_id": "A1"}), env.actions)
 
+    def test_tool_arg_in_state_guard_matches_canonical_identifier_forms(self) -> None:
+        env = _HashPrefixedOrderEnvironment(
+            tools_info=[
+                *_FakeEnvironment.tools_info,
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "mutate_order",
+                        "description": "Mutate an order.",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"order_id": {"type": "string"}},
+                            "required": ["order_id"],
+                        },
+                    },
+                },
+            ]
+        )
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(
+                name="fake-tool-loop",
+                model="gpt-4o",
+                model_options=["gpt-4o"],
+                tools={
+                    "lookup_order": AgentTool(name="lookup_order", metadata={"side_effect": "read"}),
+                    "mutate_order": AgentTool(name="mutate_order", metadata={"side_effect": "mutating"}),
+                },
+            ),
+            environment_factory=lambda case, config: env,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_MutateAfterLookupClient(order_id="A1"),
+        )
+        candidate = TransformCompiler().compile_or_raise(
+            TransformProgram.from_dict(
+                {
+                    "candidate_id": "state_guard_normalized",
+                    "patches": [
+                        {"op": "define_state", "field": "inspected_order_ids", "type": "list[string]", "initial": []},
+                        {
+                            "hook": "after_tool_result",
+                            "op": "append_state",
+                            "field": "inspected_order_ids",
+                            "value": {"$ref": "tool_result.parsed.order.order_id"},
+                            "when": {"tool_call.name": "lookup_order"},
+                        },
+                        {
+                            "hook": "before_tool_call",
+                            "op": "validate",
+                            "tool": "mutate_order",
+                            "target": "tool_call",
+                            "checks": [
+                                {"type": "tool_arg_in_state", "state_field": "inspected_order_ids", "arg": "order_id"}
+                            ],
+                            "on_fail": {"op": "replan", "message": "Inspect this order before mutating it."},
+                        },
+                    ],
+                }
+            ),
+            adapter.surface_spec((self._case(),)),
+        )
+
+        record = adapter.run_case(self._case(), candidate)
+
+        trace = record.diagnostics.metadata["transform_trace"]
+        self.assertTrue(any(item["op"] == "validate" and item["result"] == "passed" for item in trace))
+        self.assertIn(("mutate_order", {"order_id": "A1"}), env.actions)
+
     def test_tool_arg_in_state_guard_replans_when_state_lacks_arg(self) -> None:
         env = _FakeEnvironment(
             tools_info=[
@@ -779,6 +870,80 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("not_duplicate_tool_call", check_names)
         self.assertEqual(surface.tools.tools[0].name, "lookup_order")
         self.assertEqual(surface.tools.tools[0].metadata["side_effect"], "read")
+
+    def test_tool_loop_surface_probe_unions_representative_case_surfaces(self) -> None:
+        def env_for_case(case: EvalCase, config: object) -> _CasePolicyEnvironment:
+            env_name = str(case.metadata["env"])
+            return _CasePolicyEnvironment(policy=f"{env_name} policy", tool_name=f"{env_name}_tool")
+
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=env_for_case,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+        cases = (
+            EvalCase(id="retail-1", split="dev", input="", expected={}, metadata={"env": "retail"}),
+            EvalCase(id="retail-2", split="dev", input="", expected={}, metadata={"env": "retail"}),
+            EvalCase(id="airline-1", split="dev", input="", expected={}, metadata={"env": "airline"}),
+        )
+
+        surface = adapter.surface_spec(cases)
+
+        policy = surface.context.graph.sections[0].content
+        self.assertIn("retail policy", policy)
+        self.assertIn("airline policy", policy)
+        self.assertEqual({tool.name for tool in surface.tools.tools}, {"airline_tool", "retail_tool"})
+        self.assertEqual(surface.metadata["surface_probe_case_ids"], ["retail-1", "airline-1", "retail-2"])
+
+    def test_tool_loop_runtime_uses_current_case_policy_after_surface_probe(self) -> None:
+        client = _CaptureSystemClient()
+
+        def env_for_case(case: EvalCase, config: object) -> _CasePolicyEnvironment:
+            env_name = str(case.metadata["env"])
+            return _CasePolicyEnvironment(policy=f"{env_name} runtime policy", tool_name=f"{env_name}_tool")
+
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=env_for_case,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=client,
+        )
+        retail = EvalCase(id="retail-1", split="dev", input="", expected={}, metadata={"env": "retail"})
+        airline = EvalCase(id="airline-1", split="dev", input="", expected={}, metadata={"env": "airline"})
+        adapter.surface_spec((retail, airline))
+
+        record = adapter.run_case(airline)
+
+        self.assertIsNone(record.metrics.error)
+        self.assertIn("[domain_policy]\nairline runtime policy", client.system_prompts[0])
+        self.assertNotIn("retail runtime policy", client.system_prompts[0])
+
+    def test_tool_loop_surface_probe_rejects_incompatible_same_name_tool_schema(self) -> None:
+        def env_for_case(case: EvalCase, config: object) -> _CasePolicyEnvironment:
+            env = _CasePolicyEnvironment(policy=str(case.id), tool_name="shared_tool")
+            required = ["order_id"] if case.id == "case-a" else ["reservation_id"]
+            env.tools_info[0]["function"]["parameters"] = {
+                "type": "object",
+                "properties": {required[0]: {"type": "string"}},
+                "required": required,
+            }
+            return env
+
+        adapter = GeneratedToolLoopAdapter(
+            agent_spec=AgentSpec(name="fake-tool-loop", model="gpt-4o", model_options=["gpt-4o"]),
+            environment_factory=env_for_case,
+            action_factory=lambda name, args: {"name": name, "kwargs": args},
+            client=_FakeClient(),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "incompatible schemas"):
+            adapter.surface_spec(
+                (
+                    EvalCase(id="case-a", split="dev", input="", expected={}, metadata={"env": "a"}),
+                    EvalCase(id="case-b", split="dev", input="", expected={}, metadata={"env": "b"}),
+                )
+            )
 
     def test_tool_loop_fingerprint_includes_environment_source(self) -> None:
         adapter = GeneratedToolLoopAdapter(

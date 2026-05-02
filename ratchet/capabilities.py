@@ -304,7 +304,7 @@ def _referenced_args_observed(ctx: Any) -> bool:
         if not isinstance(value, str):
             continue
         token = value.strip()
-        if _looks_like_identifier(token) and token not in observed_text:
+        if _looks_like_identifier(token) and not _observed_text_contains_identifier(observed_text, token):
             return False
     return True
 
@@ -319,10 +319,11 @@ def _tool_arg_in_state(ctx: Any, *, state_field: str, arg: str, state_key: str) 
     observed = state.get(state_field)
     if not isinstance(observed, list):
         return False
+    expected = _canonical_identifier(value)
     for item in observed:
-        if item == value:
+        if _canonical_identifier(item) == expected:
             return True
-        if isinstance(item, dict) and item.get(state_key) == value:
+        if isinstance(item, dict) and _canonical_identifier(item.get(state_key)) == expected:
             return True
     return False
 
@@ -345,6 +346,24 @@ def _looks_like_identifier(value: str) -> bool:
     if len(value) < 4:
         return False
     return bool(re.search(r"\d", value) or re.fullmatch(r"[A-Za-z_]+_[A-Za-z0-9_]+", value))
+
+
+def _observed_text_contains_identifier(observed_text: str, value: str) -> bool:
+    if value in observed_text:
+        return True
+    canonical = _canonical_identifier(value)
+    if not canonical:
+        return False
+    return canonical in {_canonical_identifier(match) for match in re.findall(r"[#A-Za-z0-9_:-]{4,}", observed_text)}
+
+
+def _canonical_identifier(value: Any) -> str:
+    if not isinstance(value, str):
+        return str(value)
+    normalized = value.strip()
+    if normalized.startswith("#") and len(normalized) > 1:
+        normalized = normalized[1:]
+    return normalized.casefold()
 
 
 def _completion_claims_supported(ctx: Any, *, state_field: str) -> bool:

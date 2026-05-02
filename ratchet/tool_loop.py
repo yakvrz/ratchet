@@ -68,10 +68,12 @@ def _probe_tool_loop_surface(
     if not cases:
         raise ValueError("tool-loop surface inference requires at least one proposal-safe case.")
     errors: list[str] = []
-    domain_policy = ""
+    policy_entries: list[dict[str, str]] = []
+    seen_policies: set[str] = set()
     tools: list[dict[str, Any]] = []
+    tool_contracts: dict[str, dict[str, Any]] = {}
     tool_result_schemas: dict[str, Any] = {}
-    for case in cases[:3]:
+    for case in _surface_probe_cases(cases):
         try:
             config = case_config(agent_spec, case)
             config = ToolLoopRunConfig(
@@ -86,20 +88,49 @@ def _probe_tool_loop_surface(
         except Exception as exc:
             errors.append(f"{case.id}: {type(exc).__name__}: {exc}")
             continue
-        if not domain_policy:
-            domain_policy = str(getattr(env, "wiki", "") or getattr(env, "policy", "") or "").strip()
+        domain_policy = _env_domain_policy(env)
+        if domain_policy and domain_policy not in seen_policies:
+            seen_policies.add(domain_policy)
+            policy_entries.append(
+                {
+                    "case_id": case.id,
+                    "label": _surface_probe_label(case),
+                    "content": domain_policy,
+                }
+            )
         raw_tools = getattr(env, "tools_info", None)
         if isinstance(raw_tools, list) and raw_tools:
-            tools = [dict(item) for item in raw_tools if isinstance(item, dict)]
+            for raw_tool in raw_tools:
+                if not isinstance(raw_tool, dict):
+                    continue
+                tool = dict(raw_tool)
+                name = _tool_name(tool)
+                if not name:
+                    continue
+                contract = _tool_contract_signature(tool)
+                previous = tool_contracts.get(name)
+                if previous is not None and previous != contract:
+                    raise RuntimeError(
+                        f"tool-loop surface inference found incompatible schemas for tool {name!r} "
+                        f"across proposal-safe cases."
+                    )
+                if previous is None:
+                    tool_contracts[name] = contract
+                    tools.append(tool)
             raw_result_schemas = getattr(env, "tool_result_schemas", None)
             if isinstance(raw_result_schemas, dict):
-                tool_result_schemas = {
-                    str(name): dict(schema)
-                    for name, schema in raw_result_schemas.items()
-                    if isinstance(schema, dict)
-                }
-            break
-    if not domain_policy:
+                for name, schema in raw_result_schemas.items():
+                    if not isinstance(schema, dict):
+                        continue
+                    name_s = str(name)
+                    previous = tool_result_schemas.get(name_s)
+                    if previous is not None and _canonical_json(previous) != _canonical_json(schema):
+                        raise RuntimeError(
+                            f"tool-loop surface inference found incompatible result schemas for tool {name_s!r} "
+                            f"across proposal-safe cases."
+                        )
+                    tool_result_schemas[name_s] = dict(schema)
+    if not policy_entries:
         raise RuntimeError(
             "tool-loop surface inference requires a pre-trajectory domain policy/wiki exposed by the environment."
         )
@@ -109,7 +140,76 @@ def _probe_tool_loop_surface(
             "tool-loop surface inference requires pre-trajectory tool schemas exposed as env.tools_info."
             + detail
         )
-    return {"domain_policy": domain_policy, "tools": tools, "tool_result_schemas": tool_result_schemas}
+    return {
+        "domain_policy": _combined_domain_policy(policy_entries),
+        "domain_policies": policy_entries,
+        "tools": sorted(tools, key=lambda item: _tool_name(item)),
+        "tool_result_schemas": tool_result_schemas,
+        "metadata": {
+            "surface_probe_case_ids": [case.id for case in _surface_probe_cases(cases)],
+            "surface_probe_policy_count": len(policy_entries),
+        },
+    }
+
+
+def _surface_probe_cases(cases: tuple[EvalCase, ...]) -> tuple[EvalCase, ...]:
+    selected: list[EvalCase] = []
+    seen_keys: set[tuple[str, str]] = set()
+    for case in cases:
+        metadata = dict(case.metadata)
+        key = (
+            str(metadata.get("env") or metadata.get("category") or metadata.get("label") or case.split or ""),
+            str(metadata.get("task_split") or ""),
+        )
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        selected.append(case)
+    for case in cases:
+        if len(selected) >= 12:
+            break
+        if case not in selected:
+            selected.append(case)
+    return tuple(selected)
+
+
+def _surface_probe_label(case: EvalCase) -> str:
+    metadata = dict(case.metadata)
+    parts = [
+        f"{key}={value}"
+        for key in ("env", "category", "label", "task_split")
+        if (value := metadata.get(key)) not in (None, "")
+    ]
+    return ", ".join(parts) or case.id
+
+
+def _env_domain_policy(env: Any) -> str:
+    return str(getattr(env, "wiki", "") or getattr(env, "policy", "") or "").strip()
+
+
+def _combined_domain_policy(entries: list[dict[str, str]]) -> str:
+    if len(entries) == 1:
+        return entries[0]["content"]
+    rendered = []
+    for entry in entries:
+        rendered.append(f"# Surface probe policy ({entry['label']})\n\n{entry['content']}")
+    return "\n\n".join(rendered)
+
+
+def _tool_name(tool: dict[str, Any]) -> str:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    return str(function.get("name") or "").strip()
+
+
+def _tool_contract_signature(tool: dict[str, Any]) -> dict[str, Any]:
+    function = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+    return {
+        "parameters": json.loads(_canonical_json(function.get("parameters") or function.get("schema") or {})),
+    }
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
 class LiteLLMToolLoopClient:
@@ -227,7 +327,7 @@ class GeneratedToolLoopAdapter:
         tools = [dict(item) for item in getattr(env, "tools_info", [])]
         schema_by_name = _schema_by_tool_name(tools)
         metadata_by_name = _metadata_by_tool_name(self._agent_spec)
-        base_context = self._base_context_graph()
+        base_context = self._base_context_graph(env)
         ctx = RuntimeContext(
             case=case,
             context=base_context,
@@ -401,9 +501,13 @@ class GeneratedToolLoopAdapter:
             raise RuntimeError("surface_spec(cases) must be inferred before exporting a tool-loop adapter.")
         (out_dir / "surface_spec.json").write_text(json.dumps(self._surface.to_dict(), indent=2, sort_keys=True))
 
-    def _base_context_graph(self) -> Any:
+    def _base_context_graph(self, env: Any | None = None) -> Any:
         if self._surface is not None:
-            return copy.deepcopy(self._surface.context.graph)
+            graph = copy.deepcopy(self._surface.context.graph)
+            domain_policy = _env_domain_policy(env) if env is not None else ""
+            if domain_policy and graph.has_section("domain_policy"):
+                return graph.replace_section("domain_policy", domain_policy)
+            return graph
         return context_graph_from_spec(self._agent_spec)
 
 
