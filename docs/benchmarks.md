@@ -1,86 +1,32 @@
-# Benchmarks
+# Demo Benchmark
 
-Ratchet's sample suite is intentionally limited to public, trusted assessment vehicles. Samples should be useful for optimizer development, reproducible from public sources, and honest about what behavior they test.
+Ratchet ships one maintained demo benchmark: [demo/](../demo/).
 
-Current samples:
+The demo is a local deterministic order-desk tool-loop environment. It includes a model-visible policy, tool schemas, read tools, mutating tools, hidden order state, deterministic state-changing tool semantics, and grading from final environment state.
 
-- `samples/bfcl_function_calling_agent/`
-- `samples/order_desk_tool_loop_agent/`
-- `samples/taubench_agent/`
-- `samples/banking77_intent_agent/`
-- `samples/clinc150_intent_agent/`
+This is the benchmark we use for the core product release gate because it is small enough to run during development but still exercises the behavior Ratchet is supposed to optimize:
 
-## Order Desk Tool Loop
+- context changes
+- tool-call sequencing
+- tool-result state tracking
+- inspect-before-mutate behavior
+- response guarding
+- confirmation and holdout validation
+- cost, token, turn, and latency accounting
 
-Order Desk is Ratchet's cheap agentic development assessment. It is a local deterministic tool-loop environment with a domain policy, live tool schemas, declared tool result schemas, read and mutating tools, hidden environment state, and final grading from the environment state.
+The demo is not a public leaderboard claim. It is a product-quality diagnostic benchmark for Ratchet itself. A credible run should show Ratchet discovering task-agnostic transform programs through declared surfaces, not hardcoded task IDs, hidden answers, or benchmark recipes.
 
-It exists because BFCL and the intent benchmarks are too single-shot to exercise Ratchet's runtime hooks, while tau-bench is expensive enough that it is a poor inner-loop development vehicle. Order Desk should be used to catch architecture regressions in surface inference, identifier-flow affordances, context graph execution, tool-call validation, response interception, and staged measurement before spending tau budget.
+## Why Only One Demo Ships
 
-Order Desk is not an external benchmark result. It is a controlled development vehicle for agentic surface optimization. A useful run should show the optimizer discovering task-agnostic mechanisms through the same DSL used elsewhere, such as context restructuring, read-before-write behavior, tool-error recovery, state exposure, and response claim guarding.
+The repository intentionally does not ship a broad examples directory. Earlier internal probes were useful during development, but shipping many half-maintained examples makes the product harder to evaluate and support.
 
-## BFCL Function Calling
+Additional benchmarks should be added only when they become first-class release gates with:
 
-BFCL is the primary function-calling development benchmark.
+- a clear user-facing purpose
+- maintained eval data or reproducible generation
+- documented run commands
+- preflight and eval-health coverage
+- optimizer artifact review expectations
+- no task-specific optimizer shortcuts
 
-It is useful because it exercises behavior that a policy optimizer should actually improve:
-
-- output contract and JSON structure
-- function and argument selection
-- model capability probes
-- runtime/output-cap defects
-- few-shot examples
-- cost and latency tradeoffs
-
-Good Ratchet behavior on BFCL means discovering mechanism-relevant candidates, preserving useful quality-frontier information even when deployed cost is high, and validating real holdout gains without using holdout feedback during search.
-
-BFCL is not a full leaderboard run in this repo. The sample is a fixed development assessment split large enough to inspect optimizer behavior while remaining affordable and reproducible.
-
-## tau-bench
-
-The tau-bench sample uses `GeneratedToolLoopAdapter`, so Ratchet owns the agent loop: model calls, tool-call parsing, `before_tool_call`, `after_tool_result`, response interception, state, traces, and transform instrumentation. The external `sierra-research/tau-bench` package supplies the user simulator, environment state, tool schemas, and benchmark reward.
-
-That split is intentional. The benchmark connector may know how to create a tau-bench environment, but the optimizer does not get tau-specific candidate logic. Candidate programs still compile against the same hook-based surface used by any other interactive tool environment.
-
-A credible tau-bench result should compare baseline and Ratchet-optimized runs with the same agent model, user simulator, task set, trial count, and inference budget. The report should include held-out success, failure-mode deltas, tool/model/turn cost deltas, promoted transform diffs, and immutable-boundary evidence.
-
-## BANKING77
-
-BANKING77 is a secondary classifier-style probe.
-
-It is useful for:
-
-- label-boundary failures
-- few-shot behavior
-- semantic rewrite behavior
-- model-capability comparisons
-- eval stability under a stable taxonomy
-
-It is not a flagship Ratchet benchmark. Single-label intent classification over a fixed taxonomy can often be better served by a fine-tuned encoder model than by an LLM agent. BANKING77 should not be overinterpreted as proof that Ratchet is useful for agent policy optimization.
-
-Good Ratchet behavior on BANKING77 means clear evidence accounting, deterministic objective-based promotion, and honest reporting when gains are unstable or too sample-sensitive.
-
-## CLINC150
-
-CLINC150 is also a secondary classifier-style probe, with broader label diversity and out-of-scope behavior.
-
-It is useful for:
-
-- out-of-scope boundary handling
-- confusable intent clusters
-- few-shot and prompt-boundary experiments
-- comparing behavior against BANKING77 when classification evidence is noisy
-
-Like BANKING77, CLINC150 should not be treated as the central product demonstration. It is a stability and classifier-behavior probe.
-
-## Benchmark Policy
-
-Keep benchmarks public, trusted, and reproducible. Do not add private local demos, synthetic one-off tasks, or sample-specific "success stories" to the main sample suite.
-
-Removed samples should stay removed unless they are replaced by a public benchmark with a clear role. A benchmark should be added only if it tests a capability Ratchet is meant to optimize:
-
-- configurable behavior surface
-- output contract
-- tool policy
-- stateful or workflow decisions
-- cost/latency tradeoffs
-- multi-mechanism failures
+Until then, keep them outside the shipped tree.

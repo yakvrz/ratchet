@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
 
-from ratchet.tool_loop import GeneratedToolLoopAdapter, ToolLoopModelResponse
+from ratchet.tool_loop import GeneratedToolLoopAdapter, LiteLLMToolLoopClient, ToolLoopModelResponse
 from ratchet.transform_compiler import TransformCompiler
 from ratchet.transform_program import TransformProgram
 from ratchet.types import AgentSpec, AgentTool, EvalCase
@@ -292,6 +295,11 @@ class _CaptureSystemClient:
             input_tokens=12,
             output_tokens=6,
         )
+
+
+class _FakeLiteLLMMessage(dict):
+    def model_dump(self) -> dict[str, object]:
+        return dict(self)
 
 
 class ToolLoopAdapterTests(unittest.TestCase):
@@ -845,10 +853,32 @@ class ToolLoopAdapterTests(unittest.TestCase):
         self.assertIn("Use after the user supplies an order id.", client.tool_descriptions[0])
         self.assertEqual(env.actions, [("respond", {"content": "The order is delivered."})])
 
-    def test_taubench_sample_uses_generic_tool_loop_adapter(self) -> None:
-        from samples.taubench_agent.ratchet_adapter import adapter
+    def test_litellm_client_suppresses_library_debug_banners(self) -> None:
+        fake_litellm = SimpleNamespace(suppress_debug_info=False, set_verbose=True)
 
-        self.assertIsInstance(adapter, GeneratedToolLoopAdapter)
+        def completion(**kwargs: object) -> object:
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=_FakeLiteLLMMessage({"role": "assistant", "content": "ok"}))],
+                usage=SimpleNamespace(prompt_tokens=3, completion_tokens=2),
+                _hidden_params={"response_cost": 0.01},
+            )
+
+        fake_litellm.completion = completion
+
+        with patch.dict(sys.modules, {"litellm": fake_litellm}):
+            response = LiteLLMToolLoopClient().complete(
+                messages=[{"role": "user", "content": "hi"}],
+                model="fake-model",
+                provider="fake-provider",
+                tools=[],
+                temperature=0.0,
+            )
+
+        self.assertTrue(fake_litellm.suppress_debug_info)
+        self.assertFalse(fake_litellm.set_verbose)
+        self.assertEqual(response.input_tokens, 3)
+        self.assertEqual(response.output_tokens, 2)
+        self.assertEqual(response.cost_usd, 0.01)
 
     def test_tool_loop_surface_probe_infers_context_and_tools(self) -> None:
         adapter = GeneratedToolLoopAdapter(

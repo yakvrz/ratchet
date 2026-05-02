@@ -2,7 +2,7 @@
 adapter = "ratchet_adapter:adapter"
 evals = "evals.assessment.jsonl"
 out = "results/assessment"
-env_file = "../../.env"
+env_file = "../.env"
 dev_budget = 6
 holdout_budget = 4
 holdout_top_k = 1

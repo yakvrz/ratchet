@@ -2,7 +2,7 @@
 adapter = "ratchet_adapter_expanded:adapter"
 evals = "evals.diagnostic_expanded.jsonl"
 out = "results/diagnostic-expanded"
-env_file = "../../.env"
+env_file = "../.env"
 dev_budget = 8
 holdout_budget = 4
 holdout_top_k = 1

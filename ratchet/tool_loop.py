@@ -228,9 +228,12 @@ class LiteLLMToolLoopClient:
         timeout_s: float | None = None,
     ) -> ToolLoopModelResponse:
         try:
+            import litellm
             from litellm import completion
         except ModuleNotFoundError as exc:
             raise RuntimeError("litellm is required to run the generic tool-loop adapter.") from exc
+        litellm.suppress_debug_info = True
+        litellm.set_verbose = False
         response = _with_retries(
             lambda: completion(
                 messages=messages,

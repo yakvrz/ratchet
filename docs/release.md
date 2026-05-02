@@ -8,9 +8,9 @@ Run these before cutting a release:
 
 ```bash
 python -m pytest -q
-python -m ratchet release-check --config samples/order_desk_tool_loop_agent/ratchet.diagnostic_expanded.toml
-python -m ratchet optimize --config samples/order_desk_tool_loop_agent/ratchet.diagnostic_expanded.toml
-python -m ratchet assess-ideation --run-dir samples/order_desk_tool_loop_agent/results/diagnostic-expanded
+python -m ratchet release-check --config demo/ratchet.diagnostic_expanded.toml
+python -m ratchet optimize --config demo/ratchet.diagnostic_expanded.toml
+python -m ratchet assess-ideation --run-dir demo/results/diagnostic-expanded
 ```
 
 Use a timestamped `--out` for release-candidate optimizer runs when preserving prior results matters.

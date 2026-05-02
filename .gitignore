@@ -3,6 +3,7 @@
 .cache/
 .ratchet/
 .stfolder/
+AGENTS.md
 $tmpdir/
 build/
 dist/

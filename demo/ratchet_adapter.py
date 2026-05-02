@@ -85,7 +85,7 @@ def _case_config(spec: AgentSpec, case: EvalCase) -> ToolLoopRunConfig:
         temperature=float(runtime.get("temperature", 0.0)),
         max_steps=int(metadata.get("max_steps") or runtime.get("max_steps") or 7),
         request_timeout_s=float(metadata.get("request_timeout_s") or runtime.get("request_timeout_s") or 25.0),
-        log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "samples/order_desk_tool_loop_agent/results/raw"),
+        log_dir=str(metadata.get("log_dir") or runtime.get("log_dir") or "demo/results/raw"),
         metadata={
             "benchmark": "order-desk-tool-loop",
             "benchmark_fidelity": "local_deterministic",

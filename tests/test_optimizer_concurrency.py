@@ -44,6 +44,11 @@ class FakeAdapter:
         out_dir.mkdir(parents=True, exist_ok=True)
 
 
+class FailingAdapter(FakeAdapter):
+    def run_case(self, case: EvalCase, candidate=None) -> RunRecord:
+        raise RuntimeError("provider quota exhausted")
+
+
 def _summary(
     *,
     candidate_id: str = "baseline",
@@ -272,6 +277,20 @@ class OptimizerConcurrencyTests(unittest.TestCase):
         self.assertEqual([name for name, _ in stages], ["smoke", "small_dev", "full_dev"])
         small_cases = next(cases for name, cases in stages if name == "small_dev")
         self.assertLess(len(small_cases), len(dev_cases))
+
+    def test_systemic_runtime_errors_abort_evaluation(self) -> None:
+        cases = tuple(EvalCase(id=f"case-{index}", split="holdout", input="x") for index in range(4))
+        with tempfile.TemporaryDirectory() as tmp:
+            optimizer = RatchetOptimizer(
+                FailingAdapter(),
+                Path(tmp),
+                case_timeout_s=0,
+                max_case_retries=0,
+                case_concurrency=2,
+            )
+
+            with self.assertRaisesRegex(RuntimeError, "runtime errors made the measurement invalid"):
+                optimizer.evaluate_candidate(None, cases)
 
 
 if __name__ == "__main__":

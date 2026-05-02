@@ -94,6 +94,8 @@ MAX_CONSECUTIVE_ZERO_EVAL_PARENT_ATTEMPTS = 3
 MAX_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 1
 MAX_LATE_FULL_DEV_EXPERIMENT_CANDIDATES_PER_GROUP = 1
 MAX_LATE_FULL_DEV_CANDIDATES_PER_ACTION = 1
+MAX_SYSTEMIC_RUNTIME_ERROR_RATE = 0.2
+MIN_SYSTEMIC_RUNTIME_ERRORS = 3
 ProgressCallback = Callable[[dict[str, Any]], None]
 
 
@@ -1979,12 +1981,14 @@ class RatchetOptimizer:
             evaluations = [evaluation for evaluation in ordered if evaluation is not None]
             if len(evaluations) != len(ordered):
                 raise RuntimeError("internal evaluation error: missing case evaluation result")
-            summaries[digest] = CandidateSummary(
+            summary = CandidateSummary(
                 candidate_id=digest,
                 candidate=candidate,
                 split=cases[0].split,
                 evaluations=evaluations,
             )
+            _raise_on_systemic_runtime_errors(summary)
+            summaries[digest] = summary
         return summaries
 
     def _run_uncached_case(
@@ -2779,6 +2783,27 @@ def _frontier_state_dict(state: FrontierParentState) -> dict[str, Any]:
         "last_selected_iteration": state.last_selected_iteration,
         "exhausted": state.exhausted,
     }
+
+
+def _raise_on_systemic_runtime_errors(summary: CandidateSummary) -> None:
+    runtime_errors = summary.runtime_error_count
+    if runtime_errors == 0:
+        return
+    sample_count = summary.sample_count
+    error_rate = runtime_errors / max(1, sample_count)
+    if runtime_errors < MIN_SYSTEMIC_RUNTIME_ERRORS and error_rate <= MAX_SYSTEMIC_RUNTIME_ERROR_RATE:
+        return
+    examples = [
+        evaluation.case.id
+        for evaluation in summary.evaluations
+        if evaluation.record.metrics.error
+    ][:3]
+    raise RuntimeError(
+        "Evaluation aborted because runtime errors made the measurement invalid: "
+        f"candidate={summary.candidate_id} split={summary.split} "
+        f"errors={runtime_errors}/{sample_count} ({error_rate:.1%}); "
+        f"examples={examples}"
+    )
 
 
 def _summary_progress_fields(summary: CandidateSummary) -> dict[str, Any]:

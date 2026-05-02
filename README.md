@@ -275,16 +275,23 @@ Each run writes:
 
 Interrupted runs write `partial_run_manifest.json` and `partial_report.md` with the last progress events and incomplete case evaluations. Shared per-case cache rows live outside run directories under `.ratchet/cache/`, which is intentionally git-ignored.
 
-## Samples
+## Demo
 
-- `samples/bfcl_function_calling_agent/`
-- `samples/taubench_agent/`
-- `samples/banking77_intent_agent/`
-- `samples/clinc150_intent_agent/`
+Ratchet ships one maintained demo in [demo/](demo/). It is a local order-desk tool-loop benchmark with authentication, read tools, mutating tools, hidden state, deterministic grading, and protected holdout. It is the release-candidate path for judging whether Ratchet is behaving like an optimizer rather than just producing artifacts.
 
-The sample suite is intentionally limited to public, trusted assessment vehicles. BFCL is the primary single-call function/tool contract benchmark. The tau-bench sample is the primary interactive tool-loop benchmark. BANKING77 and CLINC150 remain secondary classification probes for label-boundary, few-shot, and eval-stability behavior.
+Run the demo gate:
 
-See [docs/benchmarks.md](docs/benchmarks.md) for benchmark roles, limitations, and criteria for adding new benchmarks.
+```bash
+python3 -m ratchet release-check --config demo/ratchet.diagnostic_expanded.toml
+```
+
+Run the optimizer:
+
+```bash
+python3 -m ratchet optimize --config demo/ratchet.diagnostic_expanded.toml
+```
+
+See [docs/benchmarks.md](docs/benchmarks.md) for the benchmark policy and [docs/release.md](docs/release.md) for the release gate.
 
 For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
 
