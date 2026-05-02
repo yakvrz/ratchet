@@ -159,7 +159,7 @@ class CliProgressPrinter:
         phase, message = _progress_message(event, row)
         if message is None:
             return None
-        return f"[{_format_elapsed(row.get('elapsed_s'))}] {phase:<12} {message}"
+        return f"[{_format_elapsed(row.get('elapsed_s'))}] {phase:<9} {message}"
 
 
 def _print_progress_event(row: dict[str, Any]) -> None:
@@ -168,39 +168,53 @@ def _print_progress_event(row: dict[str, Any]) -> None:
 
 def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]:
     if event == "run_started":
+        total_cases = row.get("total_cases")
+        if total_cases is None:
+            total_cases = sum(int(row.get(key) or 0) for key in ("train_cases", "dev_cases", "holdout_cases"))
         return (
-            "Setup",
-            f"objective={row.get('objective')} cases={row.get('total_cases')} "
-            f"(train={row.get('train_cases')}, dev={row.get('dev_cases')}, holdout={row.get('holdout_cases')}) "
-            f"budget=dev:{row.get('dev_budget')} holdout:{row.get('holdout_budget')} "
-            f"concurrency={row.get('case_concurrency')}/{row.get('stage_case_concurrency', row.get('case_concurrency'))} "
-            f"train_examples={row.get('proposal_example_count')}",
+            "Run",
+            f"{total_cases} cases for {row.get('objective')} "
+            f"(train {row.get('train_cases')}, dev {row.get('dev_cases')}, holdout {row.get('holdout_cases')}); "
+            f"candidate budget dev {row.get('dev_budget')}, holdout {row.get('holdout_budget')}; "
+            f"examples {row.get('proposal_example_count')}",
         )
     if event == "baseline_dev_started":
-        return "Baseline", f"measuring dev behavior on {row.get('case_count')} cases"
+        return "Observe", f"measuring baseline on {row.get('case_count')} dev cases"
     if event == "baseline_dev_completed":
-        return "Baseline", "dev result " + _score_brief(row)
+        return "Observe", f"baseline {_score_brief(row)}; {_failure_brief(row)}; {_slice_brief(row)}"
     if event == "baseline_holdout_started":
-        return "Baseline", f"measuring protected holdout on {row.get('case_count')} cases"
+        return "Holdout", f"measuring protected baseline reference on {row.get('case_count')} cases"
     if event == "baseline_holdout_completed":
-        return "Baseline", "holdout reference " + _score_brief(row)
+        return "Holdout", "baseline reference " + _score_brief(row)
+    if event == "evidence_packet_ready":
+        weak = _join_limited(row.get("weak_slices") or [], limit=5)
+        modes = _join_limited(row.get("residual_failure_modes") or [], limit=5)
+        extras = []
+        if int(row.get("tool_error_case_count") or 0):
+            extras.append(f"{row.get('tool_error_case_count')} tool-error cases")
+        if int(row.get("invalid_output_count") or 0):
+            extras.append(f"{row.get('invalid_output_count')} invalid outputs")
+        missing_examples = _join_limited(row.get("weak_labels_without_examples") or [], limit=3)
+        if missing_examples:
+            extras.append(f"missing train examples for {missing_examples}")
+        detail = "; ".join(part for part in (f"weak slices {weak}" if weak else "", f"modes {modes}" if modes else "", ", ".join(extras)) if part)
+        return "Diagnose", detail or "no residual failures found"
     if event == "iteration_started":
         return (
             "Search",
-            f"round {row.get('iteration')} starting with {row.get('frontier_width')} frontier parent(s); "
-            f"dev evals used {row.get('dev_evaluations')}/{row.get('dev_budget')}",
+            f"round {row.get('iteration')} with {row.get('frontier_width')} parent(s); "
+            f"candidate budget used {row.get('dev_evaluations')}/{row.get('dev_budget')}",
         )
     if event == "parent_started":
         return (
             "Frontier",
-            f"examining parent #{row.get('parent_rank')} candidate={_short_hash(row.get('parent_candidate_id'))} "
+            f"parent #{row.get('parent_rank')} is {_short_hash(row.get('parent_candidate_id'))}: "
             + _score_brief(row),
         )
     if event == "search_planner_started":
         return (
             "Plan",
-            f"planning for parent #{row.get('parent_rank')} from "
-            f"{row.get('surface_opportunity_count')} surface opportunity(s)",
+            f"asking planner to choose from {row.get('surface_opportunity_count')} legal surface opportunities",
         )
     if event == "search_planner_completed":
         diagnostics = row.get("call_diagnostics") or {}
@@ -217,24 +231,27 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         )
     if event == "search_plan_ready":
         mechanisms = _join_limited(row.get("target_mechanisms") or [], limit=4)
-        return "Plan", f"ready {row.get('brief_count')} brief(s): {mechanisms or 'none'}"
+        diagnosis = _short_reason(row.get("diagnosis"), limit=160)
+        brief_text = _briefs_brief(row.get("briefs") or [])
+        return (
+            "Plan",
+            f"thinks {diagnosis}; will try {brief_text or (mechanisms or 'no mechanisms')}",
+        )
     if event == "proposal_started":
         retry = " retry" if row.get("proposal_retry") else ""
         return (
-            "Implement",
-            f"building candidates{retry} for parent #{row.get('parent_rank')} "
-            f"budget={row.get('proposal_budget')} from surface spec",
+            "Build",
+            f"implementing{retry} planned briefs as transform programs; budget {row.get('proposal_budget')}",
         )
     if event == "proposal_completed":
         diagnostics = row.get("call_diagnostics") or {}
         return (
-            "Implement",
+            "Build",
             " ".join(
                 part
                 for part in (
-                    f"returned {row.get('returned_count')} candidate(s): "
-                    f"{row.get('valid_count')} valid, {row.get('invalid_count')} invalid, "
-                    f"{row.get('duplicate_count')} duplicate",
+                    f"{row.get('returned_count')} candidates, {row.get('valid_count')} compiled, "
+                    f"{row.get('invalid_count')} contract failures, {row.get('duplicate_count')} duplicates",
                     _call_summary(diagnostics),
                 )
                 if part
@@ -244,37 +261,36 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         return "Candidate", None
     if event == "candidate_stage_started":
         return (
-            "Evaluate",
-            f"{_stage_name(row.get('stage'))}: running {row.get('candidate_count')} candidate(s) "
-            f"on {row.get('case_count')} case(s)",
+            "Test",
+            f"{_stage_name(row.get('stage'))}: {row.get('candidate_count')} candidates on {row.get('case_count')} cases",
         )
     if event == "candidate_stage_completed":
         return (
-            "Evaluate",
-            f"{_stage_name(row.get('stage'))}: advanced={row.get('advanced_count')} "
-            f"accepted={row.get('accepted_count')} rejected={row.get('rejected_count')} "
-            f"screened={row.get('screened_count')}",
+            "Learn",
+            f"{_stage_name(row.get('stage'))}: {row.get('advanced_count')} continue, "
+            f"{row.get('accepted_count')} promotable, {row.get('rejected_count')} rejected, "
+            f"{row.get('screened_count')} screened",
         )
     if event == "candidate_evaluated":
         status = row.get("frontier_status") or ("accepted" if row.get("accepted") else "rejected")
         reason = row.get("rejection_reason") or row.get("constraint_warning")
         return (
-            "Candidate",
-            f"{_humanize_key(status)} candidate={_short_hash(row.get('candidate_id'))} "
-            f"surface={_humanize_key(row.get('surface_mechanism'))} "
-            f"score {_format_signed(row.get('score_delta'), digits=3)} "
-            f"cost {_format_money_delta(row.get('cost_delta'))} "
-            f"latency {_format_seconds_delta(row.get('latency_delta'))} "
-            f"stages={row.get('stage_count')} full_dev={_format_bool(row.get('full_dev_evaluated'))}"
+            "Learn",
+            f"{_short_hash(row.get('candidate_id'))} {_humanize_key(status)} via "
+            f"{_humanize_key(row.get('surface_mechanism'))}: "
+            f"score {_format_signed(row.get('score_delta'), digits=3)}, "
+            f"fixed {row.get('fixed_count', '?')}, regressed {row.get('regressed_count', '?')}, "
+            f"cost {_format_money_delta(row.get('cost_delta'))}, "
+            f"full-dev {_format_bool(row.get('full_dev_evaluated'))}"
             + (f" reason={_short_reason(reason)}" if reason else ""),
         )
     if event == "retry_started":
         return "Retry", f"parent #{row.get('parent_rank')} because {_short_reason(row.get('reason'))}"
     if event == "frontier_updated":
         candidates = _join_limited([_short_hash(item) for item in row.get("frontier_candidate_ids") or []], limit=4)
-        return "Frontier", f"accepted={row.get('accepted_count')} selectable={row.get('selectable_parent_count')} candidates={candidates}"
+        return "Frontier", f"{row.get('accepted_count')} accepted; next parents {candidates or 'none'}"
     if event == "search_stopped":
-        return "Search", f"stopped: {_short_reason(row.get('reason'))}"
+        return "Search", f"stopping search: {_short_reason(row.get('reason'))}"
     if event == "simplification_started":
         return (
             "Simplify",
@@ -290,15 +306,14 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         )
     if event == "confirmation_started":
         return (
-            "Confirm",
-            f"checking suspicious finalist candidate={_short_hash(row.get('candidate_id'))} cases={row.get('case_count')} "
-            f"samples={row.get('sample_count')}",
+            "Guard",
+            f"rechecking {_short_hash(row.get('candidate_id'))} on {row.get('case_count')} sensitive cases before holdout",
         )
     if event == "confirmation_completed":
         status = "passed" if row.get("passed") else "failed"
-        return "Confirm", f"{status} candidate={_short_hash(row.get('candidate_id'))} reason={_short_reason(row.get('reason'))}"
+        return "Guard", f"{_short_hash(row.get('candidate_id'))} {status}: {_short_reason(row.get('reason'))}"
     if event == "confirmation_skipped":
-        return "Confirm", f"skipped candidate={_short_hash(row.get('candidate_id'))} reason={_short_reason(row.get('reason'))}"
+        return "Guard", f"skipped {_short_hash(row.get('candidate_id'))}: {_short_reason(row.get('reason'))}"
     if event == "holdout_candidate_started":
         return "Holdout", f"validating finalist candidate={_short_hash(row.get('candidate_id'))} on {row.get('case_count')} protected case(s)"
     if event == "holdout_candidate_completed":
@@ -314,21 +329,16 @@ def _progress_message(event: str, row: dict[str, Any]) -> tuple[str, str | None]
         candidate_text = f" candidate={_short_hash(candidate)}" if candidate else ""
         return "Holdout", f"skipped{candidate_text} reason={_short_reason(row.get('reason'))}"
     if event == "case_batch_started":
-        if int(row.get("fresh_count") or 0) <= 0:
-            return "Evaluate", None
-        return "Evaluate", (
-            f"running {row.get('fresh_count')} fresh {row.get('split')} case(s) "
-            f"for candidate={_short_hash(row.get('candidate_id'))} concurrency={row.get('concurrency')}"
-        )
+        return "Evaluate", None
     if event == "case_batch_completed":
         return "Evaluate", None
     if event == "run_completed":
         status = "promoted" if row.get("promoted") else "baseline kept"
         return (
-            "Done",
-            f"{status}; selected={_short_hash(row.get('selected_candidate_id'))} "
-            f"accepted_dev={row.get('accepted_dev_candidates')} holdout_validations={row.get('holdout_validations')} "
-            f"reason={_short_reason(row.get('selection_reason'))}",
+            "Decide",
+            f"{status}; selected {_short_hash(row.get('selected_candidate_id'))}; "
+            f"dev finalists {row.get('accepted_dev_candidates')}, holdout validations {row.get('holdout_validations')}; "
+            f"{_short_reason(row.get('selection_reason'))}",
         )
     return event.upper()[:10] or "EVENT", None
 
@@ -351,31 +361,78 @@ def _score_brief(row: dict[str, Any]) -> str:
     )
 
 
+def _failure_brief(row: dict[str, Any]) -> str:
+    labels = row.get("failure_labels")
+    if not isinstance(labels, dict) or not labels:
+        return "no failure labels"
+    parts = [f"{key}={value}" for key, value in list(labels.items())[:3]]
+    remaining = len(labels) - len(parts)
+    if remaining > 0:
+        parts.append(f"+{remaining} more")
+    return "failures " + ", ".join(parts)
+
+
+def _slice_brief(row: dict[str, Any]) -> str:
+    metrics = row.get("category_metrics")
+    if not isinstance(metrics, dict) or not metrics:
+        return "no slice breakdown"
+    weak: list[tuple[str, float, int, int]] = []
+    for label, values in metrics.items():
+        if not isinstance(values, dict):
+            continue
+        count = int(values.get("count") or 0)
+        passed = int(values.get("pass_count") or 0)
+        if count and passed < count:
+            weak.append((str(label), passed / count, passed, count))
+    weak.sort(key=lambda item: (item[1], item[0]))
+    if not weak:
+        return "all reported slices passed"
+    parts = [f"{label} {passed}/{count}" for label, _, passed, count in weak[:4]]
+    if len(weak) > len(parts):
+        parts.append(f"+{len(weak) - len(parts)} more")
+    return "weak slices " + ", ".join(parts)
+
+
+def _briefs_brief(briefs: object) -> str:
+    if not isinstance(briefs, list):
+        return ""
+    normalized = [brief for brief in briefs if isinstance(brief, dict)]
+    normalized.sort(key=lambda item: int(item.get("priority") or 1))
+    parts: list[str] = []
+    for brief in normalized[:4]:
+        mechanism = _humanize_key(brief.get("mechanism_class"))
+        slices = _join_limited(brief.get("target_slices") or [], limit=3)
+        brief_id = str(brief.get("brief_id") or "brief")
+        target = f" on {slices}" if slices else ""
+        parts.append(f"{brief_id} ({mechanism}{target})")
+    if len(normalized) > len(parts):
+        parts.append(f"+{len(normalized) - len(parts)} more")
+    return "; ".join(parts)
+
+
 def _call_summary(diagnostics: dict[str, Any]) -> str:
     if not diagnostics:
         return ""
     parts: list[str] = []
     model = diagnostics.get("model")
     if model:
-        parts.append(f"model={model}")
-    input_tokens = diagnostics.get("input_tokens")
-    output_tokens = diagnostics.get("output_tokens")
+        parts.append(str(model))
     total_tokens = diagnostics.get("total_tokens")
-    if input_tokens is not None or output_tokens is not None:
-        parts.append(f"tokens={_format_count(input_tokens)}/{_format_count(output_tokens)}")
-    elif total_tokens is not None:
-        parts.append(f"tokens={_format_count(total_tokens)}")
-    prompt_tokens = diagnostics.get("prompt_approx_tokens")
-    if prompt_tokens is not None:
-        parts.append(f"prompt~={_format_count(prompt_tokens)}tok")
-    prompt_chars = diagnostics.get("prompt_chars")
-    if prompt_chars is not None:
-        parts.append(f"prompt={_format_count(prompt_chars)}ch")
+    if total_tokens is None:
+        input_tokens = diagnostics.get("input_tokens")
+        output_tokens = diagnostics.get("output_tokens")
+        if input_tokens is not None or output_tokens is not None:
+            try:
+                total_tokens = int(input_tokens or 0) + int(output_tokens or 0)
+            except (TypeError, ValueError):
+                total_tokens = None
+    if total_tokens is not None:
+        parts.append(f"{_format_count(total_tokens)} tokens")
     elapsed = diagnostics.get("elapsed_s")
     if elapsed is not None:
-        parts.append(f"call={_format_seconds(elapsed)}")
+        parts.append(_format_seconds(elapsed))
     finish_reason = diagnostics.get("finish_reason")
-    if finish_reason:
+    if finish_reason and finish_reason != "stop":
         parts.append(f"finish={finish_reason}")
     return " ".join(parts)
 
@@ -525,6 +582,56 @@ def run_eval_health(
     (out_dir / "eval_health.json").write_text(json.dumps(report.to_dict(), indent=2, default=str) + "\n")
     (out_dir / "eval_health.md").write_text(render_eval_health_markdown(report))
     _print_eval_health_summary(report, out_dir=out_dir, strict=strict)
+    return report
+
+
+def run_release_check(
+    *,
+    config: RatchetRunConfig,
+    sample_limit: int | None = None,
+    repeats: int | None = None,
+) -> EvalHealthReport:
+    adapter, cases = load_runtime(config)
+    preflight_limit = config.eval_health.sample_limit if sample_limit is None else sample_limit
+    print("Release check: preflight")
+    preflight = run_preflight_check(
+        adapter_spec=config.adapter,
+        adapter=adapter,
+        cases=cases,
+        objective=config.objective,
+        sample_limit=preflight_limit,
+        optimizer_model=config.optimizer_model if os.environ.get("RATCHET_CHECK_OPTIMIZER_MODEL") == "1" else None,
+        optimizer_env_path=config.env_file,
+    )
+    materialized = preflight.materialization.get("verified_surfaces") or []
+    print(
+        "Preflight passed: "
+        f"{len(cases)} eval cases, "
+        f"{len(preflight.generated_surface)} generated surface(s), "
+        f"verified surfaces={_join_limited(materialized, limit=6) or 'none'}"
+    )
+
+    print("Release check: eval health")
+    report = run_eval_health_check(
+        adapter_spec=config.adapter,
+        adapter=adapter,
+        cases=cases,
+        config=config.eval_health,
+        sample_limit=sample_limit,
+        repeats=repeats,
+        case_timeout_s=config.case_timeout_s,
+        evaluation_samples_per_case=config.samples_per_case,
+        case_concurrency=config.case_concurrency,
+    )
+    out_dir = config.out / "release_check"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "eval_health.json").write_text(json.dumps(report.to_dict(), indent=2, default=str) + "\n")
+    (out_dir / "eval_health.md").write_text(render_eval_health_markdown(report))
+    _print_eval_health_summary(report, out_dir=out_dir, strict=True)
+    if report.fatal or report.warning:
+        print("Release check failed: eval health must be healthy with no warnings.")
+    else:
+        print("Release check passed.")
     return report
 
 
@@ -714,6 +821,17 @@ def add_eval_health_arguments(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_release_check_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--config", help="Path to ratchet.toml")
+    parser.add_argument("--adapter", help="Adapter import path, e.g. package.module:adapter")
+    parser.add_argument("--evals", help="Path to evals JSONL")
+    parser.add_argument("--out", help="Output directory")
+    parser.add_argument("--env-file", help="Path to .env with model provider API keys")
+    parser.add_argument("--sample-limit", type=int, help="Maximum dev/holdout cases to probe")
+    parser.add_argument("--repeats", type=int, help="Repeated baseline probes per sampled case")
+    parser.add_argument("--case-timeout-s", type=int, help="Per-case timeout in seconds for baseline probes")
+
+
 def add_ideation_assessment_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--run-dir", required=True, help="Completed Ratchet run output directory")
     parser.add_argument("--spec", help="Optional ideation assessment spec JSON")
@@ -740,6 +858,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     eval_health_parser = subparsers.add_parser("eval-health", help="Check eval-set and grader health before optimization.")
     add_eval_health_arguments(eval_health_parser)
+
+    release_parser = subparsers.add_parser(
+        "release-check",
+        help="Run preflight plus strict eval-health gates for a release-candidate config.",
+    )
+    add_release_check_arguments(release_parser)
 
     assess_parser = subparsers.add_parser(
         "assess-ideation",
@@ -779,6 +903,17 @@ def main(argv: list[str] | None = None) -> int:
                 strict=bool(getattr(args, "strict", False)),
             )
             if report.fatal or (bool(getattr(args, "strict", False)) and report.warning):
+                return 5
+            return 0
+
+        if args.command == "release-check":
+            config = _apply_run_overrides(args)
+            report = run_release_check(
+                config=config,
+                sample_limit=getattr(args, "sample_limit", None),
+                repeats=getattr(args, "repeats", None),
+            )
+            if report.fatal or report.warning:
                 return 5
             return 0
 

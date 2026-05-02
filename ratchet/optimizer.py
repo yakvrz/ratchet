@@ -570,6 +570,11 @@ class RatchetOptimizer:
                     iteration=iteration,
                     parent_rank=parent_index + 1,
                     residual_failure_modes=evidence_packet.residual_failure_modes,
+                    weak_slices=evidence_packet.weak_slices,
+                    evidence=evidence_packet.evidence,
+                    tool_error_case_count=len(evidence_packet.tool_defects.get("tool_error_case_ids", [])),
+                    invalid_output_count=evidence_packet.output_defects.get("invalid_output_count", 0),
+                    weak_labels_without_examples=evidence_packet.example_coverage.get("weak_labels_without_examples", []),
                     confidence=evidence_packet.confidence,
                     cached=evidence_packet_cached,
                 )
@@ -616,6 +621,18 @@ class RatchetOptimizer:
                     iteration=iteration,
                     parent_rank=parent_index + 1,
                     plan_id=search_plan.plan_id,
+                    diagnosis=search_plan.diagnosis,
+                    hypotheses=search_plan.hypotheses,
+                    briefs=[
+                        {
+                            "brief_id": brief.brief_id,
+                            "mechanism_class": brief.mechanism_class,
+                            "target_slices": list(brief.target_slices),
+                            "hypothesis": brief.hypothesis,
+                            "priority": brief.priority,
+                        }
+                        for brief in search_plan.briefs
+                    ],
                     target_mechanisms=search_plan.active_mechanisms,
                     brief_count=len(search_plan.briefs),
                     confidence=search_plan.confidence,
@@ -1495,6 +1512,8 @@ class RatchetOptimizer:
                 score_delta=comparison.score_delta,
                 cost_delta=comparison.cost_delta,
                 latency_delta=comparison.latency_delta,
+                fixed_count=flip_summary.get("fixed_count"),
+                regressed_count=flip_summary.get("regressed_count"),
                 stage_count=len(state.stage_rows),
                 full_dev_evaluated=state.full_dev_evaluated,
             )
@@ -2768,6 +2787,8 @@ def _summary_progress_fields(summary: CandidateSummary) -> dict[str, Any]:
         "case_count": summary.case_count,
         "pass_count": summary.pass_count,
         "mean_score": round(summary.mean_score, 4),
+        "failure_labels": summary.failure_labels,
+        "category_metrics": summary.category_metrics,
         "mean_cost_usd": summary.mean_cost_usd,
         "mean_model_calls": summary.mean_model_calls,
         "mean_tool_calls": summary.mean_tool_calls,

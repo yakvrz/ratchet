@@ -243,9 +243,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(run_line)
-        self.assertIn("[00:03] Setup", run_line)
-        self.assertIn("train=20, dev=30, holdout=10", run_line)
-        self.assertIn("concurrency=4/12", run_line)
+        self.assertIn("[00:03] Run", run_line)
+        self.assertIn("60 cases for correctness", run_line)
+        self.assertIn("train 20, dev 30, holdout 10", run_line)
+        self.assertIn("candidate budget dev 8, holdout 2", run_line)
 
         proposal_line = printer.format(
             {
@@ -266,10 +267,10 @@ class CliConfigIntegrationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(proposal_line)
-        self.assertIn("Implement", proposal_line)
-        self.assertIn("returned 5 candidate(s): 4 valid, 1 invalid", proposal_line)
-        self.assertIn("model=gemini-3-flash-preview", proposal_line)
-        self.assertIn("tokens=1200/300", proposal_line)
+        self.assertIn("Build", proposal_line)
+        self.assertIn("5 candidates, 4 compiled, 1 contract failures", proposal_line)
+        self.assertIn("gemini-3-flash-preview", proposal_line)
+        self.assertIn("1500 tokens", proposal_line)
 
         candidate_line = printer.format(
             {
@@ -281,17 +282,58 @@ class CliConfigIntegrationTests(unittest.TestCase):
                 "score_delta": 0.125,
                 "cost_delta": -0.002,
                 "latency_delta": 0.31,
+                "fixed_count": 3,
+                "regressed_count": 1,
                 "stage_count": 2,
                 "full_dev_evaluated": False,
                 "rejection_reason": "small-dev regression",
             }
         )
         self.assertIsNotNone(candidate_line)
-        self.assertIn("Candidate", candidate_line)
-        self.assertIn("candidate=abcdef12", candidate_line)
+        self.assertIn("Learn", candidate_line)
+        self.assertIn("abcdef12", candidate_line)
         self.assertIn("score +0.125", candidate_line)
         self.assertIn("cost -$0.0020", candidate_line)
-        self.assertIn("full_dev=no", candidate_line)
+        self.assertIn("fixed 3, regressed 1", candidate_line)
+        self.assertIn("full-dev no", candidate_line)
+
+        evidence_line = printer.format(
+            {
+                "event": "evidence_packet_ready",
+                "elapsed_s": 40,
+                "weak_slices": ["ambiguity", "cancel"],
+                "residual_failure_modes": ["tool_trajectory", "weak_slices"],
+                "tool_error_case_count": 8,
+                "invalid_output_count": 0,
+            }
+        )
+        self.assertIsNotNone(evidence_line)
+        self.assertIn("Diagnose", evidence_line)
+        self.assertIn("weak slices ambiguity, cancel", evidence_line)
+        self.assertIn("8 tool-error cases", evidence_line)
+
+        plan_line = printer.format(
+            {
+                "event": "search_plan_ready",
+                "elapsed_s": 50,
+                "diagnosis": "The agent mutates orders before inspecting them and guesses on ambiguous requests.",
+                "briefs": [
+                    {
+                        "brief_id": "inspect-before-mutate",
+                        "mechanism_class": "surface_tool_loop",
+                        "target_slices": ["cancel", "address"],
+                        "priority": 1,
+                    }
+                ],
+            }
+        )
+        self.assertIsNotNone(plan_line)
+        self.assertIn("Plan", plan_line)
+        self.assertIn("thinks The agent mutates", plan_line)
+        self.assertIn("inspect-before-mutate", plan_line)
+
+        batch_line = printer.format({"event": "case_batch_started", "elapsed_s": 80, "fresh_count": 12})
+        self.assertIsNone(batch_line)
 
     def test_check_fails_clearly_on_invalid_adapter_wiring(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

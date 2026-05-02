@@ -69,6 +69,15 @@ Run the optimizer:
 python3 -m ratchet optimize --config my-agent-ratchet/ratchet.toml
 ```
 
+The live optimizer output is intentionally human-facing. It follows Ratchet's reasoning loop:
+
+- `Observe`: baseline score, weak slices, and dominant failure labels
+- `Diagnose`: deterministic evidence extracted from eval traces
+- `Plan`: planner diagnosis and the concrete briefs Ratchet will try
+- `Build`: proposed transform programs and compiler/contract failures
+- `Test` / `Learn`: staged evidence, fixed/regressed cases, and frontier decisions
+- `Guard` / `Holdout` / `Decide`: confirmation, protected validation, and final selection
+
 Optionally check eval-set and grader health before optimizing:
 
 ```bash
@@ -77,6 +86,14 @@ python3 -m ratchet eval-health --config my-agent-ratchet/ratchet.toml
 
 The eval health command writes a readable `eval_health.md` and a complete ordered `eval_health.json`
 under `<out>/eval_health/`.
+
+For a release-candidate config, run the combined preflight and strict eval-health gate:
+
+```bash
+python3 -m ratchet release-check --config my-agent-ratchet/ratchet.toml
+```
+
+See [docs/release.md](docs/release.md) for the core-product release gate.
 
 You can still run with explicit flags instead of a config file:
 
@@ -229,6 +246,7 @@ Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1
 - `python3 -m ratchet init --template python_function|python_cli --out <dir>`
 - `python3 -m ratchet check --config ratchet.toml`
 - `python3 -m ratchet eval-health --config ratchet.toml`
+- `python3 -m ratchet release-check --config ratchet.toml`
 - `python3 -m ratchet optimize --config ratchet.toml`
 - `python3 -m ratchet assess-ideation --run-dir results/run --spec ideation_assessment.json`
 
