@@ -2,20 +2,20 @@
 
 Ratchet is a Python-first optimizer for agents.
 
-Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, compiles legal transform programs against the adapter's declared surface, and validates finalists against protected holdout before promoting a candidate.
+Bring your Python agent and evals. Ratchet runs the original agent as an immutable baseline, builds branch-local evidence, plans controlled optimization experiments, compiles legal transform programs against the adapter's declared surface, and validates finalists against a protected holdout before promoting a candidate.
 
-The adapter is intentionally generated from a small harness. The harness declares how to build a model request, parse output, and grade externally visible behavior. Ratchet generates the executable `SurfaceSpec`, runtime hook wrapper, compiled-candidate execution, and export path.
+The adapter is generated from a small harness. The harness declares how to build a model request, parse output, and grade externally visible behavior. Ratchet generates the executable `SurfaceSpec`, runtime hook wrapper, compiled-candidate execution, and export path.
 
-For interactive agent benchmarks, one eval case may contain a full conversation with model turns, tool/environment calls, and terminal state. Adapters should return these trajectories through `DiagnosticTrace`; Ratchet uses them as evidence rather than flattening the case into one final string.
+For interactive agent benchmarks, one eval case may contain a full conversation with model turns, tool/environment calls, and terminal state. Adapters return these trajectories through `DiagnosticTrace`; Ratchet uses them as evidence rather than flattening the case into one final string.
 
 ## Scope
 
 - Python agents only
-- evals are required
-- grading is adapter-owned over externally visible outputs
-- optimization is transform-program based over adapter-declared surfaces
-- supported objective modes: correctness, cost, and latency
-- arbitrary repo-wide source mutation is out of scope
+- Evals are required
+- Grading is adapter-owned over externally visible outputs
+- Optimization is transform-program based over adapter-declared surfaces
+- Supported objective modes: correctness, cost, and latency
+- Arbitrary repo-wide source mutation is out of scope
 
 ## Optimization Architecture
 
@@ -40,12 +40,18 @@ AgentHarness
 
 Model roles are intentionally narrow:
 
-- search planner: reads objective, evidence, surface opportunities, prior evidence, and remaining budget, then emits a typed `SearchPlan`
-- candidate implementer: emits typed transform programs citing search briefs and surface opportunities
+- Search planner: reads the objective, evidence, surface opportunities, prior evidence, and remaining budget, then emits a typed `SearchPlan`.
+- Candidate implementer: emits typed transform programs citing search briefs and surface opportunities.
 
-Measurement selection is deterministic. Smoke evaluates compiled candidates that fit budget, small-dev screens in proposal order by comparison group, full-dev requires positive objective signal, confirmation checks unstable/runtime-sensitive finalists, and holdout is reserved for selected dev finalists.
+Measurement selection is deterministic:
 
-Ratchet validates every optimizer output. There are no hand-authored proposal recipes, candidate generators, or task-specific rule profiles in the core loop.
+- Smoke evaluates compiled candidates that fit budget.
+- Small-dev screens in proposal order by comparison group.
+- Full-dev requires positive objective signal.
+- Confirmation re-checks unstable or runtime-sensitive finalists.
+- Holdout is reserved for selected dev finalists.
+
+Ratchet validates every optimizer output. The core loop contains no hand-authored proposal recipes, candidate generators, or task-specific rule profiles.
 
 See [docs/architecture.md](docs/architecture.md) for artifact definitions, role boundaries, measurement semantics, and failure policy.
 
@@ -69,14 +75,14 @@ Run the optimizer:
 python3 -m ratchet optimize --config my-agent-ratchet/ratchet.toml
 ```
 
-The live optimizer output is intentionally human-facing. It follows Ratchet's reasoning loop:
+The live optimizer output is human-facing and follows Ratchet's reasoning loop:
 
-- `Observe`: baseline score, weak slices, and dominant failure labels
-- `Diagnose`: deterministic evidence extracted from eval traces
-- `Plan`: planner diagnosis and the concrete briefs Ratchet will try
-- `Build`: proposed transform programs and compiler/contract failures
-- `Test` / `Learn`: staged evidence, fixed/regressed cases, and frontier decisions
-- `Guard` / `Holdout` / `Decide`: confirmation, protected validation, and final selection
+- `Observe` — baseline score, weak slices, and dominant failure labels
+- `Diagnose` — deterministic evidence extracted from eval traces
+- `Plan` — planner diagnosis and the concrete briefs Ratchet will try
+- `Build` — proposed transform programs and compiler/contract failures
+- `Test` / `Learn` — staged evidence, fixed/regressed cases, and frontier decisions
+- `Guard` / `Holdout` / `Decide` — confirmation, protected validation, and final selection
 
 Optionally check eval-set and grader health before optimizing:
 
@@ -84,8 +90,7 @@ Optionally check eval-set and grader health before optimizing:
 python3 -m ratchet eval-health --config my-agent-ratchet/ratchet.toml
 ```
 
-The eval health command writes a readable `eval_health.md` and a complete ordered `eval_health.json`
-under `<out>/eval_health/`.
+The eval-health command writes a readable `eval_health.md` and a complete ordered `eval_health.json` under `<out>/eval_health/`.
 
 For a release-candidate config, run the combined preflight and strict eval-health gate:
 
@@ -159,7 +164,7 @@ Helper utilities:
 - `exact_text_grade(...)`
 - `numeric_tolerance_grade(...)`
 - `json_field_grade(...)`
-- `estimate_cost_usd(...)` is available in `ratchet.pricing`
+- `estimate_cost_usd(...)` (in `ratchet.pricing`)
 
 ## Contract Model
 
@@ -235,11 +240,12 @@ max_transform_operations = 8
 min_correctness_delta = 0.0 # optional; defaults to strict improvement for correctness and non-inferiority for cost/latency
 ```
 
-Relative paths in `ratchet.toml` are resolved relative to the config file itself.
-Set `samples_per_case > 1` for noisy agents or stochastic graders; Ratchet repeats every baseline and candidate case with separate cache entries and aggregates case outcomes by majority vote / mean score.
-Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1` and `stage_case_concurrency = 1` when `case_timeout_s > 0`; set `case_timeout_s = 0` for threaded case concurrency.
+Notes:
 
-`max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. Interactive runs can also set tool-call and turn ceilings. These are separate from deployed-policy constraints: an expensive or long-horizon candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed configured measurement budgets.
+- Relative paths in `ratchet.toml` are resolved relative to the config file itself.
+- Set `samples_per_case > 1` for noisy agents or stochastic graders. Ratchet repeats every baseline and candidate case with separate cache entries and aggregates case outcomes by majority vote / mean score.
+- Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1` and `stage_case_concurrency = 1` when `case_timeout_s > 0`; set `case_timeout_s = 0` to enable threaded case concurrency.
+- `max_dev_measurement_cost_usd` and `max_holdout_measurement_cost_usd` bound candidate evaluation spend. Interactive runs can also set tool-call and turn ceilings. These are separate from deployed-policy constraints: an expensive or long-horizon candidate may still be measured when it is useful frontier evidence, but deterministic code will not exceed configured measurement budgets.
 
 ## Commands
 
@@ -250,7 +256,7 @@ Per-case hard timeouts require serial case execution. Keep `case_concurrency = 1
 - `python3 -m ratchet optimize --config ratchet.toml`
 - `python3 -m ratchet assess-ideation --run-dir results/run --spec ideation_assessment.json`
 
-`run` remains as an alias for `optimize`.
+`run` is an alias for `optimize`.
 
 ## Outputs
 
@@ -273,11 +279,11 @@ Each run writes:
 - `report.md`: human-readable report
 - `exported_candidate/`: adapter-materialized candidate bundle
 
-Interrupted runs write `partial_run_manifest.json` and `partial_report.md` with the last progress events and incomplete case evaluations. Shared per-case cache rows live outside run directories under `.ratchet/cache/`, which is intentionally git-ignored.
+Interrupted runs write `partial_run_manifest.json` and `partial_report.md` with the last progress events and incomplete case evaluations. Shared per-case cache rows live outside run directories under `.ratchet/cache/`, which is git-ignored.
 
 ## Demo
 
-Ratchet ships one maintained demo in [demo/](demo/). It is a local order-desk tool-loop benchmark with authentication, read tools, mutating tools, hidden state, deterministic grading, and protected holdout. It is the release-candidate path for judging whether Ratchet is behaving like an optimizer rather than just producing artifacts.
+Ratchet ships one maintained demo in [demo/](demo/): a local order-desk tool-loop benchmark with authentication, read tools, mutating tools, hidden state, deterministic grading, and a protected holdout. It is the release-candidate path for judging whether Ratchet is behaving like an optimizer rather than just producing artifacts.
 
 Run the demo gate:
 
@@ -293,6 +299,6 @@ python3 -m ratchet optimize --config demo/ratchet.diagnostic_expanded.toml
 
 See [docs/benchmarks.md](docs/benchmarks.md) for the benchmark policy and [docs/release.md](docs/release.md) for the release gate.
 
-For live runs, copy `.env.example` to `.env` and set the API key required by your configured models, for example `OPENAI_API_KEY` for OpenAI models or `GEMINI_API_KEY` for Gemini models.
+For live runs, copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
 
 Ratchet's optimizer model is separate from the optimized agent. Configure `optimizer_model` and `optimizer_reasoning` as defaults for the research loop; override `search_planner_*` or `candidate_implementer_*` when a run should use different optimizer models per role. The agent may move to allowed models through compiled model-configuration transforms.
