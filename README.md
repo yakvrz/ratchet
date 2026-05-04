@@ -1,6 +1,6 @@
 # Ratchet
 
-![Ratchet](docs/assets/logo.png)
+<img src="docs/assets/logo.png" alt="Ratchet" width="200">
 
 A Python-first optimizer for agents.
 
