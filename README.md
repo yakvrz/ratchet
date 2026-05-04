@@ -1,10 +1,13 @@
 # Ratchet
 
-<img src="docs/assets/logo.png" alt="Ratchet" width="200">
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.png">
+    <img src="docs/assets/logo.png" alt="Ratchet" width="200">
+  </picture>
+</p>
 
-A Python-first optimizer for agents.
-
-You provide an agent and an eval set. Ratchet keeps the original agent as a frozen baseline, proposes typed program transforms against the surface your adapter declares, and promotes a candidate only if it beats the baseline on a protected holdout. The search planner and candidate implementer are LLMs, but every output is constrained to a typed schema and validated before it touches eval.
+Ratchet is a Python-first optimizer for agents. You bring an agent and an eval set, pick what to optimize for (correctness, cost, or latency), and Ratchet keeps the original agent as a frozen baseline, proposes typed program transforms against the surface your adapter declares, and promotes a candidate only if it beats the baseline on a protected holdout. The search planner and candidate implementer are LLMs, but every output is constrained to a typed schema and validated before it touches eval.
 
 ## Demo results
 
