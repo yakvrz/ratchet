@@ -1,46 +1,42 @@
-<p align="center">
-  <img src="docs/assets/logo.png" alt="Ratchet" width="260">
-</p>
-
 # Ratchet
+
+![Ratchet](docs/assets/logo.png)
 
 A Python-first optimizer for agents.
 
-You provide an agent and an eval set. Ratchet keeps the original agent as a frozen baseline, proposes typed program transforms against the surface your adapter declares, evaluates them under a fixed budget, and promotes a candidate only if it beats the baseline on a protected holdout.
-
-The search planner and candidate implementer are LLMs, but their outputs are constrained to typed schemas and validated before they touch eval. The core loop has no hand-authored proposal templates or task-specific rules.
+You provide an agent and an eval set. Ratchet keeps the original agent as a frozen baseline, proposes typed program transforms against the surface your adapter declares, evaluates them under a fixed budget, and promotes a candidate only if it beats the baseline on a protected holdout. The search planner and candidate implementer are LLMs, but their outputs are constrained to typed schemas and validated before they touch eval. The core loop has no hand-authored proposal templates or task-specific rules.
 
 ## Demo results
 
-The bundled demo is a 48-case order-desk tool-loop benchmark (authentication, read/mutate tools, hidden state, deterministic grading, protected holdout). On the release run with a `gemini-2.5-flash` baseline:
+The bundled demo is a 48-case order-desk tool-loop benchmark with authentication, read/mutate tools, hidden state, deterministic grading, and a protected holdout. On the release run with a `gemini-2.5-flash` baseline:
 
 | | Baseline | After Ratchet |
 |---|---|---|
-| Holdout pass rate | 62.5% | **81.25%** (+30% rel.) |
+| Holdout pass rate | 62.5% | 81.25% (+30% rel.) |
 | `cancel` slice | 58% | 100% |
 | `address` slice | 92% | 100% |
 | `ambiguity` slice | 0% | 25% |
 | Mean cost / case | $0.0018 | $0.0016 |
 | Mean tool calls / case | 3.04 | 2.79 |
 
-Total optimizer spend for the run: **$0.88**. The winning candidate was a `before_tool_call` precondition that tracks inspected `order_id`s in agent state and forces `get_order` before any mutation, plus a `domain_policy` patch for ambiguous requests.
+Total optimizer spend for the run: $0.88. The winning candidate was a `before_tool_call` precondition that tracks inspected `order_id`s in agent state and forces `get_order` before any mutation, plus a `domain_policy` patch for ambiguous requests.
 
-Reproduce:
+To reproduce:
 
-```bash
+```
 python3 -m ratchet optimize --config demo/ratchet.diagnostic_expanded.toml
 ```
 
 ## Scope
 
 - Python agents only.
-- Evals are required and grading is owned by the adapter.
+- Evals are required. Grading is owned by the adapter.
 - Optimization works through typed `TransformProgram`s applied to an adapter-declared `SurfaceSpec`. Arbitrary repo-wide source mutation is out of scope.
 - Objective modes: correctness, cost, latency.
 
 ## Pipeline
 
-```text
+```
 AgentHarness -> AdapterGenerator -> SurfaceSpec -> SurfaceOpportunity[]
   -> BaselineEvaluation -> EvidencePacket -> SearchPlan
   -> CandidateProposal[] -> TransformProgram -> CompiledCandidate
@@ -49,18 +45,18 @@ AgentHarness -> AdapterGenerator -> SurfaceSpec -> SurfaceOpportunity[]
 
 Measurement is staged: smoke (does it run), small-dev (screen by comparison group), full-dev (require objective signal), confirmation (re-check unstable finalists), holdout (selected finalists only).
 
-See [docs/architecture.md](docs/architecture.md) for artifact definitions and [docs/release.md](docs/release.md) for the release gate.
+See [docs/architecture.md](docs/architecture.md) and [docs/release.md](docs/release.md) for details.
 
 ## Quickstart
 
-```bash
+```
 python3 -m ratchet init --template python_function --out my-agent-ratchet
-# wire your agent into the generated scaffold, then:
-python3 -m ratchet check     --config my-agent-ratchet/ratchet.toml
-python3 -m ratchet optimize  --config my-agent-ratchet/ratchet.toml
+# wire your agent into the scaffold, then:
+python3 -m ratchet check    --config my-agent-ratchet/ratchet.toml
+python3 -m ratchet optimize --config my-agent-ratchet/ratchet.toml
 ```
 
-Other commands: `eval-health` (eval-set and grader sanity), `release-check` (preflight + strict eval-health), `assess-ideation` (planner/implementer discovery quality). `run` is an alias for `optimize`.
+Other commands: `eval-health`, `release-check`, `assess-ideation`. `run` is an alias for `optimize`.
 
 For live runs, copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
 
@@ -68,7 +64,7 @@ For live runs, copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
 
 An adapter implements:
 
-```python
+```
 surface_spec(cases) -> SurfaceSpec
 agent_spec()        -> AgentSpec
 run_case(case, candidate=None) -> RunRecord
@@ -78,19 +74,19 @@ export(candidate, out_dir) -> None
 
 For single-call agents, write a small harness and let Ratchet generate the adapter:
 
-```python
+```
 adapter = AdapterGenerator().build_runtime_adapter(harness)
 ```
 
-The harness owns request construction, output parsing, and grading. Ratchet owns hook execution, transform compilation, instrumentation, and the model-call runtime. `candidate=None` always means the original user-provided agent.
+The harness owns request construction, output parsing, and grading. Ratchet owns hook execution, transform compilation, instrumentation, and the model-call runtime. `candidate=None` means the original user-provided agent.
 
-For interactive (multi-turn, tool-using) agents, return the full trajectory through `DiagnosticTrace` rather than flattening to a final string — Ratchet uses trajectories as evidence. `GeneratedToolLoopAdapter` is available when you want Ratchet to own the model/tool loop.
+For multi-turn tool-using agents, return the full trajectory through `DiagnosticTrace`. Use `GeneratedToolLoopAdapter` when you want Ratchet to own the model/tool loop.
 
 ## Config
 
-`ratchet.toml` covers adapter wiring (`adapter`, `evals`, `out`, `env_file`), budgets (`dev_budget`, `holdout_budget`, `holdout_top_k`, `max_dev_measurement_cost_usd`, ...), optimizer-role models (`optimizer_model`, `search_planner_model`, `candidate_implementer_model` plus matching `*_reasoning` fields), and execution knobs (`samples_per_case`, `case_timeout_s`, `case_concurrency`, ...). The optimizer model is separate from the optimized agent; the agent can only move to models in `objective.constraints.allowed_models` via compiled model-configuration transforms.
+`ratchet.toml` covers adapter wiring, budgets, optimizer-role models, and execution knobs. The optimizer model is separate from the optimized agent; the agent can only move to models in `objective.constraints.allowed_models` via compiled model-configuration transforms.
 
-```toml
+```
 [ratchet.objective]
 mode = "correctness"  # correctness | cost | latency
 
@@ -104,8 +100,8 @@ max_transform_operations = 8
 Notes:
 
 - Per-case hard timeouts (`case_timeout_s > 0`) require serial execution. Set `case_timeout_s = 0` to enable threaded concurrency.
-- For noisy agents or stochastic graders, set `samples_per_case > 1`; Ratchet aggregates by majority vote / mean score.
-- `max_dev_measurement_cost_usd` and friends cap *evaluation* spend during a run. `max_cost_ratio` is separate and constrains the deployed candidate.
+- For noisy agents or stochastic graders, set `samples_per_case > 1`. Ratchet aggregates by majority vote / mean score.
+- `max_dev_measurement_cost_usd` and friends cap evaluation spend during a run. `max_cost_ratio` is separate and constrains the deployed candidate.
 
 `ratchet init` writes a populated `ratchet.toml`. The demo configs in [demo/](demo/) are working references.
 
